@@ -8,7 +8,7 @@
 
 ## 핵심 기능
 
-- **코드 섹션 무결성 (`include/reshield/integrity.h`)**: 외부 의존성 없는 FIPS 180-4 SHA-256 구현으로 빌드 시 실행 파일의 코드 섹션(`__TEXT,__text` / `.text`) 해시를 기록하고 런타임에 메모리에서 재검증.
+- **코드 섹션 무결성 (`include/reshield/integrity.h`)**: 외부 의존성 없는 FIPS 180-4 SHA-256 구현으로 빌드 시 실행 파일의 코드 섹션(`__TEXT,__text` / `.text`) 해시를 기록하고 런타임에 메모리에서 재검증(macOS·Linux). Windows PE의 `.text`는 봉인 도구만 지원한다.
 - **에셋 매니페스트 바인딩 (`include/reshield/manifest.h`)**: `tools/gen_manifest.py`로 에셋 디렉터리의 SHA-256 매니페스트를 생성하고, 그 루트 해시를 바이너리에 함께 봉인해 실행 파일과 리소스 번들의 짝을 런타임에 검증.
 - **메모리 W^X 및 OS 코드 서명 검증 (`include/reshield/attestation.h`)**:
   - macOS: `mach_vm_region`으로 코드 세그먼트의 W^X(읽기·실행 전용, 쓰기 금지) 확인(코드 섹션 전 범위를 영역 단위로 순회, 공백·쓰기 가능 영역은 실패) 및 `Security.framework`(`SecCodeCheckValidity`) 코드 서명 유효성 검증(서명 주체는 고정하지 않음).
@@ -40,7 +40,7 @@ make release-demo
 
 ## 내 프로젝트에 적용하기
 
-지원 플랫폼은 macOS(Mach-O 64)와 Linux(ELF64)다. Windows와 fat/universal Mach-O는 지원하지 않는다.
+지원 플랫폼은 macOS(Mach-O 64)와 Linux(ELF64)다. Windows(PE32+ x64)는 빌드·봉인 도구까지 준비되어 있고(mingw-w64 크로스 컴파일, `seal_binary.py`/`verify_release.py`의 PE 지원), 런타임 검증(코드 섹션 해시·W^X·코드 서명)은 아직 구현되지 않았다. Windows에서 `reshield_verify()`의 코드 섹션 검사는 `INTERNAL_ERROR`가 되며, 이 저장소에서는 Windows 실행을 검증하지 못했다(컴파일·링크와 봉인 도구 테스트만 확인). Windows ARM64와 fat/universal Mach-O는 지원하지 않는다. 자세한 내용은 [docs/integrity-verification.md](docs/integrity-verification.md#7-windows-pe32-x64-봉인-런타임-미구현).
 
 **1. 링크.** `libreshield.a`를 링크하고 `-Iinclude`를 추가한다. macOS는 `-framework Security -framework CoreFoundation`도 필요하다. `RSHLDCHK` 레코드는 `libreshield.a` 안에 있으며, 앱이 `reshield_verify()`를 호출하면 바이너리에 함께 링크된다.
 

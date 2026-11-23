@@ -385,6 +385,257 @@ def test_seal_tool_and_release_cases(tmpdir: str, repo_root: str, assets_dir: st
     assert not os.path.exists(os.path.join(tmpdir, "empty.manifest"))
     print("PASS: gen_manifest fails on an empty asset directory")
 
+# --- PE32+ support ---------------------------------------------------------------------
+
+PE_TEXT_FLAGS = 0x60000020  # CODE | EXECUTE | READ
+PE_DATA_FLAGS = 0xC0000040  # INITIALIZED_DATA | READ | WRITE
+PE_RDATA_FLAGS = 0x40000040  # INITIALIZED_DATA | READ
+PE_TEXT_BYTES = bytes((i * 7 + 3) & 0xFF for i in range(1000))
+PE_RECORD = struct.pack(seal_binary.RECORD_FMT, seal_binary.MAGIC, seal_binary.RECORD_VERSION,
+                        0, 0, 0, 0, b"\0" * 32, b"\0" * 32)
+
+
+def build_pe(sections=None, relocs=(), machine=0x8664, opt_magic=0x20B, checksum=0,
+             security_size=0) -> bytes:
+    """Synthesizes a minimal PE32+ image. sections: [(name, data, flags, virtual_size|None)].
+    relocs: [(type, rva)] written as a .reloc section. First section starts at RVA 0x1000."""
+    if sections is None:
+        sections = [
+            (b".text", PE_TEXT_BYTES, PE_TEXT_FLAGS, None),
+            (b".data", PE_RECORD + b"\xAA" * 40, PE_DATA_FLAGS, None),
+        ]
+    sections = list(sections)
+    if relocs:
+        pages: dict[int, list[int]] = {}
+        for typ, rva in relocs:
+            pages.setdefault(rva & ~0xFFF, []).append((typ << 12) | (rva & 0xFFF))
+        blob = b""
+        for page, entries in sorted(pages.items()):
+            if len(entries) % 2:
+                entries.append(0)  # IMAGE_REL_BASED_ABSOLUTE padding
+            blob += struct.pack("<II", page, 8 + 2 * len(entries))
+            blob += b"".join(struct.pack("<H", e) for e in entries)
+        sections.append((b".reloc", blob, PE_RDATA_FLAGS, None))
+
+    file_align, sect_align, headers_size = 0x200, 0x1000, 0x400
+    e_lfanew = 0x80
+    opt_size = 112 + 16 * 8
+    table_off = e_lfanew + 24 + opt_size
+    assert table_off + 40 * len(sections) <= headers_size
+
+    entries, body = [], b""
+    va, raw = sect_align, headers_size
+    reloc_dir = (0, 0)
+    for name, data, flags, vsize in sections:
+        raw_size = -(-len(data) // file_align) * file_align if data else 0
+        vs = len(data) if vsize is None else vsize
+        entries.append(struct.pack("<8sIIIIIIHHI", name, vs, va, raw_size, raw if raw_size else 0,
+                                   0, 0, 0, 0, flags))
+        body += data.ljust(raw_size, b"\0")
+        if name == b".reloc":
+            reloc_dir = (va, len(data))
+        va += -(-max(vs, 1) // sect_align) * sect_align
+        raw += raw_size
+
+    dos = bytearray(0x40)
+    dos[:2] = b"MZ"
+    struct.pack_into("<I", dos, 0x3C, e_lfanew)
+    file_hdr = struct.pack("<HHIIIHH", machine, len(sections), 0, 0, 0, opt_size, 0x22)
+    opt = bytearray(opt_size)
+    struct.pack_into("<HBB", opt, 0, opt_magic, 14, 0)
+    struct.pack_into("<Q", opt, 24, 0x140000000)  # ImageBase
+    struct.pack_into("<II", opt, 32, sect_align, file_align)
+    struct.pack_into("<II", opt, 56, va, headers_size)  # SizeOfImage, SizeOfHeaders
+    struct.pack_into("<I", opt, 64, checksum)
+    struct.pack_into("<I", opt, 108, 16)
+    struct.pack_into("<II", opt, 112 + 4 * 8, 0x5000 if security_size else 0, security_size)
+    struct.pack_into("<II", opt, 112 + 5 * 8, *reloc_dir)
+    header = bytes(dos).ljust(e_lfanew, b"\0") + b"PE\0\0" + file_hdr + bytes(opt) + b"".join(entries)
+    return header.ljust(headers_size, b"\0") + body
+
+
+def pe_checksum_reference(data: bytes) -> int:
+    """Independent PE checksum (32-bit dword sum with end-around carry, as pefile does it)."""
+    e_lfanew = struct.unpack_from("<I", data, 0x3C)[0]
+    cs_off = e_lfanew + 24 + 64
+    padded = data + b"\0" * (-len(data) % 4)
+    total = 0
+    for i in range(0, len(padded), 4):
+        if i == cs_off:
+            continue
+        total += struct.unpack_from("<I", padded, i)[0]
+        if total >= 1 << 32:
+            total = (total & 0xFFFFFFFF) + (total >> 32)
+    total = (total & 0xFFFF) + (total >> 16)
+    total = total + (total >> 16)
+    return (total & 0xFFFF) + len(data)
+
+
+def pe_text_range(data: bytes) -> tuple[int, int]:
+    img = seal_binary.parse_pe64(data)
+    text = [s for s in img.sections if s.name == b".text"][0]
+    return text.raw_offset, text.virtual_size
+
+
+def test_pe_support(tmpdir: str, repo_root: str) -> None:
+    py = sys.executable
+    seal_tool = os.path.join(repo_root, "tools", "seal_binary.py")
+    verify_tool = os.path.join(repo_root, "tools", "verify_release.py")
+
+    def write(name: str, data: bytes) -> str:
+        path = os.path.join(tmpdir, name)
+        with open(path, "wb") as f:
+            f.write(data)
+        return path
+
+    def seal(path: str, *extra: str) -> subprocess.CompletedProcess[str]:
+        return run_cmd([py, seal_tool, path, "--build-id", "5", *extra])
+
+    def verify_only(path: str) -> subprocess.CompletedProcess[str]:
+        return run_cmd([py, seal_tool, path, "--verify-only"])
+
+    def rejected(name: str, data: bytes, needle: str) -> None:
+        path = write(name, data)
+        r = seal(path)
+        assert r.returncode == 2 and needle in r.stderr, f"{name}: expected rejection '{needle}': {r}"
+        with open(path, "rb") as f:
+            assert f.read() == data, f"{name}: rejected file must stay unmodified"
+
+    # 1. seal + verify-only, header untouched when CheckSum is 0
+    base = build_pe()
+    pe = write("pe_ok.exe", base)
+    r = seal(pe)
+    assert r.returncode == 0 and "pe64(.text)" in r.stdout, r
+    r = verify_only(pe)
+    assert r.returncode == 0 and "match=True" in r.stdout and "pe64(.text)" in r.stdout, r
+    with open(pe, "rb") as f:
+        sealed = f.read()
+    off, size = pe_text_range(sealed)
+    assert (off, size) == (0x400, len(PE_TEXT_BYTES))
+    rec = seal_binary.find_integrity_record_offset(sealed)
+    _m, _v, sealed_flag, bid, _h, exp_size, exp_hash, _mr = struct.unpack_from(
+        seal_binary.RECORD_FMT, sealed, rec)
+    assert sealed_flag == 1 and bid == 5 and exp_size == len(PE_TEXT_BYTES)
+    assert exp_hash == hashlib.sha256(PE_TEXT_BYTES).digest(), "hash must cover exactly VirtualSize bytes of .text"
+    cs_off = seal_binary.parse_pe64(sealed).checksum_offset
+    assert struct.unpack_from("<I", sealed, cs_off)[0] == 0, "CheckSum 0 must stay 0"
+    diff = [i for i in range(len(base)) if base[i] != sealed[i]]
+    assert all(rec <= i < rec + seal_binary.RECORD_SIZE for i in diff), "only the record may change"
+    print("PASS: PE seal + --verify-only match; hash covers .text VirtualSize bytes; only the record changes")
+
+    # 2. 1-byte .text tamper
+    tampered = bytearray(sealed)
+    tampered[off + 10] ^= 0x01
+    r = verify_only(write("pe_tampered.exe", bytes(tampered)))
+    assert r.returncode == 1 and "match=False" in r.stdout, r
+    print("PASS: PE 1-byte .text change makes --verify-only fail")
+
+    # 3. CheckSum recomputed when non-zero, matches an independent implementation
+    pe_cs = write("pe_cs.exe", build_pe(checksum=0x12345))
+    assert seal(pe_cs).returncode == 0
+    with open(pe_cs, "rb") as f:
+        data = f.read()
+    got = struct.unpack_from("<I", data, seal_binary.parse_pe64(data).checksum_offset)[0]
+    assert got == pe_checksum_reference(data) and got != 0x12345, (hex(got), hex(pe_checksum_reference(data)))
+    odd = build_pe(sections=[(b".text", PE_TEXT_BYTES, PE_TEXT_FLAGS, None),
+                             (b".data", PE_RECORD + b"\xAA" * 41, PE_DATA_FLAGS, None)], checksum=1)
+    odd = odd + b"\x7f"  # odd file length (overlay byte)
+    pe_odd = write("pe_odd.exe", odd)
+    assert seal(pe_odd).returncode == 0
+    with open(pe_odd, "rb") as f:
+        data = f.read()
+    got = struct.unpack_from("<I", data, seal_binary.parse_pe64(data).checksum_offset)[0]
+    assert got == pe_checksum_reference(data), "odd-length file checksum"
+    print("PASS: PE CheckSum is recomputed (even and odd length) and matches the reference algorithm")
+
+    # 4. relocations
+    text_va = 0x1000
+    rejected("pe_reloc_text.exe", build_pe(relocs=[(10, text_va + 0x40), (10, text_va + 0x48)]),
+             "2 base relocation(s) fall inside .text (first at RVA 0x1040)")
+    ok_reloc = write("pe_reloc_data.exe", build_pe(relocs=[(10, 0x2000 + 8), (0, text_va + 4)]))
+    assert seal(ok_reloc).returncode == 0, "relocs outside .text and ABSOLUTE padding must not block sealing"
+    print("PASS: PE seal rejects relocations inside .text, ignores padding and .data relocations")
+
+    # 5. already signed (Security directory); verify-only still works on a signed PE
+    rejected("pe_signed.exe", build_pe(security_size=0x200), "seal before signing")
+    signed = bytearray(sealed)
+    sec_dir = seal_binary.parse_pe64(sealed).checksum_offset - 64 + 112 + 4 * 8
+    struct.pack_into("<II", signed, sec_dir, len(signed), 0x200)
+    r = verify_only(write("pe_signed_after.exe", bytes(signed)))
+    assert r.returncode == 0 and "match=True" in r.stdout, r
+    print("PASS: PE with a Security directory is rejected for sealing; sealed-then-signed still verifies")
+
+    # 6. record placement
+    inside_text = PE_TEXT_BYTES[:100] + PE_RECORD + PE_TEXT_BYTES[196:]
+    rejected("pe_rec_in_text.exe", build_pe(sections=[
+        (b".text", inside_text, PE_TEXT_FLAGS, None),
+        (b".data", b"\xAA" * 64, PE_DATA_FLAGS, None)]), "overlap")
+    rejected("pe_rec_partial.exe", build_pe(sections=[
+        (b".text", PE_TEXT_BYTES[:900] + PE_RECORD[:50], PE_TEXT_FLAGS, 950),
+        (b".data", PE_RECORD[50:] + b"\xAA" * 40, PE_DATA_FLAGS, None)]), "")
+    rejected("pe_rec_rdata.exe", build_pe(sections=[
+        (b".text", PE_TEXT_BYTES, PE_TEXT_FLAGS, None),
+        (b".rdata", PE_RECORD + b"\xAA" * 40, PE_RDATA_FLAGS, None)]), "writable data section")
+    print("PASS: PE seal rejects a record inside .text (overlap) or outside a writable data section")
+
+    # 7. section layout errors
+    data_sec = (b".data", PE_RECORD + b"\xAA" * 40, PE_DATA_FLAGS, None)
+    rejected("pe_no_text.exe", build_pe(sections=[data_sec]), "found 0")
+    rejected("pe_two_text.exe", build_pe(sections=[
+        (b".text", PE_TEXT_BYTES, PE_TEXT_FLAGS, None),
+        (b".text", PE_TEXT_BYTES[:300], PE_TEXT_FLAGS, None), data_sec]), "found 2")
+    rejected("pe_w_text.exe", build_pe(sections=[
+        (b".text", PE_TEXT_BYTES, PE_TEXT_FLAGS | 0x80000000, None), data_sec]), "writable")
+    rejected("pe_big_vsize.exe", build_pe(sections=[
+        (b".text", PE_TEXT_BYTES, PE_TEXT_FLAGS, 4096), data_sec]), "exceeds SizeOfRawData")
+    rejected("pe_text_prefix.exe", build_pe(sections=[
+        (b".text2", PE_TEXT_BYTES, PE_TEXT_FLAGS, None), data_sec]), "found 0")
+    print("PASS: PE seal rejects 0/2 .text sections, writable .text and VirtualSize > SizeOfRawData")
+
+    # 8. other machines / formats
+    rejected("pe_arm64.exe", build_pe(machine=0xAA64), "ARM64")
+    rejected("pe_x86.exe", build_pe(machine=0x14C), "Unsupported PE Machine")
+    rejected("pe_pe32.exe", build_pe(opt_magic=0x10B), "PE32+")
+    rejected("pe_truncated.exe", build_pe()[:0x90], "")
+    print("PASS: PE seal rejects ARM64 (not supported yet), x86, PE32 and truncated images")
+
+    # 9. executable extra section: warning only
+    warn_pe = write("pe_warn.exe", build_pe(sections=[
+        (b".text", PE_TEXT_BYTES, PE_TEXT_FLAGS, None),
+        (b".init", b"\x90" * 64, PE_TEXT_FLAGS, None), data_sec]))
+    r = seal(warn_pe)
+    assert r.returncode == 0 and ".init" in r.stderr and "warning" in r.stderr, r
+    print("PASS: PE seal only warns about other executable sections")
+
+    # 10. verify_release on a sealed PE; nm missing -> n/a, not a failure
+    r = run_cmd([py, verify_tool, pe])
+    assert r.returncode == 0 and "pe64(.text)" in r.stdout and "code_seal:       OK" in r.stdout, r
+    r = subprocess.run([py, verify_tool, pe], capture_output=True, text=True, env={"PATH": ""})
+    assert r.returncode == 0 and "defined_symbols: n/a" in r.stdout, r
+    r = run_cmd([py, verify_tool, write("pe_tampered2.exe", bytes(tampered))])
+    assert r.returncode == 1 and "code_seal:       FAIL" in r.stdout, r
+    print("PASS: verify_release handles PE (OK / tampered) and reports defined_symbols n/a without nm")
+
+    # 11. optional: a real EXE (e.g. mingw-w64 build of examples/integrity_demo.c)
+    real = os.environ.get("RESHIELD_TEST_PE_EXE")
+    if not real:
+        print("SKIP: RESHIELD_TEST_PE_EXE not set (real PE test)")
+        return
+    copy = os.path.join(tmpdir, "real.exe")
+    shutil.copy2(real, copy)
+    r = seal(copy)
+    if r.returncode == 0:
+        r = verify_only(copy)
+        assert r.returncode == 0 and "match=True" in r.stdout, r
+        r = run_cmd([py, verify_tool, copy])
+        assert r.returncode == 0, r
+        print(f"PASS: real PE {os.path.basename(real)} sealed and verified")
+    else:
+        # mingw's .ctors list in .text carries a base relocation unless linked without a
+        # .reloc section; that is a documented refusal, not a crash.
+        assert r.returncode == 2 and "base relocation(s) fall inside .text" in r.stderr, r
+        print(f"PASS: real PE {os.path.basename(real)} refused as documented: {r.stderr.strip()}")
+
 
 def main() -> int:
     repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -487,6 +738,8 @@ def main() -> int:
         shutil.copytree(assets_src, a2)
         test_status_mapping_and_records(tmp2, repo_root, a2)
         test_seal_tool_and_release_cases(tmp2, repo_root, a2)
+    with tempfile.TemporaryDirectory(prefix="reshield_pe_") as tmp3:
+        test_pe_support(tmp3, repo_root)
 
     print("All E2E seal workflow tests passed.")
     return 0

@@ -22,8 +22,12 @@ import seal_binary  # noqa: E402
 from manifest_path import is_safe_relative_path  # noqa: E402
 
 
-def count_defined_symbols(binary: str) -> int:
-    proc = subprocess.run(["nm", binary], capture_output=True, text=True)
+def count_defined_symbols(binary: str) -> int | str:
+    """Defined symbol count via nm, or "n/a" when nm is not installed (e.g. a Windows CI box)."""
+    try:
+        proc = subprocess.run(["nm", binary], capture_output=True, text=True)
+    except FileNotFoundError:
+        return "n/a"
     if proc.returncode != 0:
         return 0
     return sum(

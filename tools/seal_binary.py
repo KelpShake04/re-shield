@@ -3,13 +3,14 @@
 Build-time binary sealing tool for re-shield v2 integrity records.
 
 Computes SHA-256 of the executable's code section (__TEXT,__text on 64-bit Mach-O;
-.text on 64-bit ELF) and embeds build_id, section size, code digest, and optional
+.text on 64-bit ELF; .text on PE32+ x64, VirtualSize bytes) and embeds build_id, section size, code digest, and optional
 asset manifest root digest into the unique RSHLDCHK v2 record.
 """
 
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import hashlib
 import os
 import shutil
@@ -88,6 +89,191 @@ def find_elf64_text(data: bytes) -> tuple[int, int]:
     raise ValueError("Could not find .text section in ELF binary")
 
 
+# --- PE32+ (Windows x64) ---------------------------------------------------------------
+
+PE_MACHINE_AMD64 = 0x8664
+PE_MACHINE_ARM64 = 0xAA64
+PE_OPT_MAGIC_PE32PLUS = 0x20B
+IMAGE_SCN_MEM_EXECUTE = 0x20000000
+IMAGE_SCN_MEM_WRITE = 0x80000000
+IMAGE_DIRECTORY_ENTRY_SECURITY = 4
+IMAGE_DIRECTORY_ENTRY_BASERELOC = 5
+IMAGE_REL_BASED_ABSOLUTE = 0
+PE_SECTION_HEADER_SIZE = 40
+
+
+@dataclasses.dataclass(frozen=True)
+class PeSection:
+    name: bytes
+    virtual_size: int
+    virtual_address: int
+    raw_size: int
+    raw_offset: int
+    characteristics: int
+
+
+@dataclasses.dataclass(frozen=True)
+class PeImage:
+    checksum_offset: int  # file offset of OptionalHeader.CheckSum
+    directories: tuple[tuple[int, int], ...]  # (value, size); Security's value is a FILE offset
+    sections: tuple[PeSection, ...]
+
+    def directory(self, index: int) -> tuple[int, int]:
+        return self.directories[index] if index < len(self.directories) else (0, 0)
+
+
+def parse_pe64(data: bytes) -> PeImage:
+    if len(data) < 0x40 or data[:2] != b"MZ":
+        raise ValueError("Not a PE file (missing MZ header)")
+    e_lfanew = struct.unpack_from("<I", data, 0x3C)[0]
+    if e_lfanew % 4 != 0 or e_lfanew + 24 > len(data):
+        raise ValueError(f"Invalid PE header offset e_lfanew=0x{e_lfanew:x}")
+    if data[e_lfanew : e_lfanew + 4] != b"PE\x00\x00":
+        raise ValueError("Missing PE signature")
+    machine, nsections, _ts, _symtab, _nsyms, opt_size, _chars = struct.unpack_from(
+        "<HHIIIHH", data, e_lfanew + 4
+    )
+    if machine == PE_MACHINE_ARM64:
+        raise ValueError("PE ARM64 (Machine 0xAA64) is not supported yet; only x64 (0x8664)")
+    if machine != PE_MACHINE_AMD64:
+        raise ValueError(f"Unsupported PE Machine 0x{machine:04x}; only x64 (0x8664) is supported")
+
+    opt = e_lfanew + 24
+    if opt_size < 112 or opt + opt_size > len(data):
+        raise ValueError("PE optional header is truncated")
+    magic = struct.unpack_from("<H", data, opt)[0]
+    if magic != PE_OPT_MAGIC_PE32PLUS:
+        raise ValueError(f"Unsupported PE optional header magic 0x{magic:x} (expected PE32+ 0x20b)")
+    ndirs = struct.unpack_from("<I", data, opt + 108)[0]
+    if ndirs > 16 or 112 + ndirs * 8 > opt_size:
+        raise ValueError("PE data directory table is malformed")
+    directories = tuple(struct.unpack_from("<II", data, opt + 112 + i * 8) for i in range(ndirs))
+
+    sect_off = opt + opt_size
+    if sect_off + nsections * PE_SECTION_HEADER_SIZE > len(data):
+        raise ValueError("PE section table is truncated")
+    sections = []
+    for i in range(nsections):
+        off = sect_off + i * PE_SECTION_HEADER_SIZE
+        raw_name = data[off : off + 8]
+        vsize, vaddr, rsize, roff = struct.unpack_from("<IIII", data, off + 8)
+        chars = struct.unpack_from("<I", data, off + 36)[0]
+        sections.append(PeSection(raw_name.split(b"\x00", 1)[0], vsize, vaddr, rsize, roff, chars))
+    return PeImage(opt + 64, directories, tuple(sections))
+
+
+def pe_find_text(image: PeImage) -> PeSection:
+    texts = [sec for sec in image.sections if sec.name == b".text"]
+    if len(texts) != 1:
+        raise ValueError(f"Expected exactly one .text section in PE, found {len(texts)}")
+    text = texts[0]
+    if text.characteristics & IMAGE_SCN_MEM_WRITE:
+        raise ValueError(".text section is writable (IMAGE_SCN_MEM_WRITE)")
+    if text.virtual_size > text.raw_size:
+        raise ValueError(
+            f".text VirtualSize ({text.virtual_size}) exceeds SizeOfRawData ({text.raw_size})"
+        )
+    return text
+
+
+def pe_rva_to_offset(image: PeImage, rva: int) -> int:
+    for sec in image.sections:
+        span = max(sec.virtual_size, sec.raw_size)
+        if sec.virtual_address <= rva < sec.virtual_address + span:
+            delta = rva - sec.virtual_address
+            if delta >= sec.raw_size:
+                break
+            return sec.raw_offset + delta
+    raise ValueError(f"RVA 0x{rva:x} is not backed by file data in any section")
+
+
+def find_pe64_text(data: bytes) -> tuple[int, int]:
+    text = pe_find_text(parse_pe64(data))
+    return text.raw_offset, text.virtual_size
+
+
+def pe_text_relocations(data: bytes, image: PeImage) -> tuple[int, int]:
+    """Counts base relocations that land inside .text: (count, first RVA or -1)."""
+    text = pe_find_text(image)
+    rva, size = image.directory(IMAGE_DIRECTORY_ENTRY_BASERELOC)
+    if size == 0:
+        return 0, -1
+    start = pe_rva_to_offset(image, rva)
+    if start + size > len(data):
+        raise ValueError("PE base relocation directory extends past end of file")
+    count, first = 0, -1
+    pos, end = start, start + size
+    while pos < end:
+        if end - pos < 8:
+            raise ValueError("Malformed PE base relocation block header")
+        page_rva, block_size = struct.unpack_from("<II", data, pos)
+        if block_size < 8 or block_size % 2 != 0 or pos + block_size > end:
+            raise ValueError(f"Malformed PE base relocation block (size {block_size})")
+        for i in range((block_size - 8) // 2):
+            entry = struct.unpack_from("<H", data, pos + 8 + i * 2)[0]
+            if entry >> 12 == IMAGE_REL_BASED_ABSOLUTE:
+                continue
+            target = page_rva + (entry & 0xFFF)
+            if text.virtual_address <= target < text.virtual_address + text.virtual_size:
+                count += 1
+                if first < 0:
+                    first = target
+        pos += block_size
+    return count, first
+
+
+def pe_checksum(data: bytes, checksum_offset: int) -> int:
+    """Standard PE checksum: 16-bit one's-complement word sum (CheckSum field as zero) + file size."""
+    total = 0
+    for off in range(0, len(data) - 1, 2):
+        if checksum_offset <= off < checksum_offset + 4:
+            continue
+        total += data[off] | (data[off + 1] << 8)
+    if len(data) % 2:
+        total += data[-1]
+    total = (total & 0xFFFF) + (total >> 16)
+    total = (total & 0xFFFF) + (total >> 16)
+    return total + len(data)
+
+
+def check_pe_sealable(data: bytes, rec_off: int) -> None:
+    """Seal-time checks; a PE failing any of them cannot be sealed safely."""
+    image = parse_pe64(data)
+    text = pe_find_text(image)
+
+    _sec_value, sec_size = image.directory(IMAGE_DIRECTORY_ENTRY_SECURITY)
+    if sec_size != 0:
+        raise ValueError(
+            "PE already carries an Authenticode signature (Security directory is not empty): "
+            "seal before signing"
+        )
+
+    n_reloc, first_rva = pe_text_relocations(data, image)
+    if n_reloc:
+        raise ValueError(
+            f"{n_reloc} base relocation(s) fall inside .text (first at RVA 0x{first_rva:x}): "
+            "the loaded code would differ from the file, so the hash cannot match"
+        )
+
+    rec_end = rec_off + RECORD_SIZE
+    host = [
+        sec for sec in image.sections
+        if sec.raw_offset <= rec_off and rec_end <= sec.raw_offset + sec.raw_size
+    ]
+    if not host or not (host[0].characteristics & IMAGE_SCN_MEM_WRITE) or host[0] is text:
+        raise ValueError("Integrity record must live in a writable data section (e.g. .data)")
+
+    others = [
+        sec.name.decode("ascii", "replace") for sec in image.sections
+        if sec is not text and sec.characteristics & IMAGE_SCN_MEM_EXECUTE
+    ]
+    if others:
+        print(
+            f"[seal_binary] warning: other executable section(s) are not hashed: {', '.join(others)}",
+            file=sys.stderr,
+        )
+
+
 def find_code_section(data: bytes) -> tuple[str, int, int]:
     if data[:4] in FAT_MAGICS:
         raise ValueError(
@@ -100,7 +286,10 @@ def find_code_section(data: bytes) -> tuple[str, int, int]:
     if data[:4] == b"\x7fELF":
         off, size = find_elf64_text(data)
         return "elf64(.text)", off, size
-    raise ValueError("Unsupported binary format (expected 64-bit Mach-O or ELF)")
+    if data[:2] == b"MZ":
+        off, size = find_pe64_text(data)
+        return "pe64(.text)", off, size
+    raise ValueError("Unsupported binary format (expected 64-bit Mach-O, ELF or PE32+ x64)")
 
 
 def find_integrity_record_offset(data: bytes) -> int:
@@ -127,11 +316,11 @@ def find_integrity_record_offset(data: bytes) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Seal a binary with code + optional manifest SHA-256")
-    parser.add_argument("binary", help="Path to the compiled Mach-O or ELF executable")
+    parser.add_argument("binary", help="Path to the compiled Mach-O, ELF or PE32+ executable")
     parser.add_argument("--manifest", help="Optional asset manifest file to bind into the binary")
     parser.add_argument("--build-id", type=int, default=1, help="Numeric build identifier (default: 1)")
     parser.add_argument("--verify-only", action="store_true", help="Check seal without modifying file")
-    parser.add_argument("--no-codesign", action="store_true", help="Skip macOS ad-hoc codesign")
+    parser.add_argument("--no-codesign", action="store_true", help="Skip macOS ad-hoc codesign (Mach-O only)")
     args = parser.parse_args()
 
     with open(args.binary, "rb") as f:
@@ -169,6 +358,9 @@ def main() -> int:
         )
         return 0 if ok else 1
 
+    if fmt_name.startswith("pe64"):
+        check_pe_sealable(bytes(buf), rec_off)
+
     packed = struct.pack(
         RECORD_FMT,
         MAGIC,
@@ -181,6 +373,13 @@ def main() -> int:
         manifest_digest,
     )
     buf[rec_off : rec_off + RECORD_SIZE] = packed
+
+    if fmt_name.startswith("pe64"):
+        # A zero CheckSum means "not computed" and stays zero; otherwise keep it consistent.
+        cs_off = parse_pe64(bytes(buf)).checksum_offset
+        if struct.unpack_from("<I", buf, cs_off)[0] != 0:
+            struct.pack_into("<I", buf, cs_off, 0)
+            struct.pack_into("<I", buf, cs_off, pe_checksum(bytes(buf), cs_off))
 
     # Write next to the target and rename over it so a failed write never leaves a truncated binary.
     target = os.path.realpath(args.binary)
@@ -195,7 +394,7 @@ def main() -> int:
             os.unlink(tmp_path)
         raise
 
-    if sys.platform == "darwin" and not args.no_codesign:
+    if sys.platform == "darwin" and not args.no_codesign and fmt_name.startswith("macho"):
         subprocess.run(
             ["codesign", "-s", "-", "--force", args.binary],
             check=True,
