@@ -14,8 +14,8 @@ typedef enum reshield_attestation_status {
 /**
  * Verifies that the main executable's in-memory code section obeys W^X
  * (readable + executable, NOT writable).
- * - macOS: mach_vm_region() on __TEXT,__text.
- * - Linux: /proc/self/maps check for r-xp on .text mapping.
+ * - macOS: mach_vm_region() walked over the whole __TEXT,__text range (gaps fail).
+ * - Linux: /proc/self/maps; the whole .text range must be covered by r-x mappings.
  */
 reshield_attestation_status_t reshield_verify_code_page_wx(void);
 
