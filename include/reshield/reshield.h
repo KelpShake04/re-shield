@@ -90,6 +90,18 @@ reshield_status_t reshield_verify(const reshield_config_t *config,
 const char *reshield_status_name(reshield_status_t status);
 
 /**
+ * Serializes a report as one line of JSON (schema version "v":1) for logging or
+ * telemetry: {"v","status","status_code","failed_checks","build_id",
+ * "failed_asset_path","code":{expected/actual size and sha256}}.
+ * snprintf semantics: returns the length the full output needs (excluding the NUL),
+ * writes at most cap bytes including the NUL, truncates safely; buf may be NULL with
+ * cap 0 to size the buffer. Returns 0 for a NULL report. Non-ASCII bytes in the
+ * asset path are written as \u00XX. A report is an unauthenticated claim from the
+ * client: do not treat it as proof of integrity on the server.
+ */
+size_t reshield_report_to_json(const reshield_report_t *report, char *buf, size_t cap);
+
+/**
  * Overwrites [ptr, ptr + len) with zeroes using a volatile pointer so the
  * compiler does not optimize away the wipe.
  */

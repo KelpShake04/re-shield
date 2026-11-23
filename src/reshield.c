@@ -160,6 +160,104 @@ reshield_status_t reshield_verify(const reshield_config_t *config,
 #endif
 }
 
+typedef struct {
+    char  *buf;
+    size_t cap;
+    size_t len; /* length the full output needs, may exceed cap */
+} json_out_t;
+
+static void json_ch(json_out_t *o, char c) {
+    if (o->len + 1u < o->cap) {
+        o->buf[o->len] = c;
+    }
+    o->len++;
+}
+
+static void json_raw(json_out_t *o, const char *s) {
+    while (*s != '\0') {
+        json_ch(o, *s++);
+    }
+}
+
+static void json_str(json_out_t *o, const char *s) {
+    static const char hex[] = "0123456789abcdef";
+    json_ch(o, '"');
+    for (; *s != '\0'; s++) {
+        unsigned char c = (unsigned char)*s;
+        if (c == '"' || c == '\\') {
+            json_ch(o, '\\');
+            json_ch(o, (char)c);
+        } else if (c < 0x20u || c >= 0x7fu) {
+            /* Asset paths come from the manifest and may not be valid UTF-8; escape
+             * every non-printable-ASCII byte so the output is always valid JSON. */
+            json_raw(o, "\\u00");
+            json_ch(o, hex[c >> 4]);
+            json_ch(o, hex[c & 0xfu]);
+        } else {
+            json_ch(o, (char)c);
+        }
+    }
+    json_ch(o, '"');
+}
+
+static void json_hex(json_out_t *o, const uint8_t *p, size_t n) {
+    static const char hex[] = "0123456789abcdef";
+    json_ch(o, '"');
+    for (size_t i = 0; i < n; i++) {
+        json_ch(o, hex[p[i] >> 4]);
+        json_ch(o, hex[p[i] & 0xfu]);
+    }
+    json_ch(o, '"');
+}
+
+static void json_u64(json_out_t *o, uint64_t v) {
+    char tmp[21];
+    size_t i = sizeof(tmp);
+    tmp[--i] = '\0';
+    do {
+        tmp[--i] = (char)('0' + (int)(v % 10u));
+        v /= 10u;
+    } while (v != 0u);
+    json_raw(o, &tmp[i]);
+}
+
+size_t reshield_report_to_json(const reshield_report_t *report, char *buf, size_t cap) {
+    json_out_t o = { buf, (buf != NULL) ? cap : 0u, 0u };
+    if (report == NULL) {
+        return 0u;
+    }
+    const reshield_integrity_result_t *c = &report->code_result;
+
+    json_raw(&o, "{\"v\":1,\"status\":");
+    json_str(&o, reshield_status_name(report->status));
+    json_raw(&o, ",\"status_code\":");
+    json_u64(&o, (uint64_t)report->status);
+    json_raw(&o, ",\"failed_checks\":");
+    json_u64(&o, report->failed_checks);
+    json_raw(&o, ",\"build_id\":");
+    json_u64(&o, report->build_id);
+    json_raw(&o, ",\"failed_asset_path\":");
+    /* failed_asset_path is a fixed buffer: bound the read in case it is not terminated. */
+    char path[sizeof(report->failed_asset_path)];
+    memcpy(path, report->failed_asset_path, sizeof(path));
+    path[sizeof(path) - 1u] = '\0';
+    json_str(&o, path);
+    json_raw(&o, ",\"code\":{\"expected_size\":");
+    json_u64(&o, c->expected_size);
+    json_raw(&o, ",\"actual_size\":");
+    json_u64(&o, c->actual_size);
+    json_raw(&o, ",\"expected_sha256\":");
+    json_hex(&o, c->expected_sha256, sizeof(c->expected_sha256));
+    json_raw(&o, ",\"actual_sha256\":");
+    json_hex(&o, c->actual_sha256, sizeof(c->actual_sha256));
+    json_raw(&o, "}}");
+
+    if (o.cap > 0u) {
+        o.buf[(o.len < o.cap) ? o.len : o.cap - 1u] = '\0';
+    }
+    return o.len;
+}
+
 void reshield_secure_zero(void *ptr, size_t len) {
     if (ptr == NULL || len == 0) {
         return;
