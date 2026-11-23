@@ -23,7 +23,7 @@ typedef enum reshield_detect_flags {
 typedef enum reshield_policy {
     RESHIELD_POLICY_REPORT    = 0, /* Return flags only; caller decides */
     RESHIELD_POLICY_CALLBACK  = 1, /* Invoke user callback with detected flags */
-    RESHIELD_POLICY_TERMINATE = 2  /* Exit quietly via _exit(1) without diagnostics */
+    RESHIELD_POLICY_TERMINATE = 2  /* Terminate process via _exit(1) */
 } reshield_policy_t;
 
 typedef void (*reshield_detect_cb_t)(uint32_t flags, void *user_data);

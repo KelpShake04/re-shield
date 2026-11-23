@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Before/after reversing difficulty comparison script for examples/sample_game.c.
+Before/after comparison script for re-shield's first-party sample (examples/sample_game.c).
 
-Compares:
-  - build/sample_game_unprotected  (plain build, no re-shield, unstripped)
-  - build/sample_game_protected    (libreshield.a + XOR key + strip + seal_binary.py)
+Compares two builds of this repository's own demo binary (unprotected vs protected)
+to measure symbol stripping, plaintext config exposure, and synthetic 1-byte
+corruption detection.
 """
 
 from __future__ import annotations

@@ -29,7 +29,7 @@ typedef enum reshield_threat_flags {
 typedef enum reshield_action {
     RESHIELD_ACTION_REPORT    = 0, /* Return threat bitmask only */
     RESHIELD_ACTION_CALLBACK  = 1, /* Invoke callback with threat bitmask */
-    RESHIELD_ACTION_TERMINATE = 2  /* Quietly exit via _exit(1) without diagnostics */
+    RESHIELD_ACTION_TERMINATE = 2  /* Terminate process via _exit(1) */
 } reshield_action_t;
 
 typedef void (*reshield_threat_cb_t)(uint32_t threats, void *user_data);
