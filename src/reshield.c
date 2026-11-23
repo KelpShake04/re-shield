@@ -15,10 +15,26 @@ const char *reshield_platform_name(void) {
     return "macos";
 #elif defined(__linux__)
     return "linux";
+#elif defined(_WIN32)
+    return "windows";
 #else
     return "unsupported";
 #endif
 }
+
+/* Fallback for platforms with no attestation_*.c backend: without these definitions the
+ * library does not link. _WIN32 is deliberately included until the Windows backends land
+ * (M4/M5); then exclude it here with `&& !defined(_WIN32)`. UNSUPPORTED is silently
+ * accepted by reshield_verify(), like the Linux codesign check. */
+#if !defined(__APPLE__) && !defined(__linux__)
+reshield_attestation_status_t reshield_verify_code_page_wx(void) {
+    return RESHIELD_ATTEST_UNSUPPORTED;
+}
+
+reshield_attestation_status_t reshield_verify_os_codesign(void) {
+    return RESHIELD_ATTEST_UNSUPPORTED;
+}
+#endif
 
 reshield_config_t reshield_default_config(void) {
     reshield_config_t cfg = {
