@@ -1,6 +1,6 @@
 # re-shield
 
-소프트웨어/게임을 리버스 엔지니어링(디컴파일, 메모리 덤프, 디버거 attach)으로부터 보호하는 안티 리버싱 도구 개념. 현재는 **개념 설계 단계**이며 동작하는 구현은 없다.
+소프트웨어/게임을 리버스 엔지니어링(디컴파일, 메모리 덤프, 디버거 attach)으로부터 보호하는 안티 리버싱 도구. 현재는 **1차 PoC(디버거 attach 탐지/차단, C11)** 가 구현된 상태다.
 
 ## 배경
 
@@ -28,7 +28,7 @@
 - 핵심 로직은 제어 흐름 난독화(flattening) 또는 간단한 바이트코드 인터프리터로 우회.
 
 ### 2. 동적 분석 방지
-- macOS: `ptrace(PT_DENY_ATTACH)` 호출로 디버거 attach 차단.
+- macOS: `sysctl`(`P_TRACED`) 기반 비파괴 탐지 + `ptrace(PT_DENY_ATTACH)` 호출로 디버거 attach 차단.
 - Linux: `/proc/self/status` TracerPid 확인 + `ptrace(PTRACE_TRACEME)` self-trace 트릭.
 - 공통: 실행 중 주기적으로 환경 재검사(타이밍 기반 디버거 탐지 — 브레이크포인트로 인한 실행 지연 측정).
 
@@ -46,13 +46,24 @@
 - 1차 구현은 네이티브 바이너리(C/C++) 대상. 스크립트 언어(바이트코드 VM 등)는 범위 밖.
 - 플랫폼: macOS·Linux 우선(현재 개발 환경 기준). Windows는 2차.
 
+## 빠른 시작 (디버거 attach 탐지 PoC)
+
+```bash
+make all
+make test
+./build/anti_debug_demo --mode=check
+```
+
+자세한 사용법, `lldb` 검증 방법, 알려진 우회 기법과 한계는 [docs/poc-anti-debug.md](docs/poc-anti-debug.md) 참고.
+개발·보안 연구 목적의 디버깅 시 `-DRESHIELD_DISABLE`로 모든 탐지/차단을 비활성화할 수 있다.
+
 ## 다음 단계
 
-- [ ] 대상 플랫폼/언어 확정 후 PoC: 디버거 attach 탐지 단일 기능부터 구현.
+- [x] 대상 플랫폼/언어 확정 후 PoC: 디버거 attach 탐지 단일 기능부터 구현. (C11, macOS/Linux — `include/reshield/anti_debug.h`, `src/anti_debug_*.c`)
 - [ ] 변조 탐지(체크섬) PoC.
 - [ ] 두 기능을 하나의 런타임 라이브러리로 통합.
 - [ ] 샘플 프로그램에 적용 전/후 리버싱 난이도 비교 시연.
 
 ## 상태
 
-개념 설계만 존재. 코드 없음.
+1차 PoC(디버거 attach 탐지·차단 + 타이밍 체크 + `RESHIELD_DISABLE` opt-out) 구현 완료. 변조 탐지 PoC 진행 예정.
