@@ -26,6 +26,7 @@ reshield_attestation_status_t reshield_verify_code_page_wx(void);
  * - macOS: Security.framework SecCodeCopySelf + SecCodeCheckValidity.
  * - Windows: WinVerifyTrust (Authenticode, no UI, no revocation check) on the EXE file.
  *   An UNSIGNED executable returns RESHIELD_ATTEST_FAILED.
+ *   The file checked is the one backing the mapped image (not the module path).
  * - Linux: returns RESHIELD_ATTEST_UNSUPPORTED.
  */
 reshield_attestation_status_t reshield_verify_os_codesign(void);
