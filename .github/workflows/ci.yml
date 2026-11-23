@@ -43,14 +43,15 @@ jobs:
         run: |
           call "%VSDIR%\VC\Auxiliary\Build\vcvars64.bat"
           set CFLAGS=/nologo /std:c11 /O2 /W3 /WX /I include
+          set TFLAGS=%CFLAGS% /D_CRT_SECURE_NO_WARNINGS /D_CRT_NONSTDC_NO_WARNINGS
           cl %CFLAGS% /c /Fo:build\lib\ src\sha256.c src\integrity_common.c src\integrity_windows.c src\file_windows.c src\manifest.c src\attestation_windows.c src\reshield.c || exit /b 1
           lib /nologo /OUT:build\reshield.lib build\lib\sha256.obj build\lib\integrity_common.obj build\lib\integrity_windows.obj build\lib\file_windows.obj build\lib\manifest.obj build\lib\attestation_windows.obj build\lib\reshield.obj || exit /b 1
           cl %CFLAGS% /Fo:build\ examples\integrity_demo.c build\reshield.lib /Fe:build\integrity_demo.exe /link /INCREMENTAL:NO || set FAIL=1
           cl %CFLAGS% /Fo:build\ examples\sample_game.c build\reshield.lib /Fe:build\sample_game.exe /link /INCREMENTAL:NO || set FAIL=1
-          cl %CFLAGS% /Fo:build\ tests\test_integrity.c build\reshield.lib /Fe:build\test_integrity.exe /link /INCREMENTAL:NO || set FAIL=1
-          cl %CFLAGS% /Fo:build\ tests\test_manifest.c build\reshield.lib /Fe:build\test_manifest.exe /link /INCREMENTAL:NO || set FAIL=1
-          cl %CFLAGS% /Fo:build\ tests\test_runtime.c build\reshield.lib /Fe:build\test_runtime.exe /link /INCREMENTAL:NO || set FAIL=1
-          cl %CFLAGS% /Fo:build\ tests\test_wx.c build\reshield.lib /Fe:build\test_wx.exe /link /INCREMENTAL:NO || set FAIL=1
+          cl %TFLAGS% /Fo:build\ tests\test_integrity.c build\reshield.lib /Fe:build\test_integrity.exe /link /INCREMENTAL:NO || set FAIL=1
+          cl %TFLAGS% /Fo:build\ tests\test_manifest.c build\reshield.lib /Fe:build\test_manifest.exe /link /INCREMENTAL:NO || set FAIL=1
+          cl %TFLAGS% /Fo:build\ tests\test_runtime.c build\reshield.lib /Fe:build\test_runtime.exe /link /INCREMENTAL:NO || set FAIL=1
+          cl %TFLAGS% /Fo:build\ tests\test_wx.c build\reshield.lib /Fe:build\test_wx.exe /link /INCREMENTAL:NO || set FAIL=1
           if defined FAIL exit /b 1
 
       - name: Unit tests
@@ -129,7 +130,7 @@ jobs:
         shell: cmd
         run: |
           call "%VSDIR%\VC\Auxiliary\Build\vcvars64.bat"
-          cl /nologo /std:c11 /O2 /W3 /I include /Fo:build\ src\sha256.c src\integrity_common.c src\manifest.c src\file_windows.c src\reshield.c examples\integrity_demo.c /Fe:build\integrity_demo.exe /link /INCREMENTAL:NO > build\build.log 2>&1
+          cl /nologo /std:c11 /O2 /W3 /I include /Fo:build\ src\sha256.c src\integrity_common.c src\integrity_windows.c src\attestation_windows.c src\manifest.c src\file_windows.c src\reshield.c examples\integrity_demo.c /Fe:build\integrity_demo.exe /link /INCREMENTAL:NO > build\build.log 2>&1
           set RC=%ERRORLEVEL%
           type build\build.log
           exit /b %RC%
