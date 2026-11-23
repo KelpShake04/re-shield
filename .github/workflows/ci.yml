@@ -15,6 +15,30 @@ jobs:
       - run: make clean && make all test release-demo
       - run: make sanitize
       - run: python3 tests/fuzz/test_parser_regressions.py
+      # `ld.so ./prog` makes /proc/self/exe the loader: must be an error exit, never a crash (>=128).
+      - run: |
+          cp build/integrity_demo /tmp/pie
+          python3 tools/seal_binary.py /tmp/pie --build-id 5
+          /tmp/pie
+          rc=0; /lib64/ld-linux-x86-64.so.2 /tmp/pie || rc=$?
+          echo "ld.so rc=$rc"
+          test "$rc" -ne 0 && test "$rc" -lt 128
+
+  # musl names the main program in dl_iterate_phdr (glibc leaves it empty); build and test there too.
+  linux-musl:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          docker run --rm -v "$PWD":/src -w /src alpine:3.22 sh -c '
+            apk add --no-cache gcc musl-dev make python3 binutils &&
+            make clean && make all test release-demo &&
+            for mode in "-pie -fPIE" "-no-pie" "-static" "-static-pie"; do
+              gcc -std=c11 -O2 -Iinclude examples/integrity_demo.c src/sha256.c src/integrity_common.c src/integrity_linux.c src/file_posix.c src/manifest.c src/attestation_linux.c src/reshield.c $mode -o /tmp/p &&
+              python3 tools/seal_binary.py /tmp/p --build-id 3 >/dev/null &&
+              /tmp/p | grep -q "status=OK" || { echo "FAILED: $mode"; exit 1; }
+              echo "OK: $mode"
+            done'
 
   macos:
     runs-on: macos-latest

@@ -43,6 +43,23 @@ def main() -> int:
     expect_value_error(sb.find_macho64_text, bytes(bad), "Mach-O nsects=0xffffffff")
     expect_value_error(sb.find_macho64_text, bytes(macho[: 32 + 70]), "Mach-O file cut inside segment")
 
+    # ELF: DT_TEXTREL / DF_TEXTREL make the loader patch .text; the sealer must refuse such a file.
+    def with_dynamic(entries):
+        dyn = b"".join(struct.pack("<qQ", t, v) for t, v in entries) + struct.pack("<qQ", 0, 0)
+        ph_off = len(elf)
+        out = bytearray(elf)
+        struct.pack_into("<Q", out, 32, ph_off)
+        struct.pack_into("<HH", out, 54, 56, 1)
+        out += struct.pack("<IIQQQQQQ", sb.PT_DYNAMIC, 0, ph_off + 56, 0, 0, len(dyn), len(dyn), 8)
+        out += dyn
+        return bytes(out)
+
+    expect_value_error(sb.check_elf_no_textrel, with_dynamic([(sb.DT_TEXTREL, 0)]), "ELF DT_TEXTREL")
+    expect_value_error(sb.check_elf_no_textrel, with_dynamic([(sb.DT_FLAGS, sb.DF_TEXTREL | 8)]),
+                       "ELF DF_TEXTREL")
+    sb.check_elf_no_textrel(with_dynamic([(sb.DT_FLAGS, 8)]))  # DF_BIND_NOW alone is fine
+    sb.check_elf_no_textrel(bytes(elf))  # no program headers: nothing to reject
+
     # The unmutated seeds still parse.
     assert sb.find_elf64_text(bytes(elf))[1] == 16
     assert sb.find_macho64_text(bytes(macho))[1] == 32

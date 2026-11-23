@@ -97,6 +97,35 @@ def find_elf64_text(data: bytes) -> tuple[int, int]:
     raise ValueError("Could not find .text section in ELF binary")
 
 
+DT_NULL, DT_TEXTREL, DT_FLAGS, DF_TEXTREL, PT_DYNAMIC = 0, 22, 30, 0x4, 2
+
+
+def check_elf_no_textrel(data: bytes) -> None:
+    """Rejects an ELF whose loader patches .text at load time (DT_TEXTREL / DF_TEXTREL):
+    the in-memory bytes would differ from the file bytes, so the sealed hash would never match."""
+    e_phoff = _unpack("<Q", data, 32)[0]
+    e_phentsize, e_phnum = _unpack("<HH", data, 54)
+    if e_phoff == 0 or e_phnum == 0 or e_phentsize < 56:
+        return
+    for i in range(e_phnum):
+        ph = e_phoff + i * e_phentsize
+        p_type = _unpack("<I", data, ph)[0]
+        if p_type != PT_DYNAMIC:
+            continue
+        p_offset, _vaddr, _paddr, p_filesz = _unpack("<QQQQ", data, ph + 8)
+        if p_offset > len(data):
+            raise ValueError("ELF PT_DYNAMIC lies outside the file")
+        for j in range(min(p_filesz, len(data) - p_offset) // 16):
+            tag, val = _unpack("<qQ", data, p_offset + j * 16)
+            if tag == DT_NULL:
+                break
+            if tag == DT_TEXTREL or (tag == DT_FLAGS and val & DF_TEXTREL):
+                raise ValueError(
+                    "ELF has DT_TEXTREL: the loader patches .text at load time, so the sealed hash "
+                    "would never match; relink without text relocations (position-independent code)"
+                )
+
+
 # --- PE32+ (Windows x64) ---------------------------------------------------------------
 
 PE_MACHINE_AMD64 = 0x8664
@@ -297,6 +326,7 @@ def find_code_section(data: bytes) -> tuple[str, int, int]:
         return "macho64(__TEXT,__text)", off, size
     if data[:4] == b"\x7fELF":
         off, size = find_elf64_text(data)
+        check_elf_no_textrel(data)
         return "elf64(.text)", off, size
     if data[:2] == b"MZ":
         off, size = find_pe64_text(data)
