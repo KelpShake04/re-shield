@@ -85,7 +85,7 @@ make release-demo
 
 현재 범위는 빌드·봉인 도구까지다. 런타임의 코드 섹션 검증, W^X 검증, WinVerifyTrust 코드 서명 검증은 구현되지 않았다(`reshield_verify()`는 Windows에서 코드 섹션을 찾지 못해 `RESHIELD_ERR_INTERNAL`을 반환한다). 이 저장소에는 Windows 실행 환경이 없어 Windows 바이너리를 실행해 보지 못했고, mingw-w64 크로스 컴파일(컴파일·링크)과 합성 PE를 쓰는 도구 테스트만 확인했다.
 
-지원 정책: 정식 지원 대상은 MSVC 빌드이고, mingw-w64는 맥/Linux에서의 크로스 컴파일·도구 테스트 전용이다. MSVC EXE의 `.text` 안 base relocation 여부는 아직 측정하지 못했다. CI의 `windows-msvc-probe` 잡(`.github/workflows/ci.yml`, 실험용이며 실패해도 CI를 실패시키지 않는다)이 `cl`로 `examples/integrity_demo.c`를 빌드해 `tools/pe_probe.py`와 `dumpbin` 결과를 아티팩트로 남긴다. 그 결과가 나오기 전까지 MSVC 지원은 "지원 예정, 미검증"이다.
+지원 정책: 정식 지원 대상은 MSVC 빌드이고, mingw-w64는 맥/Linux에서의 크로스 컴파일·도구 테스트 전용이다. CI의 `windows-msvc-probe` 잡(`.github/workflows/ci.yml`)이 `cl`로 `examples/integrity_demo.c`를 빌드해 `tools/pe_probe.py`와 `dumpbin` 결과를 아티팩트로 남긴다. 2026-11-24 측정(GitHub Actions `windows-latest`, run 45239478134)에서 `.text` 안 base relocation은 0개(전체 797개는 다른 섹션)였고 `seal_binary.py` 봉인에 성공했다. 즉 MSVC 링크 EXE는 봉인 가정(`.text`가 로드 시 바뀌지 않음)을 만족한다. 측정은 이 데모 한 개에 대한 것이므로, 다른 프로젝트의 링크 설정에서는 `pe_probe.py`로 직접 확인한다. 런타임 검증은 여전히 미구현이다.
 
 `seal_binary.py`와 `verify_release.py`는 PE32+ x64(Machine `0x8664`)를 지원한다. ARM64(`0xAA64`)와 PE32(32비트)는 오류로 거부한다.
 

@@ -54,7 +54,7 @@ make release-demo
 
 ## 내 프로젝트에 적용하기
 
-지원 플랫폼은 macOS(Mach-O 64)와 Linux(ELF64)다. Windows(PE32+ x64)는 빌드·봉인 도구까지 준비되어 있고(`seal_binary.py`/`verify_release.py`의 PE 지원), 정식 지원 대상은 MSVC 빌드이지만 MSVC EXE의 `.text` base relocation 여부를 CI(Windows 러너)에서 측정 중이라 "지원 예정, 미검증"이다. mingw-w64는 맥/Linux에서의 크로스 컴파일·도구 테스트 전용이며, 기본 링크 EXE는 `.text` 안 relocation 1개 때문에 봉인되지 않는다(`-Wl,--disable-dynamicbase -Wl,--disable-reloc-section`으로 봉인은 되지만 ASLR이 꺼지므로 배포용으로 권장하지 않는다). 런타임 검증(코드 섹션 해시·W^X·코드 서명)은 아직 구현되지 않았다. Windows에서 `reshield_verify()`의 코드 섹션 검사는 `INTERNAL_ERROR`가 되며, 이 저장소에서는 Windows 실행을 검증하지 못했다(컴파일·링크와 봉인 도구 테스트만 확인). Windows ARM64와 fat/universal Mach-O는 지원하지 않는다. 자세한 내용은 [docs/integrity-verification.md](docs/integrity-verification.md#7-windows-pe32-x64-봉인-런타임-미구현).
+지원 플랫폼은 macOS(Mach-O 64)와 Linux(ELF64)다. Windows(PE32+ x64)는 빌드·봉인 도구까지 준비되어 있고(`seal_binary.py`/`verify_release.py`의 PE 지원), 정식 지원 대상은 MSVC 빌드다. CI(GitHub Actions Windows 러너)에서 `cl`로 만든 `integrity_demo.exe`를 측정했더니 `.text` 안 base relocation이 0개였고(전체 797개는 다른 섹션) `seal_binary.py`가 봉인에 성공했다. 단 런타임 검증이 없어 "봉인 도구만 지원"이다. mingw-w64는 맥/Linux에서의 크로스 컴파일·도구 테스트 전용이며, 기본 링크 EXE는 `.text` 안 relocation 1개 때문에 봉인되지 않는다(`-Wl,--disable-dynamicbase -Wl,--disable-reloc-section`으로 봉인은 되지만 ASLR이 꺼지므로 배포용으로 권장하지 않는다). 런타임 검증(코드 섹션 해시·W^X·코드 서명)은 아직 구현되지 않았다. Windows에서 `reshield_verify()`의 코드 섹션 검사는 `INTERNAL_ERROR`가 되며, 이 저장소에서는 Windows 실행을 검증하지 못했다(컴파일·링크와 봉인 도구 테스트만 확인). Windows ARM64와 fat/universal Mach-O는 지원하지 않는다. 자세한 내용은 [docs/integrity-verification.md](docs/integrity-verification.md#7-windows-pe32-x64-봉인-런타임-미구현).
 
 **1. 링크.** `libreshield.a`를 링크하고 `-Iinclude`를 추가한다. macOS는 `-framework Security -framework CoreFoundation`도 필요하다. `RSHLDCHK` 레코드는 `libreshield.a` 안에 있으며, 앱이 `reshield_verify()`를 호출하면 바이너리에 함께 링크된다.
 
