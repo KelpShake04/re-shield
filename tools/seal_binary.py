@@ -30,6 +30,14 @@ FAT_MAGICS = (b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca", b"\xca\xfe\xba\xbf", b"\
 LC_SEGMENT_64 = 0x19
 
 
+def _unpack(fmt: str, data: bytes, offset: int) -> tuple:
+    """struct.unpack_from that reports a field outside the file as ValueError (untrusted headers)."""
+    try:
+        return struct.unpack_from(fmt, data, offset)
+    except (struct.error, OverflowError):
+        raise ValueError(f"Truncated or out-of-range header field at offset 0x{offset:x}") from None
+
+
 def find_macho64_text(data: bytes) -> tuple[int, int]:
     if len(data) < 32:
         raise ValueError("File too small for Mach-O 64-bit header")
@@ -48,12 +56,12 @@ def find_macho64_text(data: bytes) -> tuple[int, int]:
             raise ValueError(f"Invalid Mach-O load command size: {cmdsize}")
         if cmd == LC_SEGMENT_64:
             segname = data[offset + 8 : offset + 24].split(b"\x00", 1)[0]
-            nsects = struct.unpack_from("<I", data, offset + 64)[0]
+            nsects = _unpack("<I", data, offset + 64)[0]
             sect_off = offset + 72
             for _ in range(nsects):
                 sectname = data[sect_off : sect_off + 16].split(b"\x00", 1)[0]
                 s_segname = data[sect_off + 16 : sect_off + 32].split(b"\x00", 1)[0]
-                _addr, size, file_off = struct.unpack_from("<QQI", data, sect_off + 32)
+                _addr, size, file_off = _unpack("<QQI", data, sect_off + 32)
                 if segname == b"__TEXT" and s_segname == b"__TEXT" and sectname == b"__text":
                     return file_off, size
                 sect_off += 80
@@ -74,13 +82,13 @@ def find_elf64_text(data: bytes) -> tuple[int, int]:
         raise ValueError("ELF binary has no valid section header table")
 
     strtab_hdr_off = e_shoff + e_shstrndx * e_shentsize
-    strtab_off, strtab_size = struct.unpack_from("<QQ", data, strtab_hdr_off + 24)
+    strtab_off, strtab_size = _unpack("<QQ", data, strtab_hdr_off + 24)
     strtab = data[strtab_off : strtab_off + strtab_size]
 
     for i in range(e_shnum):
         sh_off = e_shoff + i * e_shentsize
-        sh_name = struct.unpack_from("<I", data, sh_off)[0]
-        file_off, size = struct.unpack_from("<QQ", data, sh_off + 24)
+        sh_name = _unpack("<I", data, sh_off)[0]
+        file_off, size = _unpack("<QQ", data, sh_off + 24)
         end = strtab.find(b"\x00", sh_name)
         name = strtab[sh_name:end] if end != -1 else strtab[sh_name:]
         if name == b".text":
