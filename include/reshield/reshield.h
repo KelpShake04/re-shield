@@ -44,7 +44,10 @@ typedef void (*reshield_violation_cb_t)(const reshield_report_t *report, void *u
 
 typedef struct reshield_config {
     uint32_t                enabled_checks;
-    int                     allow_unsealed; /* Non-zero: treat UNSEALED as OK during dev */
+    int                     allow_unsealed; /* Non-zero: treat UNSEALED as OK during dev. DEV ONLY:
+                                             * enabling it in a release build lets an attacker bypass
+                                             * the code and manifest checks by flipping the sealed
+                                             * byte of the record. Never ship with it set. */
     const char             *manifest_path;  /* Required when RESHIELD_CHECK_MANIFEST is set */
     const char             *asset_base_dir; /* Base directory for manifest relative paths */
     reshield_violation_cb_t on_violation;   /* Optional diagnostic callback on failure */

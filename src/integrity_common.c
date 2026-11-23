@@ -68,19 +68,24 @@ int reshield_digest_equal(const uint8_t a[RESHIELD_SHA256_SIZE],
 
 int reshield_verify_buffer(const void *data, size_t len,
                            const uint8_t expected_sha256[RESHIELD_SHA256_SIZE]) {
-#ifdef RESHIELD_DISABLE
-    (void)data;
-    (void)len;
-    (void)expected_sha256;
-    return 1;
-#else
+    /* Always compares, even with -DRESHIELD_DISABLE: this is app-logic hashing, not an integrity check. */
     if (expected_sha256 == NULL) {
         return 0;
     }
     uint8_t actual[RESHIELD_SHA256_SIZE];
     reshield_sha256(data, len, actual);
     return reshield_digest_equal(actual, expected_sha256);
-#endif
+}
+
+/* Record is structurally valid only with the expected magic/version and boolean flags.
+ * An invalid record is never treated as "unsealed": flipping version/magic must not
+ * turn a sealed binary into one that allow_unsealed accepts. */
+static int record_is_valid(const reshield_integrity_record_t *rec) {
+    static const uint8_t magic[RESHIELD_INTEGRITY_MAGIC_LEN] = { 'R', 'S', 'H', 'L', 'D', 'C', 'H', 'K' };
+    return memcmp(rec->magic, magic, sizeof(magic)) == 0 &&
+           rec->version == RESHIELD_INTEGRITY_RECORD_VERSION &&
+           rec->sealed <= 1u &&
+           rec->has_manifest <= 1u;
 }
 
 int reshield_get_sealed_manifest_root(uint8_t out_root[RESHIELD_SHA256_SIZE]) {
@@ -89,10 +94,14 @@ int reshield_get_sealed_manifest_root(uint8_t out_root[RESHIELD_SHA256_SIZE]) {
     }
     reshield_integrity_record_t rec;
     read_record(&rec);
-    if (rec.version != RESHIELD_INTEGRITY_RECORD_VERSION ||
-        rec.sealed == 0u ||
-        rec.has_manifest == 0u) {
+    if (!record_is_valid(&rec)) {
+        return -2;
+    }
+    if (rec.sealed == 0u) {
         return -1;
+    }
+    if (rec.has_manifest == 0u) {
+        return -2;
     }
     memcpy(out_root, rec.manifest_root_sha256, RESHIELD_SHA256_SIZE);
     return 0;
@@ -131,7 +140,9 @@ reshield_integrity_status_t reshield_verify_code_section(reshield_integrity_resu
     memcpy(res.manifest_root_sha256, rec.manifest_root_sha256, RESHIELD_SHA256_SIZE);
     reshield_sha256(code_ptr, (size_t)code_size, res.actual_sha256);
 
-    if (rec.version != RESHIELD_INTEGRITY_RECORD_VERSION || rec.sealed == 0u) {
+    if (!record_is_valid(&rec)) {
+        res.status = RESHIELD_INTEGRITY_TAMPERED;
+    } else if (rec.sealed == 0u) {
         res.status = RESHIELD_INTEGRITY_UNSEALED;
     } else if (rec.expected_size != code_size ||
                !reshield_digest_equal(res.actual_sha256, rec.expected_sha256)) {

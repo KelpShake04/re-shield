@@ -36,5 +36,5 @@ make release-demo
 
 ## 개발·테스트 빌드 옵션
 
-- `-DRESHIELD_DISABLE`: 모든 런타임 검증을 no-op으로 비활성화.
-- `cfg.allow_unsealed = 1`: `tools/seal_binary.py`를 거치지 않은 로컬 개발 빌드 허용.
+- `-DRESHIELD_DISABLE`: `reshield_verify()` 등 모든 런타임 무결성 검증을 no-op으로 비활성화. 단 `reshield_verify_buffer()`는 앱 로직(예: 키 커밋먼트 비교)이므로 이 빌드에서도 실제 SHA-256 비교를 수행한다.
+- `cfg.allow_unsealed = 1`: `tools/seal_binary.py`를 거치지 않은 로컬 개발 빌드 허용. **경고: 릴리스 빌드에서 켜면 sealed 바이트 변조만으로 코드·매니페스트 검사가 우회된다. 릴리스 금지.** (레코드 magic/version 불일치나 매니페스트 없이 봉인된 바이너리는 unsealed로 취급하지 않고 실패 처리한다.)

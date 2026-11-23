@@ -79,6 +79,102 @@ def run_cmd(cmd: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(cmd, capture_output=True, text=True)
 
 
+def resign(path: str) -> None:
+    """Re-sign after patching bytes so macOS still launches the binary."""
+    if sys.platform == "darwin":
+        subprocess.run(["codesign", "-s", "-", "--force", path], check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def patch_file(src: str, dst: str, offset: int, value: int) -> None:
+    shutil.copy2(src, dst)
+    with open(dst, "r+b") as f:
+        f.seek(offset)
+        f.write(bytes([value]))
+    resign(dst)
+
+
+def test_status_mapping_and_records(tmpdir: str, repo_root: str, assets_dir: str) -> None:
+    build = os.path.join(repo_root, "build")
+    integrity_demo = os.path.join(build, "integrity_demo")
+    sample_game = os.path.join(build, "sample_game")
+    sample_game_disabled = os.path.join(build, "sample_game_disabled")
+    gen_tool = os.path.join(repo_root, "tools", "gen_manifest.py")
+    seal_tool = os.path.join(repo_root, "tools", "seal_binary.py")
+
+    manifest = os.path.join(tmpdir, "s2.manifest")
+    subprocess.run([sys.executable, gen_tool, assets_dir, "-o", manifest], check=True,
+                   stdout=subprocess.DEVNULL)
+
+    # Disabled sample_game still rejects a wrong key (reshield_verify_buffer is app logic).
+    args = [manifest, assets_dir]
+    r = run_cmd([sample_game_disabled, *args, "WRONG-KEY"])
+    assert r.returncode == 1 and "ACCESS DENIED" in r.stdout, f"disabled wrong key accepted: {r}"
+    r = run_cmd([sample_game_disabled, *args, "STAGE-1-CLEAR-2026"])
+    assert r.returncode == 0 and "STAGE UNLOCKED" in r.stdout, f"disabled right key rejected: {r}"
+    print("PASS: disabled sample_game rejects wrong key and accepts the right key")
+
+    game = os.path.join(tmpdir, "s2_game")
+    shutil.copy2(sample_game, game)
+    subprocess.run([sys.executable, seal_tool, game, "--manifest", manifest, "--build-id", "7"],
+                   check=True, stdout=subprocess.DEVNULL)
+
+    # ROOT_MISMATCH / ASSET_TAMPERED / IO error map to distinct statuses (exit = 10 + status).
+    r = run_cmd([game, os.path.join(tmpdir, "missing.manifest"), assets_dir, "STAGE-1-CLEAR-2026"])
+    assert r.returncode == 17 and "INTERNAL_ERROR" in r.stderr, f"IO error mapping failed: {r}"
+    print("PASS: unreadable manifest maps to INTERNAL_ERROR")
+
+    # Multiple failures: code status wins, both failed_checks bits are reported.
+    demo = os.path.join(tmpdir, "s2_demo")
+    shutil.copy2(integrity_demo, demo)
+    subprocess.run([sys.executable, seal_tool, demo, "--manifest", manifest, "--build-id", "7"],
+                   check=True, stdout=subprocess.DEVNULL)
+    with open(demo, "rb") as f:
+        demo_bytes = f.read()
+    sentinel_off = find_symbol_file_offset(demo, demo_bytes, "reshield_checksum_sentinel")
+    bad_manifest = os.path.join(tmpdir, "s2_bad.manifest")
+    shutil.copy2(manifest, bad_manifest)
+    with open(bad_manifest, "ab") as f:
+        f.write(b"# tampered\n")
+    both = os.path.join(tmpdir, "s2_both")
+    patch_file(demo, both, sentinel_off, demo_bytes[sentinel_off] ^ 0x01)
+    r = run_cmd([both, f"--manifest={bad_manifest}", f"--assets={assets_dir}"])
+    assert r.returncode == 2 and "status=CODE_TAMPERED" in r.stdout and "failed_checks=0x9" in r.stderr, \
+        f"priority/bits failed: {r}"
+    print("PASS: CODE_TAMPERED wins over MANIFEST_MISMATCH and failed_checks has both bits (0x9)")
+
+    # Invalid records must not be treated as UNSEALED (allow_unsealed must not rescue them).
+    rec_off = seal_binary.find_integrity_record_offset(demo_bytes)
+    ver_off = rec_off + 8
+    bad_ver = os.path.join(tmpdir, "s2_badver")
+    patch_file(demo, bad_ver, ver_off, 3)
+    r = run_cmd([bad_ver, "--allow-unsealed"])
+    assert r.returncode == 2 and "status=CODE_TAMPERED" in r.stdout, f"bad version bypassed allow_unsealed: {r}"
+    bad_magic = os.path.join(tmpdir, "s2_badmagic")
+    patch_file(demo, bad_magic, rec_off, ord("X"))
+    r = run_cmd([bad_magic, "--allow-unsealed"])
+    assert r.returncode == 2 and "status=CODE_TAMPERED" in r.stdout, f"bad magic bypassed allow_unsealed: {r}"
+    print("PASS: invalid record (version/magic) is CODE_TAMPERED even with allow_unsealed")
+
+    # Documented dev-only behavior: clearing the sealed byte + allow_unsealed passes.
+    unsealed = os.path.join(tmpdir, "s2_unsealed")
+    patch_file(demo, unsealed, rec_off + 12, 0)
+    r = run_cmd([unsealed])
+    assert r.returncode == 1 and "status=UNSEALED" in r.stdout, f"strict unsealed failed: {r}"
+    r = run_cmd([unsealed, "--allow-unsealed"])
+    assert r.returncode == 0, f"allow_unsealed on valid unsealed record failed: {r}"
+    print("PASS: valid sealed==0 record is UNSEALED; allow_unsealed (dev only) accepts it")
+
+    # Sealed WITHOUT a manifest, but the app asks for manifest checking: not UNSEALED, no bypass.
+    nomanifest = os.path.join(tmpdir, "s2_nomanifest")
+    shutil.copy2(integrity_demo, nomanifest)
+    subprocess.run([sys.executable, seal_tool, nomanifest, "--build-id", "7"], check=True,
+                   stdout=subprocess.DEVNULL)
+    r = run_cmd([nomanifest, f"--manifest={manifest}", f"--assets={assets_dir}", "--allow-unsealed"])
+    assert r.returncode == 5 and "MANIFEST_MISMATCH" in r.stderr, f"sealed-without-manifest bypass: {r}"
+    print("PASS: sealed binary without manifest root fails MANIFEST check even with allow_unsealed")
+
+
 def test_path_rules() -> None:
     safe = gen_manifest_mod.is_safe_relative_path
     assert safe("a.cfg") and safe("sub/a.cfg") and safe("v1..2.cfg") and safe(".hidden/a.cfg")
@@ -208,6 +304,10 @@ def main() -> int:
         print("PASS: E2E disabled build (-DRESHIELD_DISABLE) passes unsealed for dev/QA")
 
     test_path_rules()
+    with tempfile.TemporaryDirectory(prefix="reshield_s2_") as tmp2:
+        a2 = os.path.join(tmp2, "assets")
+        shutil.copytree(assets_src, a2)
+        test_status_mapping_and_records(tmp2, repo_root, a2)
 
     print("All E2E seal workflow tests passed.")
     return 0

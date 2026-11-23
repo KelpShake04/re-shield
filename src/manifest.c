@@ -168,8 +168,15 @@ static reshield_manifest_status_t load_verified_manifest(
     uint8_t root_expected[RESHIELD_SHA256_SIZE];
     if (expected_root_sha256 != NULL) {
         memcpy(root_expected, expected_root_sha256, RESHIELD_SHA256_SIZE);
-    } else if (reshield_get_sealed_manifest_root(root_expected) != 0) {
-        return RESHIELD_MANIFEST_UNSEALED;
+    } else {
+        int rc = reshield_get_sealed_manifest_root(root_expected);
+        if (rc == -1) {
+            return RESHIELD_MANIFEST_UNSEALED;
+        }
+        if (rc != 0) {
+            /* Invalid record or sealed without a manifest root: never "unsealed" (no allow_unsealed bypass). */
+            return RESHIELD_MANIFEST_ROOT_MISMATCH;
+        }
     }
 
     char *buf = NULL;

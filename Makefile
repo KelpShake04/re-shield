@@ -31,6 +31,7 @@ DEMO_INTEGRITY          = $(BUILD_DIR)/integrity_demo
 DEMO_INTEGRITY_DISABLED = $(BUILD_DIR)/integrity_demo_disabled
 SAMPLE_GAME             = $(BUILD_DIR)/sample_game
 SAMPLE_GAME_SEALED      = $(BUILD_DIR)/sample_game_sealed
+SAMPLE_GAME_DISABLED    = $(BUILD_DIR)/sample_game_disabled
 SAMPLE_MANIFEST         = $(BUILD_DIR)/sample_assets.manifest
 
 TEST_INTEGRITY          = $(BUILD_DIR)/test_integrity
@@ -62,6 +63,9 @@ $(DEMO_INTEGRITY_DISABLED): examples/integrity_demo.c $(LIB_SRCS) | $(BUILD_DIR)
 
 $(SAMPLE_GAME): examples/sample_game.c $(LIB_TARGET)
 	$(CC) $(CFLAGS) $(INCLUDES) $< $(LIB_TARGET) $(LDFLAGS) -o $@
+
+$(SAMPLE_GAME_DISABLED): examples/sample_game.c $(LIB_SRCS) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -DRESHIELD_DISABLE $(INCLUDES) $^ $(LDFLAGS) -o $@
 
 $(SAMPLE_MANIFEST): examples/assets/stage1.cfg | $(BUILD_DIR)
 	$(PYTHON3) tools/gen_manifest.py examples/assets -o $@
@@ -97,7 +101,7 @@ test: $(TEST_INTEGRITY) $(TEST_INTEGRITY_DISABLED) \
       $(TEST_MANIFEST) $(TEST_MANIFEST_DISABLED) \
       $(TEST_RUNTIME) $(TEST_RUNTIME_DISABLED) \
       $(DEMO_INTEGRITY) $(DEMO_INTEGRITY_DISABLED) \
-      $(SAMPLE_GAME) $(SAMPLE_GAME_SEALED) $(SAMPLE_MANIFEST)
+      $(SAMPLE_GAME) $(SAMPLE_GAME_SEALED) $(SAMPLE_GAME_DISABLED) $(SAMPLE_MANIFEST)
 	./$(TEST_INTEGRITY)
 	./$(TEST_INTEGRITY_DISABLED)
 	./$(TEST_MANIFEST)
