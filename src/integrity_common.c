@@ -2,10 +2,10 @@
 
 #include <string.h>
 
-/* Platform backend hook implemented in integrity_macos.c / integrity_linux.c */
+/* Platform backend hook implemented in integrity_macos.c / integrity_linux.c / integrity_windows.c */
 extern int reshield_platform_get_code_section(const uint8_t **out_ptr, uint64_t *out_size);
 
-#if !defined(__APPLE__) && !defined(__linux__)
+#if !defined(__APPLE__) && !defined(__linux__) && !defined(_WIN32)
 int reshield_platform_get_code_section(const uint8_t **out_ptr, uint64_t *out_size) {
     (void)out_ptr;
     (void)out_size;

@@ -67,7 +67,7 @@ int reshield_verify_buffer(const void *data, size_t len,
 
 /**
  * Hashes the main executable's in-memory code section (__TEXT,__text on macOS;
- * .text on Linux) and compares it against the build-time sealed record.
+ * .text on Linux and Windows PE32+ x64) and compares it against the build-time sealed record.
  * out_result may be NULL.
  */
 reshield_integrity_status_t reshield_verify_code_section(reshield_integrity_result_t *out_result);
