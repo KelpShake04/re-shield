@@ -1,9 +1,11 @@
 #ifdef _WIN32
 
 #include "reshield/attestation.h"
+#include "reshield/integrity.h"
 
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 #include <windows.h>
 #include <softpub.h>
 #include <wintrust.h>
@@ -59,19 +61,66 @@ reshield_attestation_status_t reshield_verify_code_page_wx(void) {
 #endif
 }
 
-/* Windows has no signer pin. A non-NULL `requirement` therefore fails closed: silently
- * ignoring it would turn a configured pin into "any trusted publisher is fine".
+/* Windows requirement format: "leaf-sha256:" + 64 hex chars (case-insensitive) = SHA-256 of
+ * the DER-encoded signing (leaf) certificate of the first Authenticode signer. Any other
+ * non-NULL string fails closed: silently ignoring it would turn a configured pin into
+ * "any trusted publisher is fine".
  * Authenticode validity of the EXE file on disk is checked with WinVerifyTrust
  * (no UI, no revocation check, no network). An unsigned EXE returns FAILED, so enabling
  * RESHIELD_CHECK_CODESIGN on an unsigned dev build makes reshield_verify() fail.
  * Known limit: the file at the module path is verified, not the mapped image; a process
  * whose EXE was renamed and replaced after launch is not detected. */
+static int hex_nibble(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+static int parse_leaf_pin(const char *req, uint8_t out[RESHIELD_SHA256_SIZE]) {
+    static const char prefix[] = "leaf-sha256:";
+    size_t plen = sizeof(prefix) - 1u;
+    if (strncmp(req, prefix, plen) != 0 || strlen(req + plen) != 2u * RESHIELD_SHA256_SIZE) {
+        return -1;
+    }
+    for (size_t i = 0; i < RESHIELD_SHA256_SIZE; i++) {
+        int hi = hex_nibble(req[plen + 2u * i]);
+        int lo = hex_nibble(req[plen + 2u * i + 1u]);
+        if (hi < 0 || lo < 0) {
+            return -1;
+        }
+        out[i] = (uint8_t)((hi << 4) | lo);
+    }
+    return 0;
+}
+
+/* Hashes the leaf certificate of the first signer found in the open WinVerifyTrust state. */
+static int leaf_cert_matches(HANDLE state, const uint8_t pin[RESHIELD_SHA256_SIZE]) {
+    CRYPT_PROVIDER_DATA *pd = WTHelperProvDataFromStateData(state);
+    if (pd == NULL) return 0;
+    CRYPT_PROVIDER_SGNR *sgnr = WTHelperGetProvSignerFromChain(pd, 0, FALSE, 0);
+    if (sgnr == NULL) return 0;
+    CRYPT_PROVIDER_CERT *pc = WTHelperGetProvCertFromChain(sgnr, 0);
+    if (pc == NULL || pc->pCert == NULL || pc->pCert->pbCertEncoded == NULL ||
+        pc->pCert->cbCertEncoded == 0) {
+        return 0;
+    }
+    uint8_t h[RESHIELD_SHA256_SIZE];
+    reshield_sha256(pc->pCert->pbCertEncoded, pc->pCert->cbCertEncoded, h);
+    unsigned diff = 0;
+    for (size_t i = 0; i < RESHIELD_SHA256_SIZE; i++) {
+        diff |= (unsigned)(h[i] ^ pin[i]);
+    }
+    return diff == 0;
+}
+
 reshield_attestation_status_t reshield_verify_os_codesign_req(const char *requirement) {
 #ifdef RESHIELD_DISABLE
     (void)requirement;
     return RESHIELD_ATTEST_OK;
 #else
-    if (requirement != NULL) {
+    uint8_t pin[RESHIELD_SHA256_SIZE] = {0};
+    if (requirement != NULL && parse_leaf_pin(requirement, pin) != 0) {
         return RESHIELD_ATTEST_FAILED;
     }
     enum { PATH_CAP = 32768 };
@@ -102,11 +151,15 @@ reshield_attestation_status_t reshield_verify_os_codesign_req(const char *requir
 
     GUID action = WINTRUST_ACTION_GENERIC_VERIFY_V2;
     LONG rc = WinVerifyTrust((HWND)INVALID_HANDLE_VALUE, &action, &wd);
+    int ok = (rc == ERROR_SUCCESS);
+    if (ok && requirement != NULL) {
+        ok = leaf_cert_matches(wd.hWVTStateData, pin);
+    }
 
     wd.dwStateAction = WTD_STATEACTION_CLOSE;
     WinVerifyTrust((HWND)INVALID_HANDLE_VALUE, &action, &wd);
     free(path);
-    return rc == ERROR_SUCCESS ? RESHIELD_ATTEST_OK : RESHIELD_ATTEST_FAILED;
+    return ok ? RESHIELD_ATTEST_OK : RESHIELD_ATTEST_FAILED;
 #endif
 }
 

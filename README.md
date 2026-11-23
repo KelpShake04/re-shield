@@ -39,7 +39,7 @@ re-shield는 **변조 감지(tamper evidence)** 도구이지 변조 방지(tampe
 쓰지 말아야 하는 경우:
 - 치트·크랙을 막아야 할 때: 안티치트나 상용 보호기를 검토한다.
 - 서버가 신뢰할 판정이 필요할 때: 플랫폼 증명(Apple App Attest, Google Play Integrity 등)과 서버 측 검증을 쓴다.
-- Windows·macOS 서명과 OS 정책(Hardened Runtime, App Control 등)이 이미 배포물을 강제하는 환경이면 그것이 더 강하다. re-shield는 OS 서명을 대체하지 않고, 봉인 뒤에 OS 서명을 얹어 함께 쓴다. macOS에서는 `cfg.codesign_requirement`로 서명자를 고정하면 "재봉인 후 다른 서명으로 재서명"하는 경로를 막는 데 도움이 된다(검증 함수 자체를 패치하는 공격은 못 막는다).
+- Windows·macOS 서명과 OS 정책(Hardened Runtime, App Control 등)이 이미 배포물을 강제하는 환경이면 그것이 더 강하다. re-shield는 OS 서명을 대체하지 않고, 봉인 뒤에 OS 서명을 얹어 함께 쓴다. macOS(requirement 문자열)와 Windows(`leaf-sha256:` leaf 인증서 해시)에서는 `cfg.codesign_requirement`로 서명자를 고정하면 "재봉인 후 다른 서명으로 재서명"하는 경로를 막는 데 도움이 된다(검증 함수 자체를 패치하는 공격은 못 막는다).
 
 ## 빠른 시작
 
@@ -54,7 +54,7 @@ make release-demo
 
 ## 내 프로젝트에 적용하기
 
-지원 플랫폼은 macOS(Mach-O 64), Linux(ELF64), Windows x64(PE32+, MSVC)다. Windows는 런타임 백엔드(코드 섹션 해시, `VirtualQuery` W^X 순회, `WinVerifyTrust` 코드 서명 검사)와 봉인 도구(`seal_binary.py`/`verify_release.py`의 PE 지원)가 구현되어 있다. CI(GitHub Actions `windows-latest`)의 `windows-msvc` 잡이 `cl`로 빌드한 EXE를 봉인해 실행하고, `.text` 1바이트를 바꾼 복사본이 `CODE_TAMPERED`로 탐지되는 것까지 확인한다. 코드 서명 검사는 서명자 고정이 없어 `cfg.codesign_requirement`가 설정되면 `FAILED`(fail-closed)로 처리하고, 서명 안 된 EXE도 `FAILED`다. 서명자 고정은 macOS에서만 쓰고 `#ifdef __APPLE__` 안에서 설정한다(Linux는 코드 서명 검사가 UNSUPPORTED지만 requirement가 있으면 통과시키지 않는다). 서명된 EXE에서 `OK`가 나오는 경우는 CI에 서명 인증서가 없어 검증하지 못했다. CI는 POSIX 전용인 `tests/test_seal_workflow.py`와 `RESHIELD_DISABLE` 변형 테스트를 Windows에서 돌리지 않는다. mingw-w64는 맥/Linux에서의 크로스 컴파일·도구 테스트 전용이며, 기본 링크 EXE는 `.text` 안 relocation 1개 때문에 봉인되지 않는다(`-Wl,--disable-dynamicbase -Wl,--disable-reloc-section`으로 봉인은 되지만 ASLR이 꺼지므로 배포용으로 권장하지 않는다). mingw 빌드는 컴파일·링크만 보고 Windows에서 실행해 검증하지 않았다. Windows ARM64와 fat/universal Mach-O는 지원하지 않는다. 자세한 내용은 [docs/integrity-verification.md](docs/integrity-verification.md#7-windows-pe32-x64).
+지원 플랫폼은 macOS(Mach-O 64), Linux(ELF64), Windows x64(PE32+, MSVC)다. Windows는 런타임 백엔드(코드 섹션 해시, `VirtualQuery` W^X 순회, `WinVerifyTrust` 코드 서명 검사)와 봉인 도구(`seal_binary.py`/`verify_release.py`의 PE 지원)가 구현되어 있다. CI(GitHub Actions `windows-latest`)의 `windows-msvc` 잡이 `cl`로 빌드한 EXE를 봉인해 실행하고, `.text` 1바이트를 바꾼 복사본이 `CODE_TAMPERED`로 탐지되는 것까지 확인한다. 코드 서명 검사는 `WinVerifyTrust` 결과에 더해 `cfg.codesign_requirement`로 서명자 leaf 인증서를 고정할 수 있다. 형식은 `leaf-sha256:<64자리 hex>`(서명 인증서 DER의 SHA-256, 대소문자 무관)이고, 다른 문자열은 `FAILED`(fail-closed)다. 서명 안 된 EXE도 `FAILED`다. macOS와 Windows의 requirement 문법이 달라 플랫폼별로 `#ifdef` 안에서 설정한다(Linux는 코드 서명 검사가 UNSUPPORTED지만 requirement가 있으면 통과시키지 않는다). CI는 POSIX 전용인 `tests/test_seal_workflow.py`와 `RESHIELD_DISABLE` 변형 테스트를 Windows에서 돌리지 않는다. mingw-w64는 맥/Linux에서의 크로스 컴파일·도구 테스트 전용이며, 기본 링크 EXE는 `.text` 안 relocation 1개 때문에 봉인되지 않는다(`-Wl,--disable-dynamicbase -Wl,--disable-reloc-section`으로 봉인은 되지만 ASLR이 꺼지므로 배포용으로 권장하지 않는다). mingw 빌드는 컴파일·링크만 보고 Windows에서 실행해 검증하지 않았다. Windows ARM64와 fat/universal Mach-O는 지원하지 않는다. 자세한 내용은 [docs/integrity-verification.md](docs/integrity-verification.md#7-windows-pe32-x64).
 
 **1. 링크.** `libreshield.a`를 링크하고 `-Iinclude`를 추가한다. macOS는 `-framework Security -framework CoreFoundation`도 필요하다. `RSHLDCHK` 레코드는 `libreshield.a` 안에 있으며, 앱이 `reshield_verify()`를 호출하면 바이너리에 함께 링크된다.
 

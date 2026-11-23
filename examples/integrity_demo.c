@@ -47,6 +47,8 @@ int main(int argc, char **argv) {
             cfg.asset_base_dir = argv[i] + 9;
         } else if (strcmp(argv[i], "--check-codesign") == 0) {
             cfg.enabled_checks |= RESHIELD_CHECK_CODESIGN;
+        } else if (strncmp(argv[i], "--codesign-requirement=", 23) == 0) {
+            cfg.codesign_requirement = argv[i] + 23;
         } else if (strcmp(argv[i], "--allow-unsealed") == 0) {
             cfg.allow_unsealed = 1;
         }

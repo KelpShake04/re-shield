@@ -34,7 +34,11 @@ reshield_attestation_status_t reshield_verify_os_codesign(void);
  * Same, but the signature must also satisfy `requirement` (code requirement language,
  * e.g. a Team ID pin). NULL behaves like reshield_verify_os_codesign(). A requirement
  * that does not parse returns RESHIELD_ATTEST_FAILED. Linux: UNSUPPORTED (ignored).
- * Windows: there is no signer pin, so a non-NULL `requirement` returns FAILED (fail closed).
+ * Windows: `requirement` must be exactly "leaf-sha256:" followed by 64 hex chars
+ * (case-insensitive) = SHA-256 of the DER-encoded signing (leaf) certificate of the first
+ * Authenticode signer; the signature must also pass WinVerifyTrust. Any other string (wrong
+ * prefix, length or non-hex) returns FAILED (fail closed). The macOS and Windows requirement
+ * syntaxes differ: set the value per platform under #ifdef.
  */
 reshield_attestation_status_t reshield_verify_os_codesign_req(const char *requirement);
 

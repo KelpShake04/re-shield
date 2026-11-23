@@ -104,6 +104,8 @@ static void test_manifest_flag_with_unsealed_binary(void) {
 #endif
 }
 
+#define ZEROS64 "0000000000000000000000000000000000000000000000000000000000000000"
+
 static void test_codesign_requirement(void) {
     reshield_config_t cfg = reshield_default_config();
     cfg.enabled_checks = RESHIELD_CHECK_CODESIGN;
@@ -130,12 +132,17 @@ static void test_codesign_requirement(void) {
                 report.failed_checks == RESHIELD_CHECK_CODESIGN,
                 "reshield_verify() passes cfg.codesign_requirement through");
 #elif defined(_WIN32)
-    /* This test EXE is unsigned (no Authenticode), so even NULL fails; a requirement fails
-     * closed regardless because Windows has no signer pin. A signed EXE is not covered here. */
+    /* This test EXE is unsigned (no Authenticode), so even NULL fails; a malformed requirement
+     * fails closed, and a well-formed leaf pin still fails because there is no valid signature.
+     * The signed-EXE cases run in CI against a signed copy of integrity_demo.exe. */
     ASSERT_TRUE(reshield_verify_os_codesign_req(NULL) == RESHIELD_ATTEST_FAILED,
                 "codesign: unsigned EXE fails WinVerifyTrust");
     ASSERT_TRUE(reshield_verify_os_codesign_req("anchor apple") == RESHIELD_ATTEST_FAILED,
-                "codesign: a requirement fails closed on Windows (no signer pin)");
+                "codesign: a non-leaf-sha256 requirement fails closed on Windows");
+    ASSERT_TRUE(reshield_verify_os_codesign_req("leaf-sha256:" ZEROS64) == RESHIELD_ATTEST_FAILED,
+                "codesign: well-formed leaf pin on an unsigned EXE fails");
+    ASSERT_TRUE(reshield_verify_os_codesign_req("leaf-sha256:00") == RESHIELD_ATTEST_FAILED,
+                "codesign: leaf pin with a short hash fails closed");
     ASSERT_TRUE(reshield_verify(&cfg, &report) == RESHIELD_ERR_CODESIGN_INVALID &&
                 report.failed_checks == RESHIELD_CHECK_CODESIGN,
                 "reshield_verify() reports CODESIGN_INVALID for an unsigned EXE");
@@ -150,8 +157,6 @@ static void test_codesign_requirement(void) {
                 "off macOS: a requirement that cannot be enforced fails closed");
 #endif
 }
-
-#define ZEROS64 "0000000000000000000000000000000000000000000000000000000000000000"
 
 static void test_report_json(void) {
     reshield_report_t r;

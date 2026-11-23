@@ -52,17 +52,20 @@ typedef struct reshield_config {
     const char             *asset_base_dir; /* Base directory for manifest relative paths */
     reshield_violation_cb_t on_violation;   /* Optional diagnostic callback on failure */
     void                   *user_data;
-    const char             *codesign_requirement; /* macOS only: code requirement language string the
-                                                   * signature must satisfy, e.g.
+    const char             *codesign_requirement; /* Signer pin, syntax differs per platform.
+                                                   * macOS: code requirement language string, e.g.
                                                    * `anchor apple generic and certificate leaf[subject.OU] = "TEAMID"`.
+                                                   * Windows: `leaf-sha256:<64 hex>` = SHA-256 of the
+                                                   * DER signing (leaf) certificate.
                                                    * NULL = validity only, any signer (an attacker can
-                                                   * re-sign ad hoc). A string that fails to parse is
-                                                   * reported as CODESIGN_INVALID. Where the platform
-                                                   * cannot enforce a pin (Linux, Windows) a non-NULL
-                                                   * value also fails with CODESIGN_INVALID when
-                                                   * RESHIELD_CHECK_CODESIGN is enabled: set it only
-                                                   * under #ifdef __APPLE__. Adding this field changed
-                                                   * the struct size: recompile callers with the header. */
+                                                   * re-sign with their own certificate). A string that
+                                                   * fails to parse or does not match is reported as
+                                                   * CODESIGN_INVALID. Where the platform cannot enforce
+                                                   * a pin (Linux) a non-NULL value also fails with
+                                                   * CODESIGN_INVALID when RESHIELD_CHECK_CODESIGN is
+                                                   * enabled: set it per platform under #ifdef. Adding
+                                                   * this field changed the struct size: recompile
+                                                   * callers with the header. */
 } reshield_config_t;
 
 /**
