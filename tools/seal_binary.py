@@ -7,6 +7,8 @@ Computes SHA-256 of the executable's code section (__TEXT,__text on 64-bit Mach-
 integrity record in the binary. On macOS, re-signs ad-hoc with codesign.
 """
 
+from __future__ import annotations
+
 import argparse
 import hashlib
 import os
@@ -35,7 +37,11 @@ def find_macho64_text(data: bytes) -> tuple[int, int]:
 
     offset = 32
     for _ in range(ncmds):
+        if offset + 8 > len(data):
+            raise ValueError("Truncated Mach-O load command header")
         cmd, cmdsize = struct.unpack_from("<II", data, offset)
+        if cmdsize < 8 or offset + cmdsize > len(data):
+            raise ValueError(f"Invalid Mach-O load command size: {cmdsize}")
         if cmd == LC_SEGMENT_64:
             segname = data[offset + 8 : offset + 24].split(b"\x00", 1)[0]
             nsects = struct.unpack_from("<I", data, offset + 64)[0]
@@ -123,6 +129,10 @@ def main() -> int:
         buf = bytearray(f.read())
 
     fmt_name, text_off, text_size = find_code_section(bytes(buf))
+    if text_off < 0 or text_size <= 0 or text_off + text_size > len(buf):
+        raise ValueError(
+            f"Code section bounds out of range: offset=0x{text_off:x}, size={text_size}, file_len={len(buf)}"
+        )
     text_bytes = bytes(buf[text_off : text_off + text_size])
     digest = hashlib.sha256(text_bytes).digest()
 

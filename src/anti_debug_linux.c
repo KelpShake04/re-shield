@@ -8,8 +8,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ptrace.h>
+#include <unistd.h>
 
-static atomic_int g_traceme_claimed = 0;
+static atomic_int  g_traceme_claimed = 0;
+static atomic_long g_self_traceme_ppid = 0;
 
 const char *reshield_platform_backend_name(void) {
     return "linux";
@@ -34,7 +36,10 @@ uint32_t reshield_platform_check_debugger(void) {
             }
             long tracer_pid = strtol(p, NULL, 10);
             if (tracer_pid > 0) {
-                result = RESHIELD_DETECT_OS_TRACED;
+                long self_ppid = atomic_load(&g_self_traceme_ppid);
+                if (!(self_ppid > 0 && tracer_pid == self_ppid)) {
+                    result = RESHIELD_DETECT_OS_TRACED;
+                }
             }
             break;
         }
@@ -56,6 +61,13 @@ int reshield_platform_deny_attach(void) {
     if (ptrace(PTRACE_TRACEME, 0, NULL, NULL) == -1) {
         return -1;
     }
+
+    /*
+     * On Linux, PTRACE_TRACEME attaches this process to its parent (real_parent),
+     * setting TracerPid = getppid(). Record it so subsequent TracerPid checks do
+     * not false-positive against our own self-trace claim.
+     */
+    atomic_store(&g_self_traceme_ppid, (long)getppid());
     return 0;
 }
 
