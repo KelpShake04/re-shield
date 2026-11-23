@@ -1,24 +1,23 @@
 #!/usr/bin/env python3
 """
-Build-time binary sealing tool for re-shield integrity PoC.
+Build-time binary sealing tool for re-shield v2 integrity records.
 
 Computes SHA-256 of the executable's code section (__TEXT,__text on 64-bit Mach-O;
-.text on 64-bit ELF) and embeds the size + digest into the unique RSHLDCHK
-integrity record in the binary. On macOS, re-signs ad-hoc with codesign.
+.text on 64-bit ELF) and embeds build_id, section size, code digest, and optional
+asset manifest root digest into the unique RSHLDCHK v2 record.
 """
 
 from __future__ import annotations
 
 import argparse
 import hashlib
-import os
 import struct
 import subprocess
 import sys
 
 MAGIC = b"RSHLDCHK"
-RECORD_VERSION = 1
-RECORD_FMT = "<8sIIQ32s"
+RECORD_VERSION = 2
+RECORD_FMT = "<8sIIIIQ32s32s"
 RECORD_SIZE = struct.calcsize(RECORD_FMT)
 
 MH_MAGIC_64 = 0xFEEDFACF
@@ -26,7 +25,6 @@ LC_SEGMENT_64 = 0x19
 
 
 def find_macho64_text(data: bytes) -> tuple[int, int]:
-    """Return (file_offset, size) of __TEXT,__text in a 64-bit little-endian Mach-O."""
     if len(data) < 32:
         raise ValueError("File too small for Mach-O 64-bit header")
     magic, _cputype, _cpusubtype, _filetype, ncmds, _sizeofcmds, _flags, _reserved = (
@@ -59,12 +57,9 @@ def find_macho64_text(data: bytes) -> tuple[int, int]:
 
 
 def find_elf64_text(data: bytes) -> tuple[int, int]:
-    """Return (file_offset, size) of .text in a 64-bit little-endian ELF."""
     if len(data) < 64 or data[:4] != b"\x7fELF":
         raise ValueError("Not an ELF file")
-    ei_class = data[4]
-    ei_data = data[5]
-    if ei_class != 2 or ei_data != 1:
+    if data[4] != 2 or data[5] != 1:
         raise ValueError("Only 64-bit little-endian ELF is supported")
 
     e_shoff = struct.unpack_from("<Q", data, 40)[0]
@@ -106,21 +101,25 @@ def find_integrity_record_offset(data: bytes) -> int:
         if idx == -1:
             break
         if idx + RECORD_SIZE <= len(data):
-            _magic, version, sealed, _size, _digest = struct.unpack_from(RECORD_FMT, data, idx)
-            if version == RECORD_VERSION and sealed in (0, 1):
+            _magic, version, sealed, _bid, has_m, _sz, _d1, _d2 = struct.unpack_from(
+                RECORD_FMT, data, idx
+            )
+            if version == RECORD_VERSION and sealed in (0, 1) and has_m in (0, 1):
                 matches.append(idx)
         start = idx + 1
 
     if len(matches) == 0:
-        raise ValueError("No RSHLDCHK integrity record found in binary")
+        raise ValueError("No RSHLDCHK v2 integrity record found in binary")
     if len(matches) > 1:
-        raise ValueError(f"Ambiguous: found {len(matches)} RSHLDCHK records in binary")
+        raise ValueError(f"Ambiguous: found {len(matches)} RSHLDCHK v2 records in binary")
     return matches[0]
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Seal a binary with its code section SHA-256")
+    parser = argparse.ArgumentParser(description="Seal a binary with code + optional manifest SHA-256")
     parser.add_argument("binary", help="Path to the compiled Mach-O or ELF executable")
+    parser.add_argument("--manifest", help="Optional asset manifest file to bind into the binary")
+    parser.add_argument("--build-id", type=int, default=1, help="Numeric build identifier (default: 1)")
     parser.add_argument("--verify-only", action="store_true", help="Check seal without modifying file")
     parser.add_argument("--no-codesign", action="store_true", help="Skip macOS ad-hoc codesign")
     args = parser.parse_args()
@@ -133,23 +132,43 @@ def main() -> int:
         raise ValueError(
             f"Code section bounds out of range: offset=0x{text_off:x}, size={text_size}, file_len={len(buf)}"
         )
-    text_bytes = bytes(buf[text_off : text_off + text_size])
-    digest = hashlib.sha256(text_bytes).digest()
+    code_digest = hashlib.sha256(bytes(buf[text_off : text_off + text_size])).digest()
+
+    has_manifest = 0
+    manifest_digest = b"\x00" * 32
+    if args.manifest:
+        with open(args.manifest, "rb") as mf:
+            manifest_digest = hashlib.sha256(mf.read()).digest()
+        has_manifest = 1
 
     rec_off = find_integrity_record_offset(bytes(buf))
     if text_off <= rec_off < text_off + text_size:
         raise ValueError("Integrity record must not reside inside the hashed code section")
 
     if args.verify_only:
-        _magic, _ver, sealed, exp_size, exp_digest = struct.unpack_from(RECORD_FMT, buf, rec_off)
-        ok = (sealed == 1 and exp_size == text_size and exp_digest == digest)
+        _magic, _ver, sealed, bid, rec_has_m, exp_size, exp_code, exp_manifest = (
+            struct.unpack_from(RECORD_FMT, buf, rec_off)
+        )
+        ok = (sealed == 1 and exp_size == text_size and exp_code == code_digest)
+        if args.manifest:
+            ok = ok and (rec_has_m == 1 and exp_manifest == manifest_digest)
         print(
-            f"[seal_binary] {args.binary}: {fmt_name} size={text_size} "
-            f"sealed={sealed} match={ok} sha256={digest.hex()}"
+            f"[seal_binary] {args.binary}: {fmt_name} build_id={bid} size={text_size} "
+            f"sealed={sealed} has_manifest={rec_has_m} match={ok}"
         )
         return 0 if ok else 1
 
-    packed = struct.pack(RECORD_FMT, MAGIC, RECORD_VERSION, 1, text_size, digest)
+    packed = struct.pack(
+        RECORD_FMT,
+        MAGIC,
+        RECORD_VERSION,
+        1,
+        args.build_id & 0xFFFFFFFF,
+        has_manifest,
+        text_size,
+        code_digest,
+        manifest_digest,
+    )
     buf[rec_off : rec_off + RECORD_SIZE] = packed
 
     with open(args.binary, "wb") as f:
@@ -164,8 +183,8 @@ def main() -> int:
         )
 
     print(
-        f"[seal_binary] sealed {args.binary} ({fmt_name}, offset=0x{text_off:x}, "
-        f"size={text_size}, record=0x{rec_off:x}, sha256={digest.hex()})"
+        f"[seal_binary] sealed {args.binary} ({fmt_name}, build_id={args.build_id}, "
+        f"size={text_size}, has_manifest={has_manifest}, code_sha256={code_digest.hex()})"
     )
     return 0
 

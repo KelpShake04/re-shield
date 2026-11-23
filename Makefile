@@ -5,102 +5,107 @@ PYTHON3 ?= python3
 CFLAGS  ?= -std=c11 -Wall -Wextra -Wpedantic -Werror -O2
 INCLUDES = -Iinclude
 
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Darwin)
+LDFLAGS += -framework Security -framework CoreFoundation
+endif
+
 BUILD_DIR = build
-LIB_SRCS  = src/debug_policy_common.c \
-            src/debug_policy_macos.c \
-            src/debug_policy_linux.c \
-            src/sha256.c \
+LIB_SRCS  = src/sha256.c \
             src/integrity_common.c \
             src/integrity_macos.c \
             src/integrity_linux.c \
+            src/manifest.c \
+            src/attestation_macos.c \
+            src/attestation_linux.c \
             src/reshield.c
 LIB_OBJS  = $(patsubst src/%.c,$(BUILD_DIR)/%.o,$(LIB_SRCS))
 LIB_TARGET = $(BUILD_DIR)/libreshield.a
 
-DEMO_DEBUG_POLICY          = $(BUILD_DIR)/debug_policy_demo
-DEMO_DEBUG_POLICY_DISABLED = $(BUILD_DIR)/debug_policy_demo_disabled
-DEMO_INTEGRITY             = $(BUILD_DIR)/integrity_demo
-DEMO_INTEGRITY_DISABLED    = $(BUILD_DIR)/integrity_demo_disabled
+HEADERS = include/reshield/integrity.h \
+          include/reshield/manifest.h \
+          include/reshield/attestation.h \
+          include/reshield/reshield.h
 
-SAMPLE_UNPROTECTED         = $(BUILD_DIR)/sample_game_unprotected
-SAMPLE_PROTECTED           = $(BUILD_DIR)/sample_game_protected
+DEMO_INTEGRITY          = $(BUILD_DIR)/integrity_demo
+DEMO_INTEGRITY_DISABLED = $(BUILD_DIR)/integrity_demo_disabled
+SAMPLE_GAME             = $(BUILD_DIR)/sample_game
+SAMPLE_GAME_SEALED      = $(BUILD_DIR)/sample_game_sealed
+SAMPLE_MANIFEST         = $(BUILD_DIR)/sample_assets.manifest
 
-TEST_DEBUG_POLICY          = $(BUILD_DIR)/test_debug_policy
-TEST_DEBUG_POLICY_DISABLED = $(BUILD_DIR)/test_debug_policy_disabled
-TEST_INTEGRITY             = $(BUILD_DIR)/test_integrity
-TEST_INTEGRITY_DISABLED    = $(BUILD_DIR)/test_integrity_disabled
-TEST_RUNTIME               = $(BUILD_DIR)/test_runtime
-TEST_RUNTIME_DISABLED      = $(BUILD_DIR)/test_runtime_disabled
+TEST_INTEGRITY          = $(BUILD_DIR)/test_integrity
+TEST_INTEGRITY_DISABLED = $(BUILD_DIR)/test_integrity_disabled
+TEST_MANIFEST           = $(BUILD_DIR)/test_manifest
+TEST_MANIFEST_DISABLED  = $(BUILD_DIR)/test_manifest_disabled
+TEST_RUNTIME            = $(BUILD_DIR)/test_runtime
+TEST_RUNTIME_DISABLED   = $(BUILD_DIR)/test_runtime_disabled
 
-.PHONY: all clean test sample-compare
+.PHONY: all clean test release-demo
 
-all: $(LIB_TARGET) $(DEMO_DEBUG_POLICY) $(DEMO_INTEGRITY) $(SAMPLE_UNPROTECTED) $(SAMPLE_PROTECTED) \
-     $(TEST_DEBUG_POLICY) $(TEST_INTEGRITY) $(TEST_RUNTIME)
+all: $(LIB_TARGET) $(DEMO_INTEGRITY) $(SAMPLE_GAME) $(SAMPLE_GAME_SEALED) \
+     $(TEST_INTEGRITY) $(TEST_MANIFEST) $(TEST_RUNTIME)
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
-$(BUILD_DIR)/%.o: src/%.c include/reshield/debug_policy.h include/reshield/integrity.h include/reshield/reshield.h | $(BUILD_DIR)
+$(BUILD_DIR)/%.o: src/%.c $(HEADERS) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
 
 $(LIB_TARGET): $(LIB_OBJS)
 	$(AR) rcs $@ $(LIB_OBJS)
 
-$(DEMO_DEBUG_POLICY): examples/debug_policy_demo.c $(LIB_TARGET)
-	$(CC) $(CFLAGS) $(INCLUDES) $< $(LIB_TARGET) -o $@
-
-$(DEMO_DEBUG_POLICY_DISABLED): examples/debug_policy_demo.c $(LIB_SRCS) | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -DRESHIELD_DISABLE $(INCLUDES) $^ -o $@
-
 $(DEMO_INTEGRITY): examples/integrity_demo.c $(LIB_TARGET)
-	$(CC) $(CFLAGS) $(INCLUDES) $< $(LIB_TARGET) -o $@
+	$(CC) $(CFLAGS) $(INCLUDES) $< $(LIB_TARGET) $(LDFLAGS) -o $@
 
 $(DEMO_INTEGRITY_DISABLED): examples/integrity_demo.c $(LIB_SRCS) | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -DRESHIELD_DISABLE $(INCLUDES) $^ -o $@
+	$(CC) $(CFLAGS) -DRESHIELD_DISABLE $(INCLUDES) $^ $(LDFLAGS) -o $@
 
-$(SAMPLE_UNPROTECTED): examples/sample_game.c | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -DRESHIELD_UNPROTECTED $(INCLUDES) $< -o $@
+$(SAMPLE_GAME): examples/sample_game.c $(LIB_TARGET)
+	$(CC) $(CFLAGS) $(INCLUDES) $< $(LIB_TARGET) $(LDFLAGS) -o $@
 
-$(SAMPLE_PROTECTED): examples/sample_game.c $(LIB_TARGET)
-	$(CC) $(CFLAGS) $(INCLUDES) $< $(LIB_TARGET) -o $@
+$(SAMPLE_MANIFEST): examples/assets/stage1.cfg | $(BUILD_DIR)
+	$(PYTHON3) tools/gen_manifest.py examples/assets -o $@
+
+$(SAMPLE_GAME_SEALED): $(SAMPLE_GAME) $(SAMPLE_MANIFEST)
+	cp $(SAMPLE_GAME) $@
 	$(STRIP) $@
-	$(PYTHON3) tools/seal_binary.py $@
-
-$(TEST_DEBUG_POLICY): tests/test_debug_policy.c $(LIB_TARGET)
-	$(CC) $(CFLAGS) $(INCLUDES) $< $(LIB_TARGET) -o $@
-
-$(TEST_DEBUG_POLICY_DISABLED): tests/test_debug_policy.c $(LIB_SRCS) | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -DRESHIELD_DISABLE $(INCLUDES) $^ -o $@
+	$(PYTHON3) tools/seal_binary.py $@ --manifest $(SAMPLE_MANIFEST) --build-id 1
 
 $(TEST_INTEGRITY): tests/test_integrity.c $(LIB_TARGET)
-	$(CC) $(CFLAGS) $(INCLUDES) $< $(LIB_TARGET) -o $@
+	$(CC) $(CFLAGS) $(INCLUDES) $< $(LIB_TARGET) $(LDFLAGS) -o $@
 
 $(TEST_INTEGRITY_DISABLED): tests/test_integrity.c $(LIB_SRCS) | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -DRESHIELD_DISABLE $(INCLUDES) $^ -o $@
+	$(CC) $(CFLAGS) -DRESHIELD_DISABLE $(INCLUDES) $^ $(LDFLAGS) -o $@
+
+$(TEST_MANIFEST): tests/test_manifest.c $(LIB_TARGET)
+	$(CC) $(CFLAGS) $(INCLUDES) $< $(LIB_TARGET) $(LDFLAGS) -o $@
+
+$(TEST_MANIFEST_DISABLED): tests/test_manifest.c $(LIB_SRCS) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -DRESHIELD_DISABLE $(INCLUDES) $^ $(LDFLAGS) -o $@
 
 $(TEST_RUNTIME): tests/test_runtime.c $(LIB_TARGET)
-	$(CC) $(CFLAGS) $(INCLUDES) $< $(LIB_TARGET) -o $@
+	$(CC) $(CFLAGS) $(INCLUDES) $< $(LIB_TARGET) $(LDFLAGS) -o $@
 
 $(TEST_RUNTIME_DISABLED): tests/test_runtime.c $(LIB_SRCS) | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -DRESHIELD_DISABLE $(INCLUDES) $^ -o $@
+	$(CC) $(CFLAGS) -DRESHIELD_DISABLE $(INCLUDES) $^ $(LDFLAGS) -o $@
 
-sample-compare: $(SAMPLE_UNPROTECTED) $(SAMPLE_PROTECTED)
-	$(PYTHON3) tools/compare_sample.py
+release-demo: $(SAMPLE_GAME_SEALED) $(SAMPLE_MANIFEST)
+	$(PYTHON3) tools/verify_release.py $(SAMPLE_GAME_SEALED) --manifest $(SAMPLE_MANIFEST) --assets examples/assets
+	./$(SAMPLE_GAME_SEALED) $(SAMPLE_MANIFEST) examples/assets STAGE-1-CLEAR-2026
 
-test: $(TEST_DEBUG_POLICY) $(TEST_DEBUG_POLICY_DISABLED) \
-      $(TEST_INTEGRITY) $(TEST_INTEGRITY_DISABLED) \
+test: $(TEST_INTEGRITY) $(TEST_INTEGRITY_DISABLED) \
+      $(TEST_MANIFEST) $(TEST_MANIFEST_DISABLED) \
       $(TEST_RUNTIME) $(TEST_RUNTIME_DISABLED) \
-      $(DEMO_DEBUG_POLICY_DISABLED) $(DEMO_INTEGRITY) $(DEMO_INTEGRITY_DISABLED) \
-      $(SAMPLE_UNPROTECTED) $(SAMPLE_PROTECTED)
-	./$(TEST_DEBUG_POLICY)
-	./$(TEST_DEBUG_POLICY_DISABLED)
+      $(DEMO_INTEGRITY) $(DEMO_INTEGRITY_DISABLED) \
+      $(SAMPLE_GAME) $(SAMPLE_GAME_SEALED) $(SAMPLE_MANIFEST)
 	./$(TEST_INTEGRITY)
 	./$(TEST_INTEGRITY_DISABLED)
+	./$(TEST_MANIFEST)
+	./$(TEST_MANIFEST_DISABLED)
 	./$(TEST_RUNTIME)
 	./$(TEST_RUNTIME_DISABLED)
-	./$(DEMO_DEBUG_POLICY_DISABLED) --mode=check
-	$(PYTHON3) tests/test_integrity_e2e.py
-	$(PYTHON3) tools/compare_sample.py
+	$(PYTHON3) tests/test_seal_workflow.py
+	$(PYTHON3) tools/verify_release.py $(SAMPLE_GAME_SEALED) --manifest $(SAMPLE_MANIFEST) --assets examples/assets
 
 clean:
 	rm -rf $(BUILD_DIR)

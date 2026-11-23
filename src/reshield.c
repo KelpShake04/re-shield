@@ -1,112 +1,140 @@
 #include "reshield/reshield.h"
 
-#include <unistd.h>
+#include <string.h>
 
-reshield_runtime_config_t reshield_default_config(void) {
-    reshield_runtime_config_t cfg = {
-        .action = RESHIELD_ACTION_TERMINATE,
-        .check_debugger = 1,
-        .deny_attach = 1,
-        .check_integrity = 1,
+int reshield_is_enabled(void) {
+#ifdef RESHIELD_DISABLE
+    return 0;
+#else
+    return 1;
+#endif
+}
+
+const char *reshield_platform_name(void) {
+#if defined(__APPLE__) && defined(__MACH__)
+    return "macos";
+#elif defined(__linux__)
+    return "linux";
+#else
+    return "unsupported";
+#endif
+}
+
+reshield_config_t reshield_default_config(void) {
+    reshield_config_t cfg = {
+        .enabled_checks = RESHIELD_CHECK_DEFAULT,
         .allow_unsealed = 0,
-        .callback = NULL,
+        .manifest_path = NULL,
+        .asset_base_dir = NULL,
+        .on_violation = NULL,
         .user_data = NULL
     };
     return cfg;
 }
 
-#ifndef RESHIELD_DISABLE
-static void enforce_action(const reshield_runtime_config_t *cfg, uint32_t threats) {
-    if (threats == RESHIELD_THREAT_NONE) {
-        return;
+const char *reshield_status_name(reshield_status_t status) {
+    switch (status) {
+        case RESHIELD_OK:                    return "OK";
+        case RESHIELD_ERR_UNSEALED:          return "UNSEALED";
+        case RESHIELD_ERR_CODE_TAMPERED:     return "CODE_TAMPERED";
+        case RESHIELD_ERR_PAGE_PERMISSIONS:  return "PAGE_PERMISSIONS_VIOLATION";
+        case RESHIELD_ERR_CODESIGN_INVALID:  return "CODESIGN_INVALID";
+        case RESHIELD_ERR_MANIFEST_MISMATCH: return "MANIFEST_MISMATCH";
+        case RESHIELD_ERR_ASSET_TAMPERED:    return "ASSET_TAMPERED";
+        case RESHIELD_ERR_INTERNAL:          return "INTERNAL_ERROR";
+        default:                             return "UNKNOWN";
     }
-    switch (cfg->action) {
-        case RESHIELD_ACTION_CALLBACK:
-            if (cfg->callback != NULL) {
-                cfg->callback(threats, cfg->user_data);
+}
+
+reshield_status_t reshield_verify(const reshield_config_t *config,
+                                  reshield_report_t *out_report) {
+    reshield_report_t report;
+    memset(&report, 0, sizeof(report));
+    report.status = RESHIELD_OK;
+
+#ifdef RESHIELD_DISABLE
+    (void)config;
+    if (out_report != NULL) {
+        *out_report = report;
+    }
+    return RESHIELD_OK;
+#else
+    reshield_config_t cfg = (config != NULL) ? *config : reshield_default_config();
+
+    if ((cfg.enabled_checks & RESHIELD_CHECK_CODE_SECTION) != 0u) {
+        reshield_integrity_status_t ist = reshield_verify_code_section(&report.code_result);
+        report.build_id = report.code_result.build_id;
+        if (ist == RESHIELD_INTEGRITY_TAMPERED) {
+            report.failed_checks |= RESHIELD_CHECK_CODE_SECTION;
+            report.status = RESHIELD_ERR_CODE_TAMPERED;
+        } else if (ist == RESHIELD_INTEGRITY_UNSEALED && !cfg.allow_unsealed) {
+            report.failed_checks |= RESHIELD_CHECK_CODE_SECTION;
+            report.status = RESHIELD_ERR_UNSEALED;
+        } else if (ist == RESHIELD_INTEGRITY_ERROR) {
+            report.failed_checks |= RESHIELD_CHECK_CODE_SECTION;
+            report.status = RESHIELD_ERR_INTERNAL;
+        }
+    }
+
+    if ((cfg.enabled_checks & RESHIELD_CHECK_PAGE_PERMISSIONS) != 0u) {
+        if (reshield_verify_code_page_wx() == RESHIELD_ATTEST_FAILED) {
+            report.failed_checks |= RESHIELD_CHECK_PAGE_PERMISSIONS;
+            if (report.status == RESHIELD_OK) {
+                report.status = RESHIELD_ERR_PAGE_PERMISSIONS;
             }
-            break;
-        case RESHIELD_ACTION_TERMINATE:
-            _exit(1);
-            break;
-        case RESHIELD_ACTION_REPORT:
-        default:
-            break;
-    }
-}
-#endif
-
-uint32_t reshield_init(const reshield_runtime_config_t *config) {
-#ifdef RESHIELD_DISABLE
-    (void)config;
-    return RESHIELD_THREAT_NONE;
-#else
-    reshield_runtime_config_t cfg = (config != NULL) ? *config : reshield_default_config();
-    uint32_t threats = RESHIELD_THREAT_NONE;
-
-    if (cfg.check_debugger) {
-        if (reshield_check_debugger() != RESHIELD_DETECT_NONE) {
-            threats |= RESHIELD_THREAT_DEBUGGER;
         }
     }
 
-    if (cfg.deny_attach && (threats & RESHIELD_THREAT_DEBUGGER) == 0u) {
-        if (reshield_deny_attach() != 0) {
-            threats |= RESHIELD_THREAT_DEBUGGER;
+    if ((cfg.enabled_checks & RESHIELD_CHECK_CODESIGN) != 0u) {
+        reshield_attestation_status_t cs = reshield_verify_os_codesign();
+        if (cs == RESHIELD_ATTEST_FAILED) {
+            report.failed_checks |= RESHIELD_CHECK_CODESIGN;
+            if (report.status == RESHIELD_OK) {
+                report.status = RESHIELD_ERR_CODESIGN_INVALID;
+            }
         }
     }
 
-    if (cfg.check_integrity) {
-        reshield_integrity_status_t st = reshield_verify_code_section(NULL);
-        if (st == RESHIELD_INTEGRITY_TAMPERED) {
-            threats |= RESHIELD_THREAT_TAMPERED;
-        } else if (st == RESHIELD_INTEGRITY_UNSEALED && !cfg.allow_unsealed) {
-            threats |= RESHIELD_THREAT_UNSEALED;
-        } else if (st == RESHIELD_INTEGRITY_ERROR) {
-            threats |= RESHIELD_THREAT_INTEGRITY_ERROR;
+    if ((cfg.enabled_checks & RESHIELD_CHECK_MANIFEST) != 0u) {
+        reshield_manifest_status_t ms = reshield_verify_manifest_files(
+            cfg.manifest_path,
+            cfg.asset_base_dir,
+            NULL,
+            report.failed_asset_path,
+            sizeof(report.failed_asset_path)
+        );
+        if (ms == RESHIELD_MANIFEST_UNSEALED && cfg.allow_unsealed) {
+            /* Allowed in unsealed development builds */
+        } else if (ms != RESHIELD_MANIFEST_OK) {
+            report.failed_checks |= RESHIELD_CHECK_MANIFEST;
+            if (report.status == RESHIELD_OK) {
+                switch (ms) {
+                    case RESHIELD_MANIFEST_UNSEALED:
+                        report.status = RESHIELD_ERR_UNSEALED;
+                        break;
+                    case RESHIELD_MANIFEST_ROOT_MISMATCH:
+                        report.status = RESHIELD_ERR_MANIFEST_MISMATCH;
+                        break;
+                    case RESHIELD_MANIFEST_ASSET_MISMATCH:
+                        report.status = RESHIELD_ERR_ASSET_TAMPERED;
+                        break;
+                    default:
+                        report.status = RESHIELD_ERR_INTERNAL;
+                        break;
+                }
+            }
         }
     }
 
-    enforce_action(&cfg, threats);
-    return threats;
-#endif
-}
-
-uint32_t reshield_periodic_check(const reshield_runtime_config_t *config,
-                                 const reshield_timer_t *timer,
-                                 uint64_t max_ms) {
-#ifdef RESHIELD_DISABLE
-    (void)config;
-    (void)timer;
-    (void)max_ms;
-    return RESHIELD_THREAT_NONE;
-#else
-    reshield_runtime_config_t cfg = (config != NULL) ? *config : reshield_default_config();
-    uint32_t threats = RESHIELD_THREAT_NONE;
-
-    if (cfg.check_debugger) {
-        if (reshield_check_debugger() != RESHIELD_DETECT_NONE) {
-            threats |= RESHIELD_THREAT_DEBUGGER;
-        }
+    if (out_report != NULL) {
+        *out_report = report;
     }
 
-    if (cfg.check_integrity) {
-        reshield_integrity_status_t st = reshield_verify_code_section(NULL);
-        if (st == RESHIELD_INTEGRITY_TAMPERED) {
-            threats |= RESHIELD_THREAT_TAMPERED;
-        } else if (st == RESHIELD_INTEGRITY_UNSEALED && !cfg.allow_unsealed) {
-            threats |= RESHIELD_THREAT_UNSEALED;
-        } else if (st == RESHIELD_INTEGRITY_ERROR) {
-            threats |= RESHIELD_THREAT_INTEGRITY_ERROR;
-        }
+    if (report.status != RESHIELD_OK && cfg.on_violation != NULL) {
+        cfg.on_violation(&report, cfg.user_data);
     }
 
-    if (timer != NULL && max_ms > 0 && reshield_timer_exceeded_ms(timer, max_ms)) {
-        threats |= RESHIELD_THREAT_TIMING;
-    }
-
-    enforce_action(&cfg, threats);
-    return threats;
+    return report.status;
 #endif
 }
 
@@ -117,14 +145,5 @@ void reshield_secure_zero(void *ptr, size_t len) {
     volatile uint8_t *p = (volatile uint8_t *)ptr;
     while (len--) {
         *p++ = 0u;
-    }
-}
-
-void reshield_xor_transform(uint8_t *dst, const uint8_t *src, size_t len, uint8_t key) {
-    if (dst == NULL || src == NULL) {
-        return;
-    }
-    for (size_t i = 0; i < len; i++) {
-        dst[i] = (uint8_t)(src[i] ^ key);
     }
 }

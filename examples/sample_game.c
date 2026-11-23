@@ -1,85 +1,76 @@
 #include "reshield/reshield.h"
 
-#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
 /*
- * Sample native mini-game stage validator used to compare reversing friction
- * BEFORE (-DRESHIELD_UNPROTECTED) and AFTER (libreshield + strip + seal).
+ * Sample native game stage loader demonstrating:
+ * 1. Code-section SHA-256 + W^X page permission verification at startup.
+ * 2. Sealed asset manifest verification before loading external stage config.
+ * 3. SHA-256 commitment verification for stage unlock key (no plaintext key in binary).
  */
 
-#if defined(__GNUC__) || defined(__clang__)
-#define SAMPLE_NOINLINE __attribute__((noinline))
-#else
-#define SAMPLE_NOINLINE
-#endif
-
-#ifdef RESHIELD_UNPROTECTED
-
-static const char *PLAIN_STAGE_KEY = "SECRET_STAGE_KEY_2026";
-
-static SAMPLE_NOINLINE int validate_stage_key(const char *input) {
-    return strcmp(input, PLAIN_STAGE_KEY) == 0;
-}
-
-#else
-
-/* "SECRET_STAGE_KEY_2026" XORed with 0x5A (21 bytes, no plaintext in binary) */
-static const uint8_t OBF_STAGE_KEY[21] = {
-    0x09, 0x1f, 0x19, 0x08, 0x1f, 0x0e, 0x05,
-    0x09, 0x0e, 0x1b, 0x1d, 0x1f, 0x05, 0x11,
-    0x1f, 0x03, 0x05, 0x68, 0x6a, 0x68, 0x6c
+/* SHA-256("STAGE-1-CLEAR-2026") */
+static const uint8_t STAGE_KEY_COMMITMENT[RESHIELD_SHA256_SIZE] = {
+    0xa1u, 0x18u, 0xd2u, 0xefu, 0xb3u, 0x55u, 0xbdu, 0x0fu,
+    0x7bu, 0x16u, 0x69u, 0x9fu, 0x7fu, 0xa4u, 0x64u, 0x61u,
+    0xe3u, 0x9cu, 0x11u, 0xb7u, 0x86u, 0x4bu, 0x31u, 0xf0u,
+    0x89u, 0x17u, 0xefu, 0x11u, 0xd7u, 0x5eu, 0x16u, 0x98u
 };
 
-static SAMPLE_NOINLINE int validate_stage_key(const char *input) {
-    char revealed[sizeof(OBF_STAGE_KEY) + 1];
-    reshield_xor_transform((uint8_t *)revealed, OBF_STAGE_KEY, sizeof(OBF_STAGE_KEY), 0x5Au);
-    revealed[sizeof(OBF_STAGE_KEY)] = '\0';
-
-    int match = (strcmp(input, revealed) == 0);
-    reshield_secure_zero(revealed, sizeof(revealed));
-    return match;
-}
-
-#endif
-
-static SAMPLE_NOINLINE uint32_t compute_reward_code(const char *key) {
-    uint32_t h = 2166136261u;
-    for (size_t i = 0; key[i] != '\0'; i++) {
-        h ^= (uint8_t)key[i];
-        h *= 16777619u;
+static void on_integrity_error(const reshield_report_t *report, void *user_data) {
+    (void)user_data;
+    fprintf(stderr, "Integrity check failed (%s, checks=0x%x, build_id=%u)",
+            reshield_status_name(report->status),
+            report->failed_checks,
+            report->build_id);
+    if (report->failed_asset_path[0] != '\0') {
+        fprintf(stderr, " asset=%s", report->failed_asset_path);
     }
-    return h;
+    fprintf(stderr, "\n");
 }
 
 int main(int argc, char **argv) {
-#ifndef RESHIELD_UNPROTECTED
-    reshield_runtime_config_t cfg = reshield_default_config();
-    (void)reshield_init(&cfg);
-#endif
-
-    if (argc < 2) {
-        fprintf(stderr, "Usage: %s <stage-key>\n", argv[0]);
+    if (argc < 4) {
+        fprintf(stderr, "Usage: %s <manifest-path> <asset-dir> <stage-key>\n", argv[0]);
         return 2;
     }
 
-#ifndef RESHIELD_UNPROTECTED
-    reshield_timer_t t;
-    reshield_timer_start(&t);
-#endif
+    const char *manifest_path = argv[1];
+    const char *asset_dir = argv[2];
+    const char *stage_key = argv[3];
 
-    int ok = validate_stage_key(argv[1]);
+    reshield_config_t cfg = reshield_default_config();
+    cfg.enabled_checks |= RESHIELD_CHECK_MANIFEST;
+    cfg.manifest_path = manifest_path;
+    cfg.asset_base_dir = asset_dir;
+    cfg.on_violation = on_integrity_error;
 
-#ifndef RESHIELD_UNPROTECTED
-    (void)reshield_periodic_check(&cfg, &t, 500);
-#endif
-
-    if (ok) {
-        printf("STAGE UNLOCKED (reward=0x%08x)\n", compute_reward_code(argv[1]));
-        return 0;
+    reshield_report_t report;
+    if (reshield_verify(&cfg, &report) != RESHIELD_OK) {
+        return 10 + (int)report.status;
     }
 
-    printf("ACCESS DENIED\n");
-    return 1;
+    /* Verify stage key against SHA-256 commitment in constant time */
+    if (!reshield_verify_buffer(stage_key, strlen(stage_key), STAGE_KEY_COMMITMENT)) {
+        printf("ACCESS DENIED\n");
+        return 1;
+    }
+
+    /* Load verified asset */
+    char cfg_path[1024];
+    snprintf(cfg_path, sizeof(cfg_path), "%s/stage1.cfg", asset_dir);
+    FILE *fp = fopen(cfg_path, "r");
+    if (fp == NULL) {
+        fprintf(stderr, "Failed to open stage config: %s\n", cfg_path);
+        return 3;
+    }
+
+    char line[256];
+    printf("STAGE UNLOCKED (build_id=%u)\n", report.build_id);
+    while (fgets(line, sizeof(line), fp) != NULL) {
+        fputs(line, stdout);
+    }
+    fclose(fp);
+    return 0;
 }
