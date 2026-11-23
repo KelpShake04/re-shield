@@ -57,7 +57,12 @@ typedef struct reshield_config {
                                                    * `anchor apple generic and certificate leaf[subject.OU] = "TEAMID"`.
                                                    * NULL = validity only, any signer (an attacker can
                                                    * re-sign ad hoc). A string that fails to parse is
-                                                   * reported as CODESIGN_INVALID. Ignored elsewhere. */
+                                                   * reported as CODESIGN_INVALID. Where the platform
+                                                   * cannot enforce a pin (Linux, Windows) a non-NULL
+                                                   * value also fails with CODESIGN_INVALID when
+                                                   * RESHIELD_CHECK_CODESIGN is enabled: set it only
+                                                   * under #ifdef __APPLE__. Adding this field changed
+                                                   * the struct size: recompile callers with the header. */
 } reshield_config_t;
 
 /**

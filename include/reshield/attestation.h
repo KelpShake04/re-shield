@@ -34,7 +34,7 @@ reshield_attestation_status_t reshield_verify_os_codesign(void);
  * Same, but the signature must also satisfy `requirement` (code requirement language,
  * e.g. a Team ID pin). NULL behaves like reshield_verify_os_codesign(). A requirement
  * that does not parse returns RESHIELD_ATTEST_FAILED. Linux: UNSUPPORTED (ignored).
- * Windows: `requirement` is ignored (there is no signer pin); same result as above.
+ * Windows: there is no signer pin, so a non-NULL `requirement` returns FAILED (fail closed).
  */
 reshield_attestation_status_t reshield_verify_os_codesign_req(const char *requirement);
 

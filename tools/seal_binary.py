@@ -107,6 +107,7 @@ IMAGE_SCN_MEM_WRITE = 0x80000000
 IMAGE_DIRECTORY_ENTRY_SECURITY = 4
 IMAGE_DIRECTORY_ENTRY_BASERELOC = 5
 IMAGE_REL_BASED_ABSOLUTE = 0
+_RELOC_WIDTH = {1: 2, 2: 2, 3: 4, 10: 8}  # HIGH, LOW, HIGHLOW, DIR64: bytes written by the loader
 PE_SECTION_HEADER_SIZE = 40
 
 
@@ -222,7 +223,10 @@ def pe_text_relocations(data: bytes, image: PeImage) -> tuple[int, int]:
             if entry >> 12 == IMAGE_REL_BASED_ABSOLUTE:
                 continue
             target = page_rva + (entry & 0xFFF)
-            if text.virtual_address <= target < text.virtual_address + text.virtual_size:
+            # The loader patches `width` bytes at target; a patch that starts before .text but
+            # ends inside it still changes the hashed bytes. Unknown types: assume the widest.
+            width = _RELOC_WIDTH.get(entry >> 12, 8)
+            if target < text.virtual_address + text.virtual_size and target + width > text.virtual_address:
                 count += 1
                 if first < 0:
                     first = target

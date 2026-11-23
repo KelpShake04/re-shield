@@ -59,15 +59,21 @@ reshield_attestation_status_t reshield_verify_code_page_wx(void) {
 #endif
 }
 
-/* `requirement` is ignored on Windows (no code requirement language; no signer pin).
+/* Windows has no signer pin. A non-NULL `requirement` therefore fails closed: silently
+ * ignoring it would turn a configured pin into "any trusted publisher is fine".
  * Authenticode validity of the EXE file on disk is checked with WinVerifyTrust
  * (no UI, no revocation check, no network). An unsigned EXE returns FAILED, so enabling
- * RESHIELD_CHECK_CODESIGN on an unsigned dev build makes reshield_verify() fail. */
+ * RESHIELD_CHECK_CODESIGN on an unsigned dev build makes reshield_verify() fail.
+ * Known limit: the file at the module path is verified, not the mapped image; a process
+ * whose EXE was renamed and replaced after launch is not detected. */
 reshield_attestation_status_t reshield_verify_os_codesign_req(const char *requirement) {
-    (void)requirement;
 #ifdef RESHIELD_DISABLE
+    (void)requirement;
     return RESHIELD_ATTEST_OK;
 #else
+    if (requirement != NULL) {
+        return RESHIELD_ATTEST_FAILED;
+    }
     enum { PATH_CAP = 32768 };
     wchar_t *path = (wchar_t *)malloc(PATH_CAP * sizeof(wchar_t));
     if (path == NULL) {

@@ -130,20 +130,24 @@ static void test_codesign_requirement(void) {
                 report.failed_checks == RESHIELD_CHECK_CODESIGN,
                 "reshield_verify() passes cfg.codesign_requirement through");
 #elif defined(_WIN32)
-    /* The requirement is ignored; this test EXE is unsigned (no Authenticode), so FAILED. */
+    /* This test EXE is unsigned (no Authenticode), so even NULL fails; a requirement fails
+     * closed regardless because Windows has no signer pin. A signed EXE is not covered here. */
     ASSERT_TRUE(reshield_verify_os_codesign_req(NULL) == RESHIELD_ATTEST_FAILED,
                 "codesign: unsigned EXE fails WinVerifyTrust");
     ASSERT_TRUE(reshield_verify_os_codesign_req("anchor apple") == RESHIELD_ATTEST_FAILED,
-                "codesign: requirement ignored on Windows, unsigned EXE still fails");
+                "codesign: a requirement fails closed on Windows (no signer pin)");
     ASSERT_TRUE(reshield_verify(&cfg, &report) == RESHIELD_ERR_CODESIGN_INVALID &&
                 report.failed_checks == RESHIELD_CHECK_CODESIGN,
                 "reshield_verify() reports CODESIGN_INVALID for an unsigned EXE");
 #else
     ASSERT_TRUE(reshield_verify_os_codesign_req("anchor apple") == RESHIELD_ATTEST_UNSUPPORTED,
                 "codesign requirement is UNSUPPORTED off macOS");
-    cfg.codesign_requirement = "anchor apple";
     ASSERT_TRUE(reshield_verify(&cfg, &report) == RESHIELD_OK,
-                "off macOS: codesign requirement is ignored");
+                "off macOS: CODESIGN check without a requirement is skipped as UNSUPPORTED");
+    cfg.codesign_requirement = "anchor apple";
+    ASSERT_TRUE(reshield_verify(&cfg, &report) == RESHIELD_ERR_CODESIGN_INVALID &&
+                report.failed_checks == RESHIELD_CHECK_CODESIGN,
+                "off macOS: a requirement that cannot be enforced fails closed");
 #endif
 }
 

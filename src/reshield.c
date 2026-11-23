@@ -108,7 +108,9 @@ reshield_status_t reshield_verify(const reshield_config_t *config,
 
     if ((cfg.enabled_checks & RESHIELD_CHECK_CODESIGN) != 0u) {
         reshield_attestation_status_t cs = reshield_verify_os_codesign_req(cfg.codesign_requirement);
-        if (cs == RESHIELD_ATTEST_FAILED) {
+        /* A pin the platform cannot enforce must not pass silently. */
+        if (cs == RESHIELD_ATTEST_FAILED ||
+            (cs == RESHIELD_ATTEST_UNSUPPORTED && cfg.codesign_requirement != NULL)) {
             report.failed_checks |= RESHIELD_CHECK_CODESIGN;
             if (report.status == RESHIELD_OK) {
                 report.status = RESHIELD_ERR_CODESIGN_INVALID;

@@ -556,6 +556,13 @@ def test_pe_support(tmpdir: str, repo_root: str) -> None:
     assert seal(ok_reloc).returncode == 0, "relocs outside .text and ABSOLUTE padding must not block sealing"
     print("PASS: PE seal rejects relocations inside .text, ignores padding and .data relocations")
 
+    # A reloc that starts just before .text but writes into it changes hashed bytes.
+    rejected("pe_reloc_straddle.exe", build_pe(relocs=[(10, text_va - 4)]),
+             "1 base relocation(s) fall inside .text (first at RVA 0xffc)")
+    ok_adjacent = write("pe_reloc_adjacent.exe", build_pe(relocs=[(3, text_va - 4)]))
+    assert seal(ok_adjacent).returncode == 0, "a 4-byte reloc ending exactly at .text must not block sealing"
+    print("PASS: PE seal checks the reloc write width (DIR64 straddling .text rejected, HIGHLOW adjacent ok)")
+
     # 5. already signed (Security directory); verify-only still works on a signed PE
     rejected("pe_signed.exe", build_pe(security_size=0x200), "seal before signing")
     signed = bytearray(sealed)
