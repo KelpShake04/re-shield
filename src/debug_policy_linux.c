@@ -1,6 +1,6 @@
 #if defined(__linux__)
 
-#include "reshield/anti_debug.h"
+#include "reshield/debug_policy.h"
 
 #include <ctype.h>
 #include <stdatomic.h>

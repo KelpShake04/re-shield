@@ -1,4 +1,4 @@
-#include "reshield/anti_debug.h"
+#include "reshield/debug_policy.h"
 #include "reshield/integrity.h"
 
 #include <inttypes.h>

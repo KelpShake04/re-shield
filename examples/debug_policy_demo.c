@@ -2,7 +2,7 @@
 #define _POSIX_C_SOURCE 200809L
 #endif
 
-#include "reshield/anti_debug.h"
+#include "reshield/debug_policy.h"
 
 #include <inttypes.h>
 #include <stdio.h>

@@ -40,7 +40,7 @@ python3 tools/seal_binary.py /tmp/demo_sealed
 /tmp/demo_sealed --mode=guard-quiet
 
 # 3. 1바이트 손상 감지 E2E 테스트
-python3 tests/test_tamper_e2e.py
+python3 tests/test_integrity_e2e.py
 ```
 
 ## 한계

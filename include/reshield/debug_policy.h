@@ -1,5 +1,5 @@
-#ifndef RESHIELD_ANTI_DEBUG_H
-#define RESHIELD_ANTI_DEBUG_H
+#ifndef RESHIELD_DEBUG_POLICY_H
+#define RESHIELD_DEBUG_POLICY_H
 
 #include <stdint.h>
 
@@ -84,4 +84,4 @@ int      reshield_timer_exceeded_ms(const reshield_timer_t *timer, uint64_t thre
 }
 #endif
 
-#endif /* RESHIELD_ANTI_DEBUG_H */
+#endif /* RESHIELD_DEBUG_POLICY_H */

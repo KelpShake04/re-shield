@@ -1,4 +1,4 @@
-# Runtime Debug Policy PoC (`anti_debug`)
+# Runtime Debug Policy PoC (`debug_policy`)
 
 `re-shield`의 첫 번째 PoC 단계로, 자사 네이티브 바이너리를 위한 **유저스페이스 전용(C11)** 디버거 연결 탐지 및 정책 적용 기능을 구현했다.
 
@@ -32,25 +32,25 @@ make test
 
 ```bash
 # 1. 일반 실행 (정상 통과)
-./build/anti_debug_demo --mode=check
-./build/anti_debug_demo --mode=deny
-./build/anti_debug_demo --mode=guard-quiet
+./build/debug_policy_demo --mode=check
+./build/debug_policy_demo --mode=deny
+./build/debug_policy_demo --mode=guard-quiet
 
 # 2. 디버거(lldb) 하에서 상태 조회 확인 (exit code 10)
-lldb --batch -o run -o quit -- ./build/anti_debug_demo --mode=check
+lldb --batch -o run -o quit -- ./build/debug_policy_demo --mode=check
 
 # 3. 디버거(lldb) 하에서 PT_DENY_ATTACH 동작 확인 (exit status 45)
-lldb --batch -o run -o quit -- ./build/anti_debug_demo --mode=deny
+lldb --batch -o run -o quit -- ./build/debug_policy_demo --mode=deny
 
 # 4. 디버거(lldb) 하에서 TERMINATE 정책 확인 (exit status 1)
-lldb --batch -o run -o quit -- ./build/anti_debug_demo --mode=guard-quiet
+lldb --batch -o run -o quit -- ./build/debug_policy_demo --mode=guard-quiet
 
 # 5. 타이밍 임계치 초과 테스트 (exit code 12)
-./build/anti_debug_demo --mode=timing --threshold-ms=50 --sleep-ms=100
+./build/debug_policy_demo --mode=timing --threshold-ms=50 --sleep-ms=100
 
 # 6. 개발/연구용 비활성화 빌드
-make build/anti_debug_demo_disabled
-lldb --batch -o run -o quit -- ./build/anti_debug_demo_disabled --mode=check
+make build/debug_policy_demo_disabled
+lldb --batch -o run -o quit -- ./build/debug_policy_demo_disabled --mode=check
 ```
 
 ## 한계

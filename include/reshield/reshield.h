@@ -1,7 +1,7 @@
 #ifndef RESHIELD_H
 #define RESHIELD_H
 
-#include "reshield/anti_debug.h"
+#include "reshield/debug_policy.h"
 #include "reshield/integrity.h"
 
 #include <stddef.h>

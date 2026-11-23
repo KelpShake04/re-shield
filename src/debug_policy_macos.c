@@ -1,6 +1,6 @@
 #if defined(__APPLE__) && defined(__MACH__)
 
-#include "reshield/anti_debug.h"
+#include "reshield/debug_policy.h"
 
 #include <string.h>
 #include <sys/ptrace.h>

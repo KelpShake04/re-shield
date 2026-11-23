@@ -2,13 +2,13 @@
 #define _POSIX_C_SOURCE 200809L
 #endif
 
-#include "reshield/anti_debug.h"
+#include "reshield/debug_policy.h"
 
 #include <stddef.h>
 #include <time.h>
 #include <unistd.h>
 
-/* Platform backend hooks implemented in anti_debug_macos.c / anti_debug_linux.c */
+/* Platform backend hooks implemented in debug_policy_macos.c / debug_policy_linux.c */
 extern const char *reshield_platform_backend_name(void);
 extern uint32_t    reshield_platform_check_debugger(void);
 extern int         reshield_platform_deny_attach(void);
