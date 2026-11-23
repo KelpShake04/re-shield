@@ -9,8 +9,13 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#ifdef _WIN32
+#include <direct.h>
+#define mkdir(path, mode) _mkdir(path)
+#else
 #include <sys/wait.h>
 #include <unistd.h>
+#endif
 
 static int g_failures = 0;
 
@@ -64,6 +69,7 @@ static void sha_hex(const char *data, size_t len, char out[65]) {
     hash_to_hex(h, out);
 }
 
+#ifndef _WIN32
 /* Runs fn in a child with an alarm so a regression that blocks cannot hang the suite. */
 static int run_with_timeout(int (*fn)(void), unsigned secs) {
     pid_t pid = fork();
@@ -102,6 +108,8 @@ static int child_fifo_manifest(void) {
     return reshield_verify_manifest_files(ADIR "/fifo.bin", ADIR, root, NULL, 0) ==
            RESHIELD_MANIFEST_IO_ERROR;
 }
+
+#endif /* !_WIN32 */
 
 static void test_manifest_edge_cases(void) {
     char hex[65];
@@ -202,6 +210,7 @@ static void test_manifest_edge_cases(void) {
                     RESHIELD_MANIFEST_IO_ERROR,
                 "edge: nonexistent manifest is IO_ERROR");
 
+#ifndef _WIN32
     /* Non-regular assets must not block the verifier. */
     ASSERT_TRUE(mkfifo(ADIR "/fifo.bin", 0600) == 0, "edge: create FIFO");
     ASSERT_TRUE(run_with_timeout(child_fifo_asset, 3), "edge: FIFO asset is ASSET_MISMATCH within 3s");
@@ -209,6 +218,7 @@ static void test_manifest_edge_cases(void) {
     ASSERT_TRUE(symlink("/dev/zero", ADIR "/zero.bin") == 0, "edge: create /dev/zero symlink");
     ASSERT_TRUE(run_with_timeout(child_zero_symlink_asset, 3),
                 "edge: /dev/zero symlink asset is ASSET_MISMATCH within 3s");
+#endif
 
     remove(ADIR "/a.cfg");
     remove(ADIR "/v1..2.cfg");

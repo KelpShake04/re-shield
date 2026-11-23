@@ -1,3 +1,15 @@
+#ifdef _WIN32
+
+#include <stdio.h>
+
+/* The Windows W^X backend is not implemented yet; nothing to exercise here. */
+int main(void) {
+    printf("SKIP: W^X tests are not implemented on Windows\n");
+    return 0;
+}
+
+#else
+
 #ifndef _DEFAULT_SOURCE
 #define _DEFAULT_SOURCE
 #endif
@@ -85,3 +97,5 @@ int main(void) {
     printf("All W^X unit tests passed.\n");
     return 0;
 }
+
+#endif /* _WIN32 */
