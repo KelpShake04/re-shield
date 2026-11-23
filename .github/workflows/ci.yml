@@ -95,6 +95,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "tamper helper failed" }
           $o = Expect .\build\demo_tampered.exe 2 "tampered .text is detected as CODE_TAMPERED"
           if ($o -notmatch 'CODE_TAMPERED') { throw "tampered EXE did not report CODE_TAMPERED" }
+          exit 0  # the last native call exited 2 on purpose; every real failure above throws
 
       - name: Sealed sample_game with manifest (release-demo equivalent)
         shell: pwsh
