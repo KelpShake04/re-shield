@@ -9,6 +9,7 @@ INCLUDES = -Iinclude
 TARGET_TRIPLE := $(shell $(CC) -dumpmachine)
 ifneq ($(findstring mingw,$(TARGET_TRIPLE)),)
 EXE ?= .exe
+LDFLAGS += -lwintrust
 else ifneq ($(findstring darwin,$(TARGET_TRIPLE)),)
 LDFLAGS += -framework Security -framework CoreFoundation
 endif
@@ -23,11 +24,13 @@ LIB_SRCS  = src/sha256.c \
             src/integrity_common.c \
             src/integrity_macos.c \
             src/integrity_linux.c \
+            src/integrity_windows.c \
             src/file_posix.c \
             src/file_windows.c \
             src/manifest.c \
             src/attestation_macos.c \
             src/attestation_linux.c \
+            src/attestation_windows.c \
             src/reshield.c
 LIB_OBJS  = $(patsubst src/%.c,$(BUILD_DIR)/%.o,$(LIB_SRCS))
 LIB_TARGET = $(BUILD_DIR)/libreshield.a

@@ -129,6 +129,15 @@ static void test_codesign_requirement(void) {
     ASSERT_TRUE(reshield_verify(&cfg, &report) == RESHIELD_ERR_CODESIGN_INVALID &&
                 report.failed_checks == RESHIELD_CHECK_CODESIGN,
                 "reshield_verify() passes cfg.codesign_requirement through");
+#elif defined(_WIN32)
+    /* The requirement is ignored; this test EXE is unsigned (no Authenticode), so FAILED. */
+    ASSERT_TRUE(reshield_verify_os_codesign_req(NULL) == RESHIELD_ATTEST_FAILED,
+                "codesign: unsigned EXE fails WinVerifyTrust");
+    ASSERT_TRUE(reshield_verify_os_codesign_req("anchor apple") == RESHIELD_ATTEST_FAILED,
+                "codesign: requirement ignored on Windows, unsigned EXE still fails");
+    ASSERT_TRUE(reshield_verify(&cfg, &report) == RESHIELD_ERR_CODESIGN_INVALID &&
+                report.failed_checks == RESHIELD_CHECK_CODESIGN,
+                "reshield_verify() reports CODESIGN_INVALID for an unsigned EXE");
 #else
     ASSERT_TRUE(reshield_verify_os_codesign_req("anchor apple") == RESHIELD_ATTEST_UNSUPPORTED,
                 "codesign requirement is UNSUPPORTED off macOS");

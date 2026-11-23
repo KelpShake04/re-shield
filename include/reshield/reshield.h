@@ -26,7 +26,7 @@ typedef enum reshield_status {
 typedef enum reshield_check_flags {
     RESHIELD_CHECK_CODE_SECTION     = 1u << 0, /* __TEXT,__text / .text SHA-256 */
     RESHIELD_CHECK_PAGE_PERMISSIONS = 1u << 1, /* Code segment W^X (r-x, no W) */
-    RESHIELD_CHECK_CODESIGN         = 1u << 2, /* OS code signature validity (macOS) */
+    RESHIELD_CHECK_CODESIGN         = 1u << 2, /* OS code signature validity (macOS, Windows) */
     RESHIELD_CHECK_MANIFEST         = 1u << 3, /* Sealed manifest + asset verification */
     RESHIELD_CHECK_DEFAULT          = (RESHIELD_CHECK_CODE_SECTION |
                                        RESHIELD_CHECK_PAGE_PERMISSIONS)

@@ -23,10 +23,9 @@ const char *reshield_platform_name(void) {
 }
 
 /* Fallback for platforms with no attestation_*.c backend: without these definitions the
- * library does not link. _WIN32 is deliberately included until the Windows backends land
- * (M4/M5); then exclude it here with `&& !defined(_WIN32)`. UNSUPPORTED is silently
- * accepted by reshield_verify(), like the Linux codesign check. */
-#if !defined(__APPLE__) && !defined(__linux__)
+ * library does not link. Windows has its own backend (attestation_windows.c). UNSUPPORTED
+ * is silently accepted by reshield_verify(), like the Linux codesign check. */
+#if !defined(__APPLE__) && !defined(__linux__) && !defined(_WIN32)
 reshield_attestation_status_t reshield_verify_code_page_wx(void) {
     return RESHIELD_ATTEST_UNSUPPORTED;
 }
