@@ -1,6 +1,6 @@
 # re-shield
 
-소프트웨어/게임을 리버스 엔지니어링(디컴파일, 메모리 덤프, 디버거 attach)으로부터 보호하는 안티 리버싱 도구. 현재는 **디버거 attach 탐지 PoC**와 **변조 탐지(코드 섹션 체크섬) PoC**가 C11 정적 라이브러리로 구현되어 있다.
+소프트웨어/게임을 리버스 엔지니어링(디컴파일, 메모리 덤프, 디버거 attach)으로부터 보호하는 안티 리버싱 도구. 현재는 **C11 통합 런타임 라이브러리(`libreshield.a`)**, **빌드 타임 봉인 도구(`tools/seal_binary.py`)**, **적용 전/후 비교 시연(`examples/sample_game.c`)**까지 구현되어 있다.
 
 ## 배경
 
@@ -24,8 +24,8 @@
 
 ### 1. 정적 분석 방지
 - 심볼/디버그 정보 strip.
-- 문자열 상수 암호화(런타임 복호화).
-- 핵심 로직은 제어 흐름 난독화(flattening) 또는 간단한 바이트코드 인터프리터로 우회.
+- 문자열 상수 암호화/난독화(런타임 복호화 + 사용 후 즉시 0으로 덮어쓰기).
+- 핵심 로직은 제어 흐름 난독화(flattening) 또는 간단한 바이트코드 인터프리터로 우회(향후 과제).
 
 ### 2. 동적 분석 방지
 - macOS: `sysctl`(`P_TRACED`) 기반 비파괴 탐지 + `ptrace(PT_DENY_ATTACH)` 호출로 디버거 attach 차단.
@@ -33,8 +33,8 @@
 - 공통: 실행 중 주기적으로 환경 재검사(타이밍 기반 디버거 탐지 — 브레이크포인트로 인한 실행 지연 측정).
 
 ### 3. 메모리 보호
-- 민감 데이터(키, 핵심 상수)는 메모리에 평문으로 오래 두지 않고 사용 직전 복호화 → 사용 후 즉시 0으로 덮어쓰기.
-- `mprotect`/`VirtualProtect`로 코드 페이지를 읽기 전용 + 실행 전용으로 설정, 실행 중 페이지 속성 변경 시도를 탐지.
+- 민감 데이터(키, 핵심 상수)는 메모리에 평문으로 오래 두지 않고 사용 직전 복호화 → 사용 후 즉시 0으로 덮어쓰기(`reshield_secure_zero`).
+- `mprotect`/`VirtualProtect`로 코드 페이지를 읽기 전용 + 실행 전용으로 설정, 실행 중 페이지 속성 변경 시도를 탐지(향후 과제).
 
 ### 4. 변조 탐지
 - 빌드 시 핵심 섹션(`__TEXT,__text` / `.text`) SHA-256 해시를 계산해 바이너리에 삽입(`tools/seal_binary.py`).
@@ -51,19 +51,21 @@
 ```bash
 make all
 make test
+make sample-compare
 ```
 
 - 디버거 attach 탐지 PoC 상세·`lldb` 검증·우회 한계: [docs/poc-anti-debug.md](docs/poc-anti-debug.md)
 - 변조 탐지(체크섬) PoC 상세·봉인/변조 시연·우회 한계: [docs/poc-integrity.md](docs/poc-integrity.md)
+- 통합 런타임 API 및 적용 전/후 비교 시연: [docs/comparison-demo.md](docs/comparison-demo.md)
 - 개발·보안 연구 목적의 디버깅 시 `-DRESHIELD_DISABLE`로 모든 탐지/검증을 비활성화할 수 있다.
 
 ## 다음 단계
 
 - [x] 대상 플랫폼/언어 확정 후 PoC: 디버거 attach 탐지 단일 기능부터 구현. (C11, macOS/Linux — `include/reshield/anti_debug.h`, `src/anti_debug_*.c`)
 - [x] 변조 탐지(체크섬) PoC. (자체 SHA-256 + `tools/seal_binary.py` + `include/reshield/integrity.h`, `src/integrity_*.c`)
-- [ ] 두 기능을 하나의 런타임 라이브러리로 통합.
-- [ ] 샘플 프로그램에 적용 전/후 리버싱 난이도 비교 시연.
+- [x] 두 기능을 하나의 런타임 라이브러리로 통합. (`include/reshield/reshield.h`, `src/reshield.c`, `libreshield.a`)
+- [x] 샘플 프로그램에 적용 전/후 리버싱 난이도 비교 시연. (`examples/sample_game.c`, `tools/compare_sample.py`, `docs/comparison-demo.md`)
 
 ## 상태
 
-1차(디버거 attach 탐지·차단) 및 2차(코드 섹션 SHA-256 변조 탐지) PoC 구현 완료. 런타임 라이브러리 통합 및 샘플 비교 시연 진행 예정.
+1차 로드맵(디버거 attach 탐지 PoC → 변조 탐지 체크섬 PoC → 단일 런타임 라이브러리 통합 → 적용 전/후 비교 시연) 완료.

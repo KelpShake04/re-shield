@@ -1,5 +1,6 @@
 CC      ?= cc
 AR      ?= ar
+STRIP   ?= strip
 PYTHON3 ?= python3
 CFLAGS  ?= -std=c11 -Wall -Wextra -Wpedantic -Werror -O2
 INCLUDES = -Iinclude
@@ -11,7 +12,8 @@ LIB_SRCS  = src/anti_debug_common.c \
             src/sha256.c \
             src/integrity_common.c \
             src/integrity_macos.c \
-            src/integrity_linux.c
+            src/integrity_linux.c \
+            src/reshield.c
 LIB_OBJS  = $(patsubst src/%.c,$(BUILD_DIR)/%.o,$(LIB_SRCS))
 LIB_TARGET = $(BUILD_DIR)/libreshield.a
 
@@ -20,19 +22,25 @@ DEMO_ANTI_DEBUG_DISABLED = $(BUILD_DIR)/anti_debug_demo_disabled
 DEMO_INTEGRITY           = $(BUILD_DIR)/integrity_demo
 DEMO_INTEGRITY_DISABLED  = $(BUILD_DIR)/integrity_demo_disabled
 
+SAMPLE_UNPROTECTED       = $(BUILD_DIR)/sample_game_unprotected
+SAMPLE_PROTECTED         = $(BUILD_DIR)/sample_game_protected
+
 TEST_ANTI_DEBUG          = $(BUILD_DIR)/test_anti_debug
 TEST_ANTI_DEBUG_DISABLED = $(BUILD_DIR)/test_anti_debug_disabled
 TEST_INTEGRITY           = $(BUILD_DIR)/test_integrity
 TEST_INTEGRITY_DISABLED  = $(BUILD_DIR)/test_integrity_disabled
+TEST_RUNTIME             = $(BUILD_DIR)/test_runtime
+TEST_RUNTIME_DISABLED    = $(BUILD_DIR)/test_runtime_disabled
 
-.PHONY: all clean test
+.PHONY: all clean test sample-compare
 
-all: $(LIB_TARGET) $(DEMO_ANTI_DEBUG) $(DEMO_INTEGRITY) $(TEST_ANTI_DEBUG) $(TEST_INTEGRITY)
+all: $(LIB_TARGET) $(DEMO_ANTI_DEBUG) $(DEMO_INTEGRITY) $(SAMPLE_UNPROTECTED) $(SAMPLE_PROTECTED) \
+     $(TEST_ANTI_DEBUG) $(TEST_INTEGRITY) $(TEST_RUNTIME)
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
-$(BUILD_DIR)/%.o: src/%.c include/reshield/anti_debug.h include/reshield/integrity.h | $(BUILD_DIR)
+$(BUILD_DIR)/%.o: src/%.c include/reshield/anti_debug.h include/reshield/integrity.h include/reshield/reshield.h | $(BUILD_DIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
 
 $(LIB_TARGET): $(LIB_OBJS)
@@ -50,6 +58,14 @@ $(DEMO_INTEGRITY): examples/integrity_demo.c $(LIB_TARGET)
 $(DEMO_INTEGRITY_DISABLED): examples/integrity_demo.c $(LIB_SRCS) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -DRESHIELD_DISABLE $(INCLUDES) $^ -o $@
 
+$(SAMPLE_UNPROTECTED): examples/sample_game.c | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -DRESHIELD_UNPROTECTED $(INCLUDES) $< -o $@
+
+$(SAMPLE_PROTECTED): examples/sample_game.c $(LIB_TARGET)
+	$(CC) $(CFLAGS) $(INCLUDES) $< $(LIB_TARGET) -o $@
+	$(STRIP) $@
+	$(PYTHON3) tools/seal_binary.py $@
+
 $(TEST_ANTI_DEBUG): tests/test_anti_debug.c $(LIB_TARGET)
 	$(CC) $(CFLAGS) $(INCLUDES) $< $(LIB_TARGET) -o $@
 
@@ -62,12 +78,28 @@ $(TEST_INTEGRITY): tests/test_integrity.c $(LIB_TARGET)
 $(TEST_INTEGRITY_DISABLED): tests/test_integrity.c $(LIB_SRCS) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -DRESHIELD_DISABLE $(INCLUDES) $^ -o $@
 
-test: $(TEST_ANTI_DEBUG) $(TEST_ANTI_DEBUG_DISABLED) $(TEST_INTEGRITY) $(TEST_INTEGRITY_DISABLED) $(DEMO_INTEGRITY) $(DEMO_INTEGRITY_DISABLED)
+$(TEST_RUNTIME): tests/test_runtime.c $(LIB_TARGET)
+	$(CC) $(CFLAGS) $(INCLUDES) $< $(LIB_TARGET) -o $@
+
+$(TEST_RUNTIME_DISABLED): tests/test_runtime.c $(LIB_SRCS) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -DRESHIELD_DISABLE $(INCLUDES) $^ -o $@
+
+sample-compare: $(SAMPLE_UNPROTECTED) $(SAMPLE_PROTECTED)
+	$(PYTHON3) tools/compare_sample.py
+
+test: $(TEST_ANTI_DEBUG) $(TEST_ANTI_DEBUG_DISABLED) \
+      $(TEST_INTEGRITY) $(TEST_INTEGRITY_DISABLED) \
+      $(TEST_RUNTIME) $(TEST_RUNTIME_DISABLED) \
+      $(DEMO_INTEGRITY) $(DEMO_INTEGRITY_DISABLED) \
+      $(SAMPLE_UNPROTECTED) $(SAMPLE_PROTECTED)
 	./$(TEST_ANTI_DEBUG)
 	./$(TEST_ANTI_DEBUG_DISABLED)
 	./$(TEST_INTEGRITY)
 	./$(TEST_INTEGRITY_DISABLED)
+	./$(TEST_RUNTIME)
+	./$(TEST_RUNTIME_DISABLED)
 	$(PYTHON3) tests/test_tamper_e2e.py
+	$(PYTHON3) tools/compare_sample.py
 
 clean:
 	rm -rf $(BUILD_DIR)
