@@ -44,6 +44,6 @@ Offset  Size  Field
 - 매니페스트에 없는 추가 파일은 감지하지 못한다.
 - macOS 코드 서명 검증은 `SecCodeCheckValidity`를 requirement `NULL`로 호출해 서명 유효성만 확인하며 서명 주체는 고정하지 않는다.
 - fat/universal Mach-O는 `seal_binary.py`가 지원하지 않는다.
-- Windows(PE32+ x64)는 빌드·봉인 도구와 파일 I/O까지 준비되어 있고 런타임 백엔드(코드 섹션·W^X·코드 서명)는 미구현이다. [integrity-verification.md](integrity-verification.md#7-windows-pe32-x64-봉인-런타임-미구현) 참고.
+- Windows(PE32+ x64)는 빌드·봉인 도구와 파일 I/O까지 준비되어 있고 런타임 백엔드(코드 섹션·W^X·코드 서명)는 미구현이다. 정식 지원 대상은 MSVC 빌드(지원 예정, 미검증: `.text` reloc 여부를 CI에서 측정 중)이며 mingw-w64는 크로스 컴파일·도구 테스트 전용이다. [integrity-verification.md](integrity-verification.md#7-windows-pe32-x64-봉인-런타임-미구현) 참고.
 - macOS·Linux 외 플랫폼(Windows 포함, 런타임 백엔드 미구현)에서는 코드 섹션을 찾지 못해 무결성 검사가 `RESHIELD_INTEGRITY_ERROR` → `RESHIELD_ERR_INTERNAL`(기본 설정에서 fail-closed)이 된다. W^X·코드 서명 검사는 `RESHIELD_ATTEST_UNSUPPORTED`를 반환하며 `reshield_verify()`는 이를 Linux 코드 서명 검사와 같이 조용히 통과시킨다.
 - 자세한 내용: [integrity-verification.md](integrity-verification.md#5-한계).
