@@ -152,7 +152,7 @@ reshield_integrity_status_t reshield_integrity_guard(const reshield_integrity_co
                 }
                 break;
             case RESHIELD_INTEGRITY_POLICY_TERMINATE:
-                /* Quiet termination: do not leak detection logic via error messages */
+                /* Terminate process according to configured policy */
                 _exit(1);
                 break;
             case RESHIELD_INTEGRITY_POLICY_REPORT:

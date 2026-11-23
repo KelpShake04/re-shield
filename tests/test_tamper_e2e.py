@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-End-to-end tamper detection verification for re-shield integrity PoC.
+End-to-end integrity verification test for re-shield's own first-party demo binary.
 
-Verifies:
-1. Unsealed binary reports UNSEALED (exit 10) and fails quiet guard (exit 1, no stdout).
-2. Sealed binary reports OK (exit 0) and passes quiet guard (exit 0).
-3. Flipping 1 byte inside executable code (reshield_tamper_target) triggers
-   TAMPERED (exit 11) and silent exit 1 under guard-quiet.
-4. Disabled build (-DRESHIELD_DISABLE) passes even when unsealed.
+Simulates a 1-byte corruption in a temporary copy of build/integrity_demo to verify:
+1. Unsealed binary reports UNSEALED (exit 10) and enforces TERMINATE policy (exit 1).
+2. Sealed binary reports OK (exit 0) and passes guard (exit 0).
+3. Flipping 1 byte inside an unused test sentinel function (reshield_tamper_target)
+   triggers TAMPERED (exit 11) and exit 1 under TERMINATE policy.
+4. Disabled build (-DRESHIELD_DISABLE) skips checks as designed for dev/QA builds.
 """
 
 import os

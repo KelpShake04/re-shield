@@ -1,50 +1,50 @@
 # re-shield
 
-소프트웨어/게임을 리버스 엔지니어링(디컴파일, 메모리 덤프, 디버거 attach)으로부터 보호하는 안티 리버싱 도구. 현재는 **C11 통합 런타임 라이브러리(`libreshield.a`)**, **빌드 타임 봉인 도구(`tools/seal_binary.py`)**, **적용 전/후 비교 시연(`examples/sample_game.c`)**까지 구현되어 있다.
+자사(1st-party) 네이티브 소프트웨어·게임의 **바이너리 무결성 검증(Integrity Verification)**과 **런타임 디버거 연결 정책(Debug Policy)**을 제공하는 방어적 C11 런타임 라이브러리다.
+
+> **사용 범위(Intended Use)**: 개발자가 자신이 소유·배포하는 네이티브 애플리케이션의 무단 변조와 단순 복제를 어렵게 만들기 위한 **방어적·교육용** 도구다. 악성코드·분석 회피(evasion) 목적이나 권한 없는 바이너리 수정 용도로 사용하지 않는다. 개발·QA·보안 연구 시 `-DRESHIELD_DISABLE`로 모든 검사를 비활성화할 수 있다.
 
 ## 배경
 
-리버싱으로 소스코드·에셋을 추출해 게임을 그대로 복제하는 사례가 있다. 완전한 방어는 불가능하지만(바이너리를 실행 가능한 형태로 주는 한, 공격자는 결국 디스어셈블·동적 분석으로 우회할 수 있다), 비용과 난이도를 크게 올려 "그대로 복제"를 막는 것이 목표다.
+네이티브 게임·애플리케이션의 바이너리를 변조하거나 리소스를 그대로 복제하는 사례가 있다. 바이너리를 로컬에서 실행 가능한 형태로 배포하는 한 완전한 방어는 불가능하지만, 기본적인 무결성 검증과 디버그 정책을 최소 침습으로 적용해 무단 변조 비용을 높이는 것이 목표다.
 
 ## 목표
 
-- 정적 분석 난이도 상승: 코드/문자열 난독화, 심볼 제거.
-- 동적 분석 난이도 상승: 디버거 attach 탐지·차단, 프로세스 메모리 덤프 방해.
-- 변조 탐지: 바이너리/핵심 로직 체크섬 검증, 위변조 시 실행 중단.
-- 위 세 가지를 하나의 빌드 단계 + 런타임 라이브러리로 통합해, 기존 프로젝트에 최소 침습으로 적용 가능하게.
+- **무결성 검증**: 빌드 시 코드 섹션(`__TEXT,__text` / `.text`) SHA-256 해시를 기록하고, 런타임에 메모리 상 코드 섹션을 재검증.
+- **런타임 디버그 정책**: OS 표준 API를 이용해 디버거 연결 여부를 확인하고, 정책(`REPORT` / `CALLBACK` / `TERMINATE`)에 따라 대응.
+- **민감 데이터 메모리 관리**: 민감 상수를 평문으로 오래 유지하지 않고 사용 직후 `reshield_secure_zero()`로 메모리 초기화.
+- **최소 침습 통합**: 단일 정적 라이브러리(`libreshield.a`)와 빌드 후처리(`tools/seal_binary.py`)로 기존 C/C++ 프로젝트에 쉽게 적용.
 
 ## Non-goals / Anti-goals
 
 - 서버 라이선스 인증, DRM 전체 시스템 (범위 밖).
 - 커널 레벨 방어(안티치트 드라이버, kext/커널 모듈) — 서명·배포 문턱이 높아 1차 범위에서 제외.
-- "절대 못 뚫는다"는 주장 — 리버싱 방지는 지연이 목적이지 차단 보장이 아니다. 과장된 보안 주장은 anti-goal.
-- 합법적 보안 연구(디버깅, 취약점 분석)를 막는 수준의 과잉 방어 — 정당한 디버깅 목적까지 차단하면 실패로 본다.
+- "절대 못 뚫는다"는 주장 — 유저스페이스 무결성 보호는 지연·마찰이 목적이지 절대 차단이 아니다. 과장된 보안 주장은 anti-goal.
+- 합법적 보안 연구·개발 디버깅을 막는 수준의 과잉 방어 — `-DRESHIELD_DISABLE` 및 정책 분리를 통해 정당한 디버깅을 지원한다.
 
-## 개념 설계
+## 아키텍처 개요
 
-### 1. 정적 분석 방지
-- 심볼/디버그 정보 strip.
-- 문자열 상수 암호화/난독화(런타임 복호화 + 사용 후 즉시 0으로 덮어쓰기).
-- 핵심 로직은 제어 흐름 난독화(flattening) 또는 간단한 바이트코드 인터프리터로 우회(향후 과제).
+### 1. 빌드·심볼 정리 및 메모리 관리
+- 릴리스 빌드 시 불필요한 내부 심볼 `strip`.
+- 민감 설정값은 사용 직전 복원 후 `reshield_secure_zero()`로 즉시 메모리에서 제거.
 
-### 2. 동적 분석 방지
-- macOS: `sysctl`(`P_TRACED`) 기반 비파괴 탐지 + `ptrace(PT_DENY_ATTACH)` 호출로 디버거 attach 차단.
-- Linux: `/proc/self/status` TracerPid 확인 + `ptrace(PTRACE_TRACEME)` self-trace 트릭.
-- 공통: 실행 중 주기적으로 환경 재검사(타이밍 기반 디버거 탐지 — 브레이크포인트로 인한 실행 지연 측정).
+### 2. 런타임 디버그 정책 (`include/reshield/anti_debug.h`)
+- macOS: `sysctl`(`P_TRACED`) 상태 조회 + `ptrace(PT_DENY_ATTACH)` (Apple 플랫폼 표준 디버거 attach 제한 API).
+- Linux: `/proc/self/status`의 `TracerPid` 조회 + `ptrace(PTRACE_TRACEME)` 기반 연결 제한.
+- 공통: `CLOCK_MONOTONIC` 기반 구간 실행 시간 측정 헬퍼(보조 휴리스틱).
 
-### 3. 메모리 보호
-- 민감 데이터(키, 핵심 상수)는 메모리에 평문으로 오래 두지 않고 사용 직전 복호화 → 사용 후 즉시 0으로 덮어쓰기(`reshield_secure_zero`).
-- `mprotect`/`VirtualProtect`로 코드 페이지를 읽기 전용 + 실행 전용으로 설정, 실행 중 페이지 속성 변경 시도를 탐지(향후 과제).
+### 3. 바이너리 무결성 검증 (`include/reshield/integrity.h`)
+- 빌드 후 `tools/seal_binary.py`가 실행 파일의 코드 섹션(`__TEXT,__text` / `.text`) SHA-256을 계산해 데이터 섹션의 `RSHLDCHK` 레코드에 기록.
+- 런타임에 메모리 상 코드 섹션의 SHA-256을 재계산해 상수 시간 비교(`ct_memcmp`)로 변조 여부 확인.
 
-### 4. 변조 탐지
-- 빌드 시 핵심 섹션(`__TEXT,__text` / `.text`) SHA-256 해시를 계산해 바이너리에 삽입(`tools/seal_binary.py`).
-- 런타임에 메모리 상 코드 섹션 해시를 재계산 → 불일치 시 조용히 비정상 종료(에러 메시지로 공격자에게 탐지 로직을 알려주지 않음).
+### 4. 통합 런타임 (`include/reshield/reshield.h`)
+- `reshield_init()` / `reshield_periodic_check()` 단일 진입점으로 디버그 정책과 무결성 검증을 함께 적용.
 
 ## 제약
 
-- 완전한 방어는 불가능하다는 전제를 설계·발표 문서에 명시한다(과장 금지).
+- 완전한 방어는 불가능하다는 전제를 모든 설계·문서에 명시한다(과장 금지).
 - 1차 구현은 네이티브 바이너리(C/C++) 대상. 스크립트 언어(바이트코드 VM 등)는 범위 밖.
-- 플랫폼: macOS·Linux 우선(현재 개발 환경 기준). Windows는 2차.
+- 플랫폼: macOS·Linux 우선. Windows는 2차.
 
 ## 빠른 시작
 
@@ -54,18 +54,18 @@ make test
 make sample-compare
 ```
 
-- 디버거 attach 탐지 PoC 상세·`lldb` 검증·우회 한계: [docs/poc-anti-debug.md](docs/poc-anti-debug.md)
-- 변조 탐지(체크섬) PoC 상세·봉인/변조 시연·우회 한계: [docs/poc-integrity.md](docs/poc-integrity.md)
+- 런타임 디버그 정책 PoC 상세 및 한계: [docs/poc-anti-debug.md](docs/poc-anti-debug.md)
+- 코드 섹션 무결성 검증 PoC 상세 및 한계: [docs/poc-integrity.md](docs/poc-integrity.md)
 - 통합 런타임 API 및 적용 전/후 비교 시연: [docs/comparison-demo.md](docs/comparison-demo.md)
-- 개발·보안 연구 목적의 디버깅 시 `-DRESHIELD_DISABLE`로 모든 탐지/검증을 비활성화할 수 있다.
+- 개발·보안 연구 목적의 디버깅 시 `-DRESHIELD_DISABLE`로 모든 검사를 비활성화할 수 있다.
 
 ## 다음 단계
 
 - [x] 대상 플랫폼/언어 확정 후 PoC: 디버거 attach 탐지 단일 기능부터 구현. (C11, macOS/Linux — `include/reshield/anti_debug.h`, `src/anti_debug_*.c`)
 - [x] 변조 탐지(체크섬) PoC. (자체 SHA-256 + `tools/seal_binary.py` + `include/reshield/integrity.h`, `src/integrity_*.c`)
 - [x] 두 기능을 하나의 런타임 라이브러리로 통합. (`include/reshield/reshield.h`, `src/reshield.c`, `libreshield.a`)
-- [x] 샘플 프로그램에 적용 전/후 리버싱 난이도 비교 시연. (`examples/sample_game.c`, `tools/compare_sample.py`, `docs/comparison-demo.md`)
+- [x] 샘플 프로그램에 적용 전/후 비교 시연. (`examples/sample_game.c`, `tools/compare_sample.py`, `docs/comparison-demo.md`)
 
 ## 상태
 
-1차 로드맵(디버거 attach 탐지 PoC → 변조 탐지 체크섬 PoC → 단일 런타임 라이브러리 통합 → 적용 전/후 비교 시연) 완료.
+1차 로드맵(디버그 정책 PoC → 무결성 체크섬 PoC → 단일 런타임 라이브러리 통합 → 적용 전/후 비교 시연) 완료.

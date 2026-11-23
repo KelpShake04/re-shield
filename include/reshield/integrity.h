@@ -28,7 +28,7 @@ typedef enum reshield_integrity_status {
 typedef enum reshield_integrity_policy {
     RESHIELD_INTEGRITY_POLICY_REPORT    = 0, /* Return status only; caller decides */
     RESHIELD_INTEGRITY_POLICY_CALLBACK  = 1, /* Invoke user callback on non-OK status */
-    RESHIELD_INTEGRITY_POLICY_TERMINATE = 2  /* Exit quietly via _exit(1) without diagnostics */
+    RESHIELD_INTEGRITY_POLICY_TERMINATE = 2  /* Terminate process via _exit(1) */
 } reshield_integrity_policy_t;
 
 /**

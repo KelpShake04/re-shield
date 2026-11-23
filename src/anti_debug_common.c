@@ -95,7 +95,7 @@ uint32_t reshield_guard(const reshield_config_t *config) {
                 }
                 break;
             case RESHIELD_POLICY_TERMINATE:
-                /* Quiet termination: do not print diagnostic hints */
+                /* Terminate process according to configured policy */
                 _exit(1);
                 break;
             case RESHIELD_POLICY_REPORT:
