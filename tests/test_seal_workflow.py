@@ -616,7 +616,20 @@ def test_pe_support(tmpdir: str, repo_root: str) -> None:
     assert r.returncode == 1 and "code_seal:       FAIL" in r.stdout, r
     print("PASS: verify_release handles PE (OK / tampered) and reports defined_symbols n/a without nm")
 
-    # 11. optional: a real EXE (e.g. mingw-w64 build of examples/integrity_demo.c)
+    # 11. tools/pe_probe.py reports .text reloc counts and the seal verdict, leaves the input alone
+    probe_tool = os.path.join(repo_root, "tools", "pe_probe.py")
+    probe_ok = write("pe_probe_ok.exe", build_pe())
+    probe_bad = write("pe_probe_bad.exe", build_pe(relocs=[(10, 0x1010), (10, 0x1020)]))
+    r = run_cmd([py, probe_tool, probe_ok])
+    assert r.returncode == 0 and "base relocations inside .text: 0" in r.stdout and "SEALED" in r.stdout, r
+    r = run_cmd([py, probe_tool, probe_bad])
+    assert (r.returncode == 0 and "base relocations inside .text: 2" in r.stdout
+            and "0x1010, 0x1020" in r.stdout and "REFUSED" in r.stdout), r
+    with open(probe_ok, "rb") as f:
+        assert f.read() == build_pe(), "pe_probe must not modify its input"
+    print("PASS: pe_probe reports reloc counts and seal verdict without modifying the input")
+
+    # 12. optional: a real EXE (e.g. mingw-w64 build of examples/integrity_demo.c)
     real = os.environ.get("RESHIELD_TEST_PE_EXE")
     if not real:
         print("SKIP: RESHIELD_TEST_PE_EXE not set (real PE test)")

@@ -1,0 +1,84 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: make clean && make all test release-demo
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: make clean && make all test release-demo
+
+  # Measurement-only experiment: does an MSVC-built EXE carry base relocations inside .text?
+  # Until this reports, Windows/MSVC support is "planned, unverified". Failures here do not fail CI.
+  windows-msvc-probe:
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Locate Visual Studio
+        shell: cmd
+        run: |
+          mkdir build
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath`) do set "VSDIR=%%i"
+          echo VSDIR=%VSDIR%
+          echo VSDIR=%VSDIR%>>"%GITHUB_ENV%"
+
+      - name: Build integrity_demo with cl
+        shell: cmd
+        run: |
+          call "%VSDIR%\VC\Auxiliary\Build\vcvars64.bat"
+          cl /nologo /std:c11 /O2 /W3 /I include /Fo:build\ src\sha256.c src\integrity_common.c src\manifest.c src\file_windows.c src\reshield.c examples\integrity_demo.c /Fe:build\integrity_demo.exe /link /INCREMENTAL:NO > build\build.log 2>&1
+          set RC=%ERRORLEVEL%
+          type build\build.log
+          exit /b %RC%
+
+      - name: Measure PE properties
+        if: always()
+        shell: cmd
+        run: |
+          if exist build\integrity_demo.exe (python tools\pe_probe.py build\integrity_demo.exe > build\pe_probe.txt 2>&1) else (echo build\integrity_demo.exe was not produced > build\pe_probe.txt)
+          type build\pe_probe.txt
+          exit /b 0
+
+      - name: dumpbin headers and relocations
+        if: always()
+        shell: cmd
+        run: |
+          call "%VSDIR%\VC\Auxiliary\Build\vcvars64.bat"
+          if exist build\integrity_demo.exe (dumpbin /headers /relocations build\integrity_demo.exe > build\dumpbin.txt 2>&1) else (echo build\integrity_demo.exe was not produced > build\dumpbin.txt)
+          exit /b 0
+
+      - name: Summarize
+        if: always()
+        shell: pwsh
+        run: |
+          foreach ($f in 'build.log', 'pe_probe.txt', 'dumpbin.txt') {
+            $p = "build/$f"
+            "### $f" >> $env:GITHUB_STEP_SUMMARY
+            '```' >> $env:GITHUB_STEP_SUMMARY
+            if (Test-Path $p) { Get-Content -TotalCount 80 $p >> $env:GITHUB_STEP_SUMMARY } else { '(missing)' >> $env:GITHUB_STEP_SUMMARY }
+            '```' >> $env:GITHUB_STEP_SUMMARY
+          }
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-msvc-probe
+          path: |
+            build/build.log
+            build/pe_probe.txt
+            build/dumpbin.txt
+          if-no-files-found: warn
