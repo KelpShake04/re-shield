@@ -9,9 +9,11 @@
 #include <windows.h>
 #include <softpub.h>
 #include <wintrust.h>
+#include <psapi.h>
 
 #ifdef _MSC_VER
 #pragma comment(lib, "wintrust.lib")
+#pragma comment(lib, "psapi.lib")
 #endif
 
 extern int reshield_platform_get_code_section(const uint8_t **out_ptr, uint64_t *out_size);
@@ -61,6 +63,7 @@ reshield_attestation_status_t reshield_verify_code_page_wx(void) {
 #endif
 }
 
+#ifndef RESHIELD_DISABLE
 /* Windows requirement format: "leaf-sha256:" + 64 hex chars (case-insensitive) = SHA-256 of
  * the DER-encoded signing (leaf) certificate of the first Authenticode signer. Any other
  * non-NULL string fails closed: silently ignoring it would turn a configured pin into
@@ -68,8 +71,11 @@ reshield_attestation_status_t reshield_verify_code_page_wx(void) {
  * Authenticode validity of the EXE file on disk is checked with WinVerifyTrust
  * (no UI, no revocation check, no network). An unsigned EXE returns FAILED, so enabling
  * RESHIELD_CHECK_CODESIGN on an unsigned dev build makes reshield_verify() fail.
- * Known limit: the file at the module path is verified, not the mapped image; a process
- * whose EXE was renamed and replaced after launch is not detected. */
+ * The file verified is the one backing the mapped main image: its NT path comes from
+ * GetMappedFileNameW, is converted to a DOS path (GetLogicalDriveStringsW + QueryDosDeviceW)
+ * and opened once; that handle is passed to WinVerifyTrust, so renaming the running EXE and
+ * putting another file at the old path does not change what is verified. Fail closed when the
+ * conversion fails (e.g. EXE on a UNC share). */
 static int hex_nibble(char c) {
     if (c >= '0' && c <= '9') return c - '0';
     if (c >= 'a' && c <= 'f') return c - 'a' + 10;
@@ -114,6 +120,46 @@ static int leaf_cert_matches(HANDLE state, const uint8_t pin[RESHIELD_SHA256_SIZ
     return diff == 0;
 }
 
+/* Opens (read-only, share read+delete) the file that backs the main image mapping.
+ * Returns the handle and the DOS path in `path`, or INVALID_HANDLE_VALUE. */
+static HANDLE open_mapped_image(wchar_t *path, size_t cap) {
+    wchar_t nt[MAX_PATH * 4];
+    DWORD nlen = GetMappedFileNameW(GetCurrentProcess(), (LPVOID)GetModuleHandleW(NULL),
+                                    nt, (DWORD)(sizeof(nt) / sizeof(nt[0])));
+    if (nlen == 0 || nlen >= sizeof(nt) / sizeof(nt[0])) {
+        return INVALID_HANDLE_VALUE;
+    }
+    wchar_t drives[512];
+    DWORD dl = GetLogicalDriveStringsW((DWORD)(sizeof(drives) / sizeof(drives[0])) - 1u, drives);
+    if (dl == 0 || dl >= sizeof(drives) / sizeof(drives[0])) {
+        return INVALID_HANDLE_VALUE;
+    }
+    for (const wchar_t *d = drives; *d != L'\0'; d += wcslen(d) + 1) {
+        wchar_t name[3] = { d[0], L':', L'\0' };
+        wchar_t dev[MAX_PATH * 2];
+        DWORD dn = QueryDosDeviceW(name, dev, (DWORD)(sizeof(dev) / sizeof(dev[0])));
+        if (dn == 0) {
+            continue;
+        }
+        size_t dlen = wcslen(dev); /* first entry of the multi-string */
+        if (dlen == 0 || dlen >= nlen || _wcsnicmp(nt, dev, dlen) != 0 || nt[dlen] != L'\\') {
+            continue;
+        }
+        size_t rest = wcslen(nt + dlen);
+        if (2u + rest + 1u > cap) {
+            return INVALID_HANDLE_VALUE;
+        }
+        path[0] = name[0];
+        path[1] = L':';
+        memcpy(path + 2, nt + dlen, (rest + 1u) * sizeof(wchar_t));
+        return CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, NULL,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    }
+    return INVALID_HANDLE_VALUE;
+}
+
+#endif /* !RESHIELD_DISABLE */
+
 reshield_attestation_status_t reshield_verify_os_codesign_req(const char *requirement) {
 #ifdef RESHIELD_DISABLE
     (void)requirement;
@@ -128,8 +174,8 @@ reshield_attestation_status_t reshield_verify_os_codesign_req(const char *requir
     if (path == NULL) {
         return RESHIELD_ATTEST_FAILED;
     }
-    DWORD n = GetModuleFileNameW(NULL, path, PATH_CAP);
-    if (n == 0 || n >= PATH_CAP) {
+    HANDLE hfile = open_mapped_image(path, PATH_CAP);
+    if (hfile == INVALID_HANDLE_VALUE) {
         free(path);
         return RESHIELD_ATTEST_FAILED;
     }
@@ -138,6 +184,7 @@ reshield_attestation_status_t reshield_verify_os_codesign_req(const char *requir
     ZeroMemory(&fi, sizeof(fi));
     fi.cbStruct = sizeof(fi);
     fi.pcwszFilePath = path;
+    fi.hFile = hfile;
 
     WINTRUST_DATA wd;
     ZeroMemory(&wd, sizeof(wd));
@@ -158,6 +205,7 @@ reshield_attestation_status_t reshield_verify_os_codesign_req(const char *requir
 
     wd.dwStateAction = WTD_STATEACTION_CLOSE;
     WinVerifyTrust((HWND)INVALID_HANDLE_VALUE, &action, &wd);
+    CloseHandle(hfile);
     free(path);
     return ok ? RESHIELD_ATTEST_OK : RESHIELD_ATTEST_FAILED;
 #endif

@@ -9,7 +9,7 @@ INCLUDES = -Iinclude
 TARGET_TRIPLE := $(shell $(CC) -dumpmachine)
 ifneq ($(findstring mingw,$(TARGET_TRIPLE)),)
 EXE ?= .exe
-LDFLAGS += -lwintrust
+LDFLAGS += -lwintrust -lpsapi
 else ifneq ($(findstring darwin,$(TARGET_TRIPLE)),)
 LDFLAGS += -framework Security -framework CoreFoundation
 endif

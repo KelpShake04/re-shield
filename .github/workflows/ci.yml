@@ -52,6 +52,7 @@ jobs:
           cl %TFLAGS% /Fo:build\ tests\test_manifest.c build\reshield.lib /Fe:build\test_manifest.exe /link /INCREMENTAL:NO || set FAIL=1
           cl %TFLAGS% /Fo:build\ tests\test_runtime.c build\reshield.lib /Fe:build\test_runtime.exe /link /INCREMENTAL:NO || set FAIL=1
           cl %TFLAGS% /Fo:build\ tests\test_wx.c build\reshield.lib /Fe:build\test_wx.exe /link /INCREMENTAL:NO || set FAIL=1
+          cl %TFLAGS% /Fo:build\ tests\test_codesign_toctou_windows.c build\reshield.lib /Fe:build\test_codesign_toctou_windows.exe /link /INCREMENTAL:NO || set FAIL=1
           if defined FAIL exit /b 1
 
       - name: Unit tests
@@ -156,6 +157,16 @@ jobs:
           $o = Expect .\build\demo_signed_tampered.exe 2 "tampered signed EXE with codesign check" @("--check-codesign")
           if ($o -notmatch 'failed_checks=0x5') { throw "expected failed_checks=0x5 (code section + codesign)" }
           exit 0  # the last native call exited 2 on purpose; every real failure above throws
+
+      # The unsigned test EXE renames its own running image and drops the validly signed demo at the
+      # old path; the check must still fail because it verifies the mapped image, not the path.
+      - name: Rename-and-replace is detected (mapped-image verification)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force build\toctou | Out-Null
+          Copy-Item build\test_codesign_toctou_windows.exe build\toctou\victim.exe
+          & .\build\toctou\victim.exe "$PWD\build\demo_signed.exe"
+          if ($LASTEXITCODE -ne 0) { throw "toctou test exit=$LASTEXITCODE" }
 
       - name: Sealed sample_game with manifest (release-demo equivalent)
         shell: pwsh
