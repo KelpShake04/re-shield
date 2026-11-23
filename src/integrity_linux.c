@@ -48,6 +48,7 @@ int reshield_platform_get_code_section(const uint8_t **out_ptr, uint64_t *out_si
     if (fread(&ehdr, 1, sizeof(ehdr), fp) != sizeof(ehdr) ||
         memcmp(ehdr.e_ident, ELFMAG, SELFMAG) != 0 ||
         ehdr.e_ident[EI_CLASS] != ELFCLASS64 ||
+        ehdr.e_shentsize != sizeof(Elf64_Shdr) ||
         ehdr.e_shoff == 0 || ehdr.e_shnum == 0 || ehdr.e_shstrndx >= ehdr.e_shnum) {
         fclose(fp);
         return -1;
