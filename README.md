@@ -28,7 +28,7 @@
 - 릴리스 빌드 시 불필요한 내부 심볼 `strip`.
 - 민감 설정값은 사용 직전 복원 후 `reshield_secure_zero()`로 즉시 메모리에서 제거.
 
-### 2. 런타임 디버그 정책 (`include/reshield/anti_debug.h`)
+### 2. 런타임 디버그 정책 (`include/reshield/debug_policy.h`)
 - macOS: `sysctl`(`P_TRACED`) 상태 조회 + `ptrace(PT_DENY_ATTACH)` (Apple 플랫폼 표준 디버거 attach 제한 API).
 - Linux: `/proc/self/status`의 `TracerPid` 조회 + `ptrace(PTRACE_TRACEME)` 기반 연결 제한.
 - 공통: `CLOCK_MONOTONIC` 기반 구간 실행 시간 측정 헬퍼(보조 휴리스틱).
@@ -54,14 +54,14 @@ make test
 make sample-compare
 ```
 
-- 런타임 디버그 정책 PoC 상세 및 한계: [docs/poc-anti-debug.md](docs/poc-anti-debug.md)
-- 코드 섹션 무결성 검증 PoC 상세 및 한계: [docs/poc-integrity.md](docs/poc-integrity.md)
+- 런타임 디버그 정책 PoC 상세 및 한계: [docs/debug-policy.md](docs/debug-policy.md)
+- 코드 섹션 무결성 검증 PoC 상세 및 한계: [docs/integrity-verification.md](docs/integrity-verification.md)
 - 통합 런타임 API 및 적용 전/후 비교 시연: [docs/comparison-demo.md](docs/comparison-demo.md)
 - 개발·보안 연구 목적의 디버깅 시 `-DRESHIELD_DISABLE`로 모든 검사를 비활성화할 수 있다.
 
 ## 다음 단계
 
-- [x] 대상 플랫폼/언어 확정 후 PoC: 디버거 attach 탐지 단일 기능부터 구현. (C11, macOS/Linux — `include/reshield/anti_debug.h`, `src/anti_debug_*.c`)
+- [x] 대상 플랫폼/언어 확정 후 PoC: 디버거 attach 탐지 단일 기능부터 구현. (C11, macOS/Linux — `include/reshield/debug_policy.h`, `src/debug_policy_*.c`)
 - [x] 변조 탐지(체크섬) PoC. (자체 SHA-256 + `tools/seal_binary.py` + `include/reshield/integrity.h`, `src/integrity_*.c`)
 - [x] 두 기능을 하나의 런타임 라이브러리로 통합. (`include/reshield/reshield.h`, `src/reshield.c`, `libreshield.a`)
 - [x] 샘플 프로그램에 적용 전/후 비교 시연. (`examples/sample_game.c`, `tools/compare_sample.py`, `docs/comparison-demo.md`)
