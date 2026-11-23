@@ -12,6 +12,7 @@
 #include <sys/types.h>
 #ifdef _WIN32
 #include <direct.h>
+#include <windows.h>
 #define mkdir(path, mode) _mkdir(path)
 #else
 #include <sys/wait.h>
@@ -43,8 +44,26 @@ static void hash_to_hex(const uint8_t hash[RESHIELD_SHA256_SIZE], char out[65]) 
 #define ADIR "build/mt_assets"
 #define MPATH "build/mt_manifest.txt"
 
+#ifdef _WIN32
+/* The library treats paths as UTF-8; narrow fopen()/remove() would use the ANSI code page. */
+static int utf8_to_wide(const char *s, wchar_t *w, int cap) {
+    return MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, s, -1, w, cap) > 0;
+}
+static FILE *fopen_utf8(const char *path, const char *mode) {
+    wchar_t wp[512], wm[8];
+    return (utf8_to_wide(path, wp, 512) && utf8_to_wide(mode, wm, 8)) ? _wfopen(wp, wm) : NULL;
+}
+static int remove_utf8(const char *path) {
+    wchar_t wp[512];
+    return utf8_to_wide(path, wp, 512) ? _wremove(wp) : -1;
+}
+#else
+#define fopen_utf8 fopen
+#define remove_utf8 remove
+#endif
+
 static void write_file(const char *path, const void *data, size_t len) {
-    FILE *f = fopen(path, "wb");
+    FILE *f = fopen_utf8(path, "wb");
     if (f != NULL) {
         fwrite(data, 1, len, f);
         fclose(f);
@@ -158,7 +177,7 @@ static void test_path_rules_real_files(void) {
     snprintf(buf, sizeof(buf), "%s 3 \xed\x95\x9c\xea\xb8\x80.cfg\n", hex);
     ASSERT_TRUE(verify_str(buf) == RESHIELD_MANIFEST_OK, "path rules: non-ASCII (hangul) name verifies");
     remove(ADIR "/sub/dir/ok.cfg");
-    remove(ADIR "/\xed\x95\x9c\xea\xb8\x80.cfg");
+    remove_utf8(ADIR "/\xed\x95\x9c\xea\xb8\x80.cfg");
     rmdir(ADIR "/sub/dir");
     rmdir(ADIR "/sub");
 }
