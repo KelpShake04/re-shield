@@ -52,6 +52,12 @@ typedef struct reshield_config {
     const char             *asset_base_dir; /* Base directory for manifest relative paths */
     reshield_violation_cb_t on_violation;   /* Optional diagnostic callback on failure */
     void                   *user_data;
+    const char             *codesign_requirement; /* macOS only: code requirement language string the
+                                                   * signature must satisfy, e.g.
+                                                   * `anchor apple generic and certificate leaf[subject.OU] = "TEAMID"`.
+                                                   * NULL = validity only, any signer (an attacker can
+                                                   * re-sign ad hoc). A string that fails to parse is
+                                                   * reported as CODESIGN_INVALID. Ignored elsewhere. */
 } reshield_config_t;
 
 /**

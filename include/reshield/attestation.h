@@ -26,6 +26,13 @@ reshield_attestation_status_t reshield_verify_code_page_wx(void);
  */
 reshield_attestation_status_t reshield_verify_os_codesign(void);
 
+/**
+ * Same, but the signature must also satisfy `requirement` (code requirement language,
+ * e.g. a Team ID pin). NULL behaves like reshield_verify_os_codesign(). A requirement
+ * that does not parse returns RESHIELD_ATTEST_FAILED. Non-macOS: UNSUPPORTED (ignored).
+ */
+reshield_attestation_status_t reshield_verify_os_codesign_req(const char *requirement);
+
 #ifdef __cplusplus
 }
 #endif

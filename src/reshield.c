@@ -31,10 +31,15 @@ reshield_attestation_status_t reshield_verify_code_page_wx(void) {
     return RESHIELD_ATTEST_UNSUPPORTED;
 }
 
-reshield_attestation_status_t reshield_verify_os_codesign(void) {
+reshield_attestation_status_t reshield_verify_os_codesign_req(const char *requirement) {
+    (void)requirement;
     return RESHIELD_ATTEST_UNSUPPORTED;
 }
 #endif
+
+reshield_attestation_status_t reshield_verify_os_codesign(void) {
+    return reshield_verify_os_codesign_req(NULL);
+}
 
 reshield_config_t reshield_default_config(void) {
     reshield_config_t cfg = {
@@ -43,7 +48,8 @@ reshield_config_t reshield_default_config(void) {
         .manifest_path = NULL,
         .asset_base_dir = NULL,
         .on_violation = NULL,
-        .user_data = NULL
+        .user_data = NULL,
+        .codesign_requirement = NULL
     };
     return cfg;
 }
@@ -102,7 +108,7 @@ reshield_status_t reshield_verify(const reshield_config_t *config,
     }
 
     if ((cfg.enabled_checks & RESHIELD_CHECK_CODESIGN) != 0u) {
-        reshield_attestation_status_t cs = reshield_verify_os_codesign();
+        reshield_attestation_status_t cs = reshield_verify_os_codesign_req(cfg.codesign_requirement);
         if (cs == RESHIELD_ATTEST_FAILED) {
             report.failed_checks |= RESHIELD_CHECK_CODESIGN;
             if (report.status == RESHIELD_OK) {

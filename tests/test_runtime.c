@@ -104,6 +104,40 @@ static void test_manifest_flag_with_unsealed_binary(void) {
 #endif
 }
 
+static void test_codesign_requirement(void) {
+    reshield_config_t cfg = reshield_default_config();
+    cfg.enabled_checks = RESHIELD_CHECK_CODESIGN;
+    reshield_report_t report;
+#if defined(RESHIELD_DISABLE)
+    (void)cfg;
+    (void)report;
+    ASSERT_TRUE(reshield_verify_os_codesign_req("anchor apple") != RESHIELD_ATTEST_FAILED,
+                "disabled: codesign requirement is not enforced");
+#elif defined(__APPLE__)
+    /* The test binary is ad-hoc signed by the linker: valid, but not Apple-anchored. */
+    ASSERT_TRUE(reshield_verify_os_codesign_req(NULL) == RESHIELD_ATTEST_OK,
+                "codesign: NULL requirement checks validity only");
+    ASSERT_TRUE(reshield_verify_os_codesign_req("!anchor apple") == RESHIELD_ATTEST_OK,
+                "codesign: satisfied requirement passes");
+    ASSERT_TRUE(reshield_verify_os_codesign_req("anchor apple") == RESHIELD_ATTEST_FAILED,
+                "codesign: unsatisfied requirement (anchor apple) fails");
+    ASSERT_TRUE(reshield_verify_os_codesign_req("identifier \"no.such.identifier\"") == RESHIELD_ATTEST_FAILED,
+                "codesign: wrong identifier fails");
+    ASSERT_TRUE(reshield_verify_os_codesign_req("this is ((( not a requirement") == RESHIELD_ATTEST_FAILED,
+                "codesign: unparsable requirement fails closed");
+    cfg.codesign_requirement = "anchor apple";
+    ASSERT_TRUE(reshield_verify(&cfg, &report) == RESHIELD_ERR_CODESIGN_INVALID &&
+                report.failed_checks == RESHIELD_CHECK_CODESIGN,
+                "reshield_verify() passes cfg.codesign_requirement through");
+#else
+    ASSERT_TRUE(reshield_verify_os_codesign_req("anchor apple") == RESHIELD_ATTEST_UNSUPPORTED,
+                "codesign requirement is UNSUPPORTED off macOS");
+    cfg.codesign_requirement = "anchor apple";
+    ASSERT_TRUE(reshield_verify(&cfg, &report) == RESHIELD_OK,
+                "off macOS: codesign requirement is ignored");
+#endif
+}
+
 static void test_status_names(void) {
     ASSERT_TRUE(strcmp(reshield_status_name(RESHIELD_ERR_MANIFEST_MISMATCH), "MANIFEST_MISMATCH") == 0 &&
                 strcmp(reshield_status_name(RESHIELD_ERR_ASSET_TAMPERED), "ASSET_TAMPERED") == 0 &&
@@ -137,6 +171,7 @@ int main(void) {
     test_verify_unsealed_and_callback();
     test_null_config_and_report();
     test_manifest_flag_with_unsealed_binary();
+    test_codesign_requirement();
     test_status_names();
     test_secure_zero();
 

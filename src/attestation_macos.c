@@ -62,18 +62,36 @@ reshield_attestation_status_t reshield_verify_code_page_wx(void) {
 #endif
 }
 
-reshield_attestation_status_t reshield_verify_os_codesign(void) {
+reshield_attestation_status_t reshield_verify_os_codesign_req(const char *requirement) {
 #ifdef RESHIELD_DISABLE
+    (void)requirement;
     return RESHIELD_ATTEST_OK;
 #else
+    SecRequirementRef req = NULL;
+    if (requirement != NULL) {
+        /* A requirement string that does not parse fails closed: a typo must not
+         * silently turn the signer pin off. */
+        CFStringRef req_str = CFStringCreateWithCString(NULL, requirement, kCFStringEncodingUTF8);
+        if (req_str == NULL) {
+            return RESHIELD_ATTEST_FAILED;
+        }
+        OSStatus rst = SecRequirementCreateWithString(req_str, kSecCSDefaultFlags, &req);
+        CFRelease(req_str);
+        if (rst != errSecSuccess || req == NULL) {
+            return RESHIELD_ATTEST_FAILED;
+        }
+    }
+
     SecCodeRef self_code = NULL;
     OSStatus st = SecCodeCopySelf(kSecCSDefaultFlags, &self_code);
     if (st != errSecSuccess || self_code == NULL) {
+        if (req != NULL) CFRelease(req);
         return RESHIELD_ATTEST_FAILED;
     }
 
-    st = SecCodeCheckValidity(self_code, kSecCSDefaultFlags, NULL);
+    st = SecCodeCheckValidity(self_code, kSecCSDefaultFlags, req);
     CFRelease(self_code);
+    if (req != NULL) CFRelease(req);
     return (st == errSecSuccess) ? RESHIELD_ATTEST_OK : RESHIELD_ATTEST_FAILED;
 #endif
 }

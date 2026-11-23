@@ -11,7 +11,7 @@
 - **코드 섹션 무결성 (`include/reshield/integrity.h`)**: 외부 의존성 없는 FIPS 180-4 SHA-256 구현으로 빌드 시 실행 파일의 코드 섹션(`__TEXT,__text` / `.text`) 해시를 기록하고 런타임에 메모리에서 재검증(macOS·Linux). Windows PE의 `.text`는 봉인 도구만 지원한다(런타임 검증 미구현).
 - **에셋 매니페스트 바인딩 (`include/reshield/manifest.h`)**: `tools/gen_manifest.py`로 에셋 디렉터리의 SHA-256 매니페스트를 생성하고, 그 루트 해시를 바이너리에 함께 봉인해 실행 파일과 리소스 번들의 짝을 런타임에 검증.
 - **메모리 W^X 및 OS 코드 서명 검증 (`include/reshield/attestation.h`)**:
-  - macOS: `mach_vm_region`으로 코드 세그먼트의 W^X(읽기·실행 전용, 쓰기 금지) 확인(코드 섹션 전 범위를 영역 단위로 순회, 공백·쓰기 가능 영역은 실패) 및 `Security.framework`(`SecCodeCheckValidity`) 코드 서명 유효성 검증(서명 주체는 고정하지 않음).
+  - macOS: `mach_vm_region`으로 코드 세그먼트의 W^X(읽기·실행 전용, 쓰기 금지) 확인(코드 섹션 전 범위를 영역 단위로 순회, 공백·쓰기 가능 영역은 실패) 및 `Security.framework`(`SecCodeCheckValidity`) 코드 서명 유효성 검증(기본은 서명 주체를 고정하지 않음. `cfg.codesign_requirement`에 code requirement 문자열, 예: `anchor apple generic and certificate leaf[subject.OU] = "TEAMID"`를 주면 그 서명자로 고정하고, 파싱 실패는 `CODESIGN_INVALID`로 fail-closed).
   - Linux: `/proc/self/maps`에서 `.text` 범위 전체가 `r-x` 매핑으로 덮이는지 확인.
 - **구조화된 진단 리포트 (`include/reshield/reshield.h`)**: 라이브러리가 프로세스를 임의 강제 종료하지 않고 `reshield_report_t`와 콜백을 반환해 호스트 앱이 안내·로깅·안전 종료를 결정.
 - **릴리스 검증 CLI (`tools/verify_release.py`)**: CI/CD 단계에서 바이너리 봉인과 매니페스트 일치를 검증하고, 정의 심볼 수는 보고만 한다(검증하지 않음).
