@@ -210,6 +210,128 @@ def test_path_rules() -> None:
     print("PASS: gen_manifest / verify_release share the C path rules (component-wise)")
 
 
+def patch_text_section(data: bytes, new_off: int, new_size: int) -> bytes:
+    """Rewrites the code section's file offset/size in the section header (Mach-O or ELF)."""
+    buf = bytearray(data)
+    if struct.unpack_from("<I", buf, 0)[0] == seal_binary.MH_MAGIC_64:
+        ncmds = struct.unpack_from("<I", buf, 16)[0]
+        offset = 32
+        for _ in range(ncmds):
+            cmd, cmdsize = struct.unpack_from("<II", buf, offset)
+            if cmd == seal_binary.LC_SEGMENT_64:
+                nsects = struct.unpack_from("<I", buf, offset + 64)[0]
+                sect_off = offset + 72
+                for _ in range(nsects):
+                    if buf[sect_off : sect_off + 6] == b"__text" and buf[sect_off + 16 : sect_off + 22] == b"__TEXT":
+                        struct.pack_into("<Q", buf, sect_off + 40, new_size)
+                        struct.pack_into("<I", buf, sect_off + 48, new_off)
+                        return bytes(buf)
+                    sect_off += 80
+            offset += cmdsize
+    else:
+        e_shoff = struct.unpack_from("<Q", buf, 40)[0]
+        e_shentsize, e_shnum, e_shstrndx = struct.unpack_from("<HHH", buf, 58)
+        stroff = struct.unpack_from("<Q", buf, e_shoff + e_shstrndx * e_shentsize + 24)[0]
+        for i in range(e_shnum):
+            sh = e_shoff + i * e_shentsize
+            name_off = stroff + struct.unpack_from("<I", buf, sh)[0]
+            if buf[name_off : name_off + 6] == b".text\x00":
+                struct.pack_into("<QQ", buf, sh + 24, new_off, new_size)
+                return bytes(buf)
+    raise RuntimeError("code section header not found")
+
+
+def test_seal_tool_and_release_cases(tmpdir: str, repo_root: str, assets_dir: str) -> None:
+    build = os.path.join(repo_root, "build")
+    gen_tool = os.path.join(repo_root, "tools", "gen_manifest.py")
+    seal_tool = os.path.join(repo_root, "tools", "seal_binary.py")
+    verify_tool = os.path.join(repo_root, "tools", "verify_release.py")
+    py = sys.executable
+
+    manifest = os.path.join(tmpdir, "s4.manifest")
+    subprocess.run([py, gen_tool, assets_dir, "-o", manifest], check=True, stdout=subprocess.DEVNULL)
+
+    demo = os.path.join(tmpdir, "s4_demo")
+    shutil.copy2(os.path.join(build, "integrity_demo"), demo)
+    os.chmod(demo, 0o751)
+    r = run_cmd([py, seal_tool, demo, "--manifest", manifest, "--build-id", "9"])
+    assert r.returncode == 0, r
+    assert (os.stat(demo).st_mode & 0o777) == 0o751, "seal_binary must keep permission bits"
+    assert not [n for n in os.listdir(tmpdir) if n.startswith(".seal_")], "temp file left behind"
+    print("PASS: seal_binary keeps permission bits and leaves no temp file")
+
+    # --verify-only
+    r = run_cmd([py, seal_tool, demo, "--manifest", manifest, "--verify-only"])
+    assert r.returncode == 0 and "match=True" in r.stdout, r
+    unsealed_copy = os.path.join(tmpdir, "s4_unsealed")
+    shutil.copy2(os.path.join(build, "integrity_demo"), unsealed_copy)
+    r = run_cmd([py, seal_tool, unsealed_copy, "--verify-only"])
+    assert r.returncode == 1 and "match=False" in r.stdout, r
+    other = os.path.join(tmpdir, "s4_other.manifest")
+    shutil.copy2(manifest, other)
+    with open(other, "ab") as f:
+        f.write(b"# x\n")
+    r = run_cmd([py, seal_tool, demo, "--manifest", other, "--verify-only"])
+    assert r.returncode == 1 and "match=False" in r.stdout, r
+    print("PASS: seal_binary --verify-only succeeds on sealed, fails on unsealed / wrong manifest")
+
+    with open(os.path.join(build, "integrity_demo"), "rb") as f:
+        raw = f.read()
+    rec_off = seal_binary.find_integrity_record_offset(raw)
+
+    # 0 records / 2 records
+    no_rec = os.path.join(tmpdir, "s4_norec")
+    with open(no_rec, "wb") as f:
+        f.write(raw[:rec_off] + b"XSHLDCHK" + raw[rec_off + 8:])
+    r = run_cmd([py, seal_tool, no_rec, "--no-codesign"])
+    assert r.returncode == 2 and "No RSHLDCHK" in r.stderr, r
+    two_rec = os.path.join(tmpdir, "s4_tworec")
+    with open(two_rec, "wb") as f:
+        f.write(raw + raw[rec_off : rec_off + seal_binary.RECORD_SIZE])
+    r = run_cmd([py, seal_tool, two_rec, "--no-codesign"])
+    assert r.returncode == 2 and "Ambiguous" in r.stderr, r
+    print("PASS: seal_binary rejects 0 records and ambiguous 2 records")
+
+    # record overlapping the code section (section starts inside the record)
+    _fmt, text_off, text_size = seal_binary.find_code_section(raw)
+    overlap = os.path.join(tmpdir, "s4_overlap")
+    with open(overlap, "wb") as f:
+        f.write(patch_text_section(raw, rec_off + 10, 100))
+    r = run_cmd([py, seal_tool, overlap, "--no-codesign"])
+    assert r.returncode == 2 and "overlap" in r.stderr, r
+    print("PASS: seal_binary rejects a record that overlaps the code section (partial overlap)")
+
+    # fat Mach-O
+    fat = os.path.join(tmpdir, "s4_fat")
+    with open(fat, "wb") as f:
+        f.write(b"\xca\xfe\xba\xbe" + b"\x00\x00\x00\x00" + b"\x00" * 64)
+    r = run_cmd([py, seal_tool, fat, "--no-codesign"])
+    assert r.returncode == 2 and "fat/universal" in r.stderr, r
+    print("PASS: seal_binary exits with a clear error on fat/universal Mach-O")
+
+    # verify_release exit codes
+    r = run_cmd([py, verify_tool, demo, "--manifest", manifest, "--assets", assets_dir])
+    assert r.returncode == 0, r
+    r = run_cmd([py, verify_tool, demo, "--manifest", other, "--assets", assets_dir])
+    assert r.returncode == 1 and "manifest_assets: FAIL" in r.stdout, r
+    with open(demo, "rb") as f:
+        demo_bytes = f.read()
+    sentinel_off = find_symbol_file_offset(demo, demo_bytes, "reshield_checksum_sentinel")
+    corrupt = os.path.join(tmpdir, "s4_corrupt")
+    patch_file(demo, corrupt, sentinel_off, demo_bytes[sentinel_off] ^ 0x01)
+    r = run_cmd([py, verify_tool, corrupt, "--manifest", manifest, "--assets", assets_dir])
+    assert r.returncode == 1 and "code_seal:       FAIL" in r.stdout, r
+    print("PASS: verify_release returns 1 on code and manifest mismatch")
+
+    # gen_manifest on an empty directory
+    empty = os.path.join(tmpdir, "empty_assets")
+    os.makedirs(empty)
+    r = run_cmd([py, gen_tool, empty, "-o", os.path.join(tmpdir, "empty.manifest")])
+    assert r.returncode != 0 and "No asset files" in r.stderr, r
+    assert not os.path.exists(os.path.join(tmpdir, "empty.manifest"))
+    print("PASS: gen_manifest fails on an empty asset directory")
+
+
 def main() -> int:
     repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     integrity_demo = os.path.join(repo_root, "build", "integrity_demo")
@@ -308,6 +430,7 @@ def main() -> int:
         a2 = os.path.join(tmp2, "assets")
         shutil.copytree(assets_src, a2)
         test_status_mapping_and_records(tmp2, repo_root, a2)
+        test_seal_tool_and_release_cases(tmp2, repo_root, a2)
 
     print("All E2E seal workflow tests passed.")
     return 0
