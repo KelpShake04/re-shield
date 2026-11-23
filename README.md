@@ -38,6 +38,53 @@ make release-demo
 - 아키텍처 설계 및 한계: [docs/architecture.md](docs/architecture.md)
 - 코드 섹션·에셋 매니페스트 봉인 및 검증 가이드: [docs/integrity-verification.md](docs/integrity-verification.md)
 
+## 내 프로젝트에 적용하기
+
+지원 플랫폼은 macOS(Mach-O 64)와 Linux(ELF64)다. Windows와 fat/universal Mach-O는 지원하지 않는다.
+
+**1. 링크.** `libreshield.a`를 링크하고 `-Iinclude`를 추가한다. macOS는 `-framework Security -framework CoreFoundation`도 필요하다. `RSHLDCHK` 레코드는 `libreshield.a` 안에 있으며, 앱이 `reshield_verify()`를 호출하면 바이너리에 함께 링크된다.
+
+```bash
+make build/libreshield.a
+cc game.c build/libreshield.a -Iinclude -o game -framework Security -framework CoreFoundation  # 프레임워크는 macOS만
+```
+
+**2. 시작 시 검증.** 라이브러리는 프로세스를 종료하지 않는다. 실패 시 반응(종료, 경고, 온라인 기능 차단)은 앱이 정한다.
+
+```c
+#include "reshield/reshield.h"
+
+reshield_config_t cfg = reshield_default_config();
+cfg.enabled_checks |= RESHIELD_CHECK_MANIFEST;   // 에셋 검증을 쓸 때
+cfg.manifest_path  = "game.manifest";
+cfg.asset_base_dir = "assets";
+cfg.on_violation   = my_report_cb;               // 로그·텔레메트리용(선택)
+
+reshield_report_t report;
+if (reshield_verify(&cfg, &report) != RESHIELD_OK) {
+    // report.status, report.failed_checks, report.failed_asset_path 참고
+}
+```
+
+**3. 릴리스 파이프라인(CI).** 순서가 중요하다.
+
+```bash
+python3 tools/gen_manifest.py assets -o build/game.manifest
+strip build/game                                    # 봉인 전에 strip
+python3 tools/seal_binary.py build/game --manifest build/game.manifest --build-id "$BUILD_NUMBER"
+python3 tools/verify_release.py build/game --manifest build/game.manifest --assets assets
+```
+
+- 봉인은 마지막 링크·`strip` 뒤에 한다. 이후 코드 섹션을 바꾸는 단계(패커, 난독화, 재링크)가 있으면 해시가 어긋난다.
+- macOS에서 `seal_binary.py`는 ad-hoc 서명을 적용한다. 배포용이면 봉인 뒤에 Developer ID로 다시 서명한다. 서명은 `__text` 해시에 영향을 주지 않는다.
+- 매니페스트 파일도 함께 배포한다. 루트 해시가 바이너리에 봉인되어 있어, 매니페스트를 바꾸면 `MANIFEST_MISMATCH`가 난다.
+
+**4. 에셋 로딩.** 검증한 뒤 같은 경로를 다시 열면 그 사이 파일이 바뀔 수 있다(TOCTOU). 파일을 메모리로 읽고 `reshield_verify_buffer()`로 검증한 뒤 그 버퍼를 사용한다. `reshield_verify_single_asset()`도 경로 기반이라 같은 한계가 있다.
+
+**5. 개발 중.** `-DRESHIELD_DISABLE`로 검사를 끈다. 디버거 중단점이 `.text`를 바꾸면 `CODE_TAMPERED`가 나므로 디버깅 중에는 꺼 둔다.
+
+**기대치.** 설치 손상, 실수로 인한 변조, 단순한 바이너리·에셋 패치를 감지하는 용도다. 바이너리와 매니페스트를 함께 재봉인하는 공격이나 런타임 API 교체는 막지 못한다. 안티치트나 DRM 대용으로 쓰지 않는다. 중요한 판정은 서버에서 하고 클라이언트 검사 결과는 신호로만 쓴다.
+
 ## 개발·테스트 빌드 옵션
 
 - `-DRESHIELD_DISABLE`: `reshield_verify()` 등 모든 런타임 무결성 검증을 no-op으로 비활성화. 단 `reshield_verify_buffer()`는 앱 로직(예: 키 커밋먼트 비교)이므로 이 빌드에서도 실제 SHA-256 비교를 수행한다.
