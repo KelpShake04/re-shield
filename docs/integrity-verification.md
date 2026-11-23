@@ -81,11 +81,17 @@ make release-demo
 - 에셋은 일반 파일이어야 하며(FIFO·장치 파일·그것을 가리키는 심볼릭 링크는 불일치) 기대 크기+1바이트까지만 읽는다.
 - `gen_manifest.py`는 이름이 `.`으로 시작하는 파일을 제외하고, `.`으로 시작하는 디렉터리는 순회한다.
 
-## 7. Windows (PE32+ x64) 봉인, 런타임 미구현
+## 7. Windows (PE32+ x64)
 
-현재 범위는 빌드·봉인 도구까지다. 런타임의 코드 섹션 검증, W^X 검증, WinVerifyTrust 코드 서명 검증은 구현되지 않았다(`reshield_verify()`는 Windows에서 코드 섹션을 찾지 못해 `RESHIELD_ERR_INTERNAL`을 반환한다). 이 저장소에는 Windows 실행 환경이 없어 Windows 바이너리를 실행해 보지 못했고, mingw-w64 크로스 컴파일(컴파일·링크)과 합성 PE를 쓰는 도구 테스트만 확인했다.
+봉인 도구와 런타임 백엔드(MSVC x64)가 모두 구현되어 있다.
 
-지원 정책: 정식 지원 대상은 MSVC 빌드이고, mingw-w64는 맥/Linux에서의 크로스 컴파일·도구 테스트 전용이다. CI의 `windows-msvc-probe` 잡(`.github/workflows/ci.yml`)이 `cl`로 `examples/integrity_demo.c`를 빌드해 `tools/pe_probe.py`와 `dumpbin` 결과를 아티팩트로 남긴다. 2026-11-24 측정(GitHub Actions `windows-latest`, run 45239478134)에서 `.text` 안 base relocation은 0개(전체 797개는 다른 섹션)였고 `seal_binary.py` 봉인에 성공했다. 즉 MSVC 링크 EXE는 봉인 가정(`.text`가 로드 시 바뀌지 않음)을 만족한다. 측정은 이 데모 한 개에 대한 것이므로, 다른 프로젝트의 링크 설정에서는 `pe_probe.py`로 직접 확인한다. 런타임 검증은 여전히 미구현이다.
+- 코드 섹션 위치(`src/integrity_windows.c`): `GetModuleHandleW(NULL)`로 매핑된 EXE 이미지를 얻고 PE 헤더를 직접 읽어 `.text`를 찾는다. 봉인 도구와 같은 규칙이다(이름이 정확히 `.text`인 섹션 하나, 쓰기 불가, `VirtualSize <= SizeOfRawData`, 해시 범위는 `base + VirtualAddress`부터 `VirtualSize` 바이트). 모든 헤더 읽기는 먼저 첫 페이지(0x1000)로, 이어서 `SizeOfHeaders`/`SizeOfImage`로 범위를 검사하고, 어긋나면 `-1`(→ `RESHIELD_ERR_INTERNAL`, fail-closed)이다. 봉인 레코드는 macOS·Linux와 같이 정적 변수이며 `integrity_common.c`를 그대로 쓴다.
+- W^X(`src/attestation_windows.c`): `.text` 범위 전체를 `VirtualQuery`로 따라가며 모든 영역이 커밋됨·실행 가능·쓰기 불가(`PAGE_GUARD` 아님)여야 하고, 틈(미커밋·예약·해제 영역)이 있으면 실패한다. 의미는 macOS·Linux 구현과 같다.
+- 코드 서명(`reshield_verify_os_codesign_req`): `GetModuleFileNameW` 경로의 파일을 `WinVerifyTrust`(`WINTRUST_ACTION_GENERIC_VERIFY_V2`, UI 없음, 폐기 확인 끔, 네트워크 조회 없음)로 검사해 `OK`/`FAILED`를 반환한다. `requirement` 인자는 Windows에서 무시된다(서명자 고정 기능 없음). Authenticode 서명이 없는 EXE는 `FAILED`이므로, `RESHIELD_CHECK_CODESIGN`을 켠 서명 안 한 개발 빌드는 `reshield_verify()`가 `RESHIELD_ERR_CODESIGN_INVALID`를 반환한다. 기본 검사 집합(`RESHIELD_CHECK_DEFAULT`)에는 코드 서명이 없다. 검사 대상은 디스크의 파일이며 메모리 이미지가 아니다. `wintrust.lib`는 MSVC에서 `#pragma comment(lib)`로 자동 링크되고, mingw는 `-lwintrust`(Makefile이 지정)다.
+
+검증 범위: CI의 `windows-msvc` 잡(GitHub Actions `windows-latest`)이 `cl`로 라이브러리·예제·테스트를 빌드하고 다음을 실제로 실행한다. 봉인 전 EXE의 `UNSEALED` 보고와 `--allow-unsealed` 통과(W^X 검사 포함), `seal_binary.py`로 봉인한 복사본의 `status=OK` 실행, `verify_release.py`, `.text`의 int3 패딩 1바이트를 바꾼 복사본의 `CODE_TAMPERED` 탐지(`tests/tamper_pe_text.py`), 서명 안 된 봉인 EXE에서 `--check-codesign`이 `CODESIGN_INVALID`를 내는지, 매니페스트를 묶은 `sample_game` 봉인·실행, 그리고 `test_integrity`·`test_manifest`·`test_runtime`·`test_wx`. `test_wx`는 플랫폼 훅을 덮어써 `VirtualAlloc`한 페이지(쓰기 가능·실행 불가·결번)로 W^X 순회를 검사한다. 건너뛴 것: `tests/test_seal_workflow.py`(`nm`과 POSIX 경로 필요), `-DRESHIELD_DISABLE` 변형, `test_manifest.c` 안의 POSIX 전용 케이스(`#ifndef _WIN32`). 검증하지 못한 것: 서명된 EXE에서 `WinVerifyTrust`가 `OK`를 내는 경우(CI에는 서명 인증서가 없다), 서명 뒤 봉인 순서 이외의 Authenticode 경로, Windows ARM64와 32비트 x86(후자는 헤더 검사에서 fail-closed).
+
+지원 정책: 정식 지원 대상은 MSVC 빌드이고, mingw-w64는 맥/Linux에서의 크로스 컴파일·도구 테스트 전용이다. CI의 `windows-msvc-probe` 잡(`.github/workflows/ci.yml`)이 `cl`로 `examples/integrity_demo.c`를 빌드해 `tools/pe_probe.py`와 `dumpbin` 결과를 아티팩트로 남긴다. 2026-11-24 측정(GitHub Actions `windows-latest`, run 45239478134)에서 `.text` 안 base relocation은 0개(전체 797개는 다른 섹션)였고 `seal_binary.py` 봉인에 성공했다. 즉 MSVC 링크 EXE는 봉인 가정(`.text`가 로드 시 바뀌지 않음)을 만족한다. 측정은 이 데모 한 개에 대한 것이므로, 다른 프로젝트의 링크 설정에서는 `pe_probe.py`로 직접 확인한다. 런타임 검증은 위의 `windows-msvc` 잡이 같은 MSVC 설정으로 실행해 확인한다.
 
 `seal_binary.py`와 `verify_release.py`는 PE32+ x64(Machine `0x8664`)를 지원한다. ARM64(`0xAA64`)와 PE32(32비트)는 오류로 거부한다.
 

@@ -16,7 +16,7 @@
 | `integrity` | `include/reshield/integrity.h`, `src/sha256.c`, `src/integrity_*.c` | FIPS 180-4 SHA-256, `RSHLDCHK` v2(96바이트) 레코드 조회, 메모리 코드 섹션 해시 대조 |
 | `manifest` | `include/reshield/manifest.h`, `src/manifest.c` | 봉인된 매니페스트 루트 해시 대조 및 에셋 파일별 크기·SHA-256 검증 |
 | `file` (내부) | `src/file_platform.h`, `src/file_posix.c`, `src/file_windows.c` | 일반 파일만 여는 플랫폼별 파일 I/O(POSIX `open`/`fstat`, Windows `CreateFileW`). `sha256.c`와 `manifest.c`가 사용 |
-| `attestation` | `include/reshield/attestation.h`, `src/attestation_*.c` | 코드 섹션 전 범위의 W^X(쓰기 금지) 권한 검증 및 macOS `SecCodeCheckValidity` 유효성 검증 |
+| `attestation` | `include/reshield/attestation.h`, `src/attestation_*.c` | 코드 섹션 전 범위의 W^X(쓰기 금지) 권한 검증 및 macOS `SecCodeCheckValidity`·Windows `WinVerifyTrust` 유효성 검증 |
 | `runtime` | `include/reshield/reshield.h`, `src/reshield.c` | 통합 `reshield_verify()` 파이프라인, `reshield_secure_zero()` |
 | `tools` | `tools/gen_manifest.py`, `tools/manifest_path.py`, `tools/seal_binary.py`, `tools/verify_release.py` | 에셋 매니페스트 생성(경로 규칙은 `manifest_path.py`), 바이너리 봉인(Mach-O·ELF·PE32+ x64), 릴리스 아티팩트 CI 검증 |
 
@@ -44,6 +44,6 @@ Offset  Size  Field
 - 매니페스트에 없는 추가 파일은 감지하지 못한다.
 - macOS 코드 서명 검증은 기본적으로 `SecCodeCheckValidity`를 requirement `NULL`로 호출해 서명 유효성만 확인하며 서명 주체는 고정하지 않는다. `cfg.codesign_requirement`를 설정하면 `SecRequirementCreateWithString`으로 만든 requirement를 함께 검사한다(Team ID 고정 등).
 - fat/universal Mach-O는 `seal_binary.py`가 지원하지 않는다.
-- Windows(PE32+ x64)는 빌드·봉인 도구와 파일 I/O까지 준비되어 있고 런타임 백엔드(코드 섹션·W^X·코드 서명)는 미구현이다. 정식 지원 대상은 MSVC 빌드(CI 측정: MSVC 링크 EXE의 `.text` 안 base relocation 0개, 봉인 성공)이며 mingw-w64는 크로스 컴파일·도구 테스트 전용이다. [integrity-verification.md](integrity-verification.md#7-windows-pe32-x64-봉인-런타임-미구현) 참고.
-- macOS·Linux 외 플랫폼(Windows 포함, 런타임 백엔드 미구현)에서는 코드 섹션을 찾지 못해 무결성 검사가 `RESHIELD_INTEGRITY_ERROR` → `RESHIELD_ERR_INTERNAL`(기본 설정에서 fail-closed)이 된다. W^X·코드 서명 검사는 `RESHIELD_ATTEST_UNSUPPORTED`를 반환하며 `reshield_verify()`는 이를 Linux 코드 서명 검사와 같이 조용히 통과시킨다.
+- Windows(PE32+ x64, MSVC)는 봉인 도구, 파일 I/O, 런타임 백엔드(`src/integrity_windows.c`의 `.text` 위치 찾기, `src/attestation_windows.c`의 `VirtualQuery` W^X 순회와 `WinVerifyTrust` 코드 서명 검사)가 구현되어 있고 CI `windows-msvc` 잡(`windows-latest`)이 실제로 빌드·봉인·실행·변조 탐지를 확인한다. Windows의 코드 서명 검사는 `requirement` 인자를 무시하고, 서명 안 된 EXE는 `FAILED`다. 서명된 EXE에서 `OK`가 나오는 경우는 CI에 인증서가 없어 검증하지 못했다. 정식 지원 대상은 MSVC 빌드(CI 측정: MSVC 링크 EXE의 `.text` 안 base relocation 0개, 봉인 성공)이며 mingw-w64는 크로스 컴파일·도구 테스트 전용이다. [integrity-verification.md](integrity-verification.md#7-windows-pe32-x64) 참고.
+- macOS·Linux·Windows 외 플랫폼에서는 코드 섹션을 찾지 못해 무결성 검사가 `RESHIELD_INTEGRITY_ERROR` → `RESHIELD_ERR_INTERNAL`(기본 설정에서 fail-closed)이 된다. W^X·코드 서명 검사는 `RESHIELD_ATTEST_UNSUPPORTED`를 반환하며 `reshield_verify()`는 이를 Linux 코드 서명 검사와 같이 조용히 통과시킨다.
 - 자세한 내용: [integrity-verification.md](integrity-verification.md#5-한계).
