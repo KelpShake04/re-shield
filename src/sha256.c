@@ -1,7 +1,15 @@
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #include "reshield/integrity.h"
 
+#include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 typedef struct {
     uint32_t state[8];
@@ -146,14 +154,22 @@ void reshield_sha256(const void *data, size_t len, uint8_t out_hash[RESHIELD_SHA
     sha256_final(&ctx, out_hash);
 }
 
-int reshield_sha256_file(const char *path,
-                         uint8_t out_hash[RESHIELD_SHA256_SIZE],
-                         uint64_t *out_size) {
+/* Internal (declared extern in manifest.c): hashes at most max_read bytes of a regular
+ * file. O_NONBLOCK keeps open() from blocking on a FIFO; non-regular files are rejected. */
+int reshield_sha256_file_limited(const char *path,
+                                 uint8_t out_hash[RESHIELD_SHA256_SIZE],
+                                 uint64_t *out_size,
+                                 uint64_t max_read) {
     if (path == NULL || out_hash == NULL) {
         return -1;
     }
-    FILE *fp = fopen(path, "rb");
-    if (fp == NULL) {
+    int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0) {
+        return -1;
+    }
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
+        close(fd);
         return -1;
     }
 
@@ -162,25 +178,33 @@ int reshield_sha256_file(const char *path,
 
     uint8_t buf[4096];
     uint64_t total = 0;
-    for (;;) {
-        size_t n = fread(buf, 1, sizeof(buf), fp);
-        if (n > 0) {
-            sha256_update(&ctx, buf, n);
-            total += (uint64_t)n;
+    while (total < max_read) {
+        uint64_t left = max_read - total;
+        ssize_t n = read(fd, buf, left < sizeof(buf) ? (size_t)left : sizeof(buf));
+        if (n < 0 && errno == EINTR) {
+            continue;
         }
-        if (n < sizeof(buf)) {
-            if (ferror(fp)) {
-                fclose(fp);
-                return -1;
-            }
+        if (n < 0) {
+            close(fd);
+            return -1;
+        }
+        if (n == 0) {
             break;
         }
+        sha256_update(&ctx, buf, (size_t)n);
+        total += (uint64_t)n;
     }
 
-    fclose(fp);
+    close(fd);
     sha256_final(&ctx, out_hash);
     if (out_size != NULL) {
         *out_size = total;
     }
     return 0;
+}
+
+int reshield_sha256_file(const char *path,
+                         uint8_t out_hash[RESHIELD_SHA256_SIZE],
+                         uint64_t *out_size) {
+    return reshield_sha256_file_limited(path, out_hash, out_size, UINT64_MAX);
 }

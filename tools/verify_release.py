@@ -19,6 +19,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(__file__))
 import seal_binary  # noqa: E402
+from gen_manifest import is_safe_relative_path  # noqa: E402
 
 
 def count_defined_symbols(binary: str) -> int:
@@ -33,23 +34,30 @@ def count_defined_symbols(binary: str) -> int:
 
 def verify_manifest_entries(manifest_path: str, asset_dir: str) -> tuple[bool, int, str]:
     count = 0
-    with open(manifest_path, "r", encoding="utf-8") as f:
-        for raw in f:
-            line = raw.strip()
-            if not line or line.startswith("#"):
-                continue
-            parts = line.split(" ", 2)
-            if len(parts) != 3:
-                return False, count, f"malformed line: {line}"
-            exp_hex, exp_size_s, rel = parts
-            full = os.path.join(asset_dir, rel)
-            if not os.path.isfile(full):
-                return False, count, f"missing asset: {rel}"
-            with open(full, "rb") as af:
-                data = af.read()
-            if len(data) != int(exp_size_s) or hashlib.sha256(data).hexdigest() != exp_hex:
-                return False, count, f"hash/size mismatch: {rel}"
-            count += 1
+    with open(manifest_path, "rb") as f:
+        raw_all = f.read()
+    # Same as the C runtime: CRLF / NUL manifests are rejected, not silently normalized.
+    if b"\r" in raw_all or b"\0" in raw_all:
+        return False, count, "manifest contains CR or NUL"
+    for raw in raw_all.decode("utf-8").split("\n"):
+        if not raw or raw.startswith("#"):
+            continue
+        parts = raw.split(" ", 2)
+        if len(parts) != 3:
+            return False, count, f"malformed line: {raw}"
+        exp_hex, exp_size_s, rel = parts
+        if not (exp_size_s.isascii() and exp_size_s.isdigit()):
+            return False, count, f"malformed line: {raw}"
+        if not is_safe_relative_path(rel):
+            return False, count, f"unsafe path: {rel!r}"
+        full = os.path.join(asset_dir, rel)
+        if not os.path.isfile(full):
+            return False, count, f"missing asset: {rel}"
+        with open(full, "rb") as af:
+            data = af.read()
+        if len(data) != int(exp_size_s) or hashlib.sha256(data).hexdigest() != exp_hex:
+            return False, count, f"hash/size mismatch: {rel}"
+        count += 1
     return count > 0, count, "ok"
 
 

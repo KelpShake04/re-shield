@@ -14,6 +14,7 @@ Verifies:
 
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import struct
@@ -23,6 +24,8 @@ import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
 import seal_binary  # noqa: E402
+import gen_manifest as gen_manifest_mod  # noqa: E402
+import verify_release as verify_release_mod  # noqa: E402
 
 
 def find_symbol_file_offset(binary_path: str, data: bytes, symbol: str) -> int:
@@ -74,6 +77,41 @@ def find_symbol_file_offset(binary_path: str, data: bytes, symbol: str) -> int:
 
 def run_cmd(cmd: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(cmd, capture_output=True, text=True)
+
+
+def test_path_rules() -> None:
+    safe = gen_manifest_mod.is_safe_relative_path
+    assert safe("a.cfg") and safe("sub/a.cfg") and safe("v1..2.cfg") and safe(".hidden/a.cfg")
+    for bad in ("", "/abs", "../x", "a/../b", "a/..", "a//b", "a/", "a\nb", "a\rb"):
+        assert not safe(bad), f"path should be rejected: {bad!r}"
+
+    with tempfile.TemporaryDirectory(prefix="reshield_paths_") as d:
+        os.makedirs(os.path.join(d, "assets", ".dotdir"))
+        for name in ("v1..2.cfg", ".dotfile", os.path.join(".dotdir", "in.cfg")):
+            with open(os.path.join(d, "assets", name), "wb") as f:
+                f.write(b"abc")
+        manifest = os.path.join(d, "m.manifest")
+        gen_manifest_mod.generate_manifest(os.path.join(d, "assets"), manifest)
+        with open(manifest, "r", encoding="utf-8") as f:
+            listed = [ln.split(" ", 2)[2].rstrip("\n") for ln in f]
+        # Policy: dot-files skipped, dot-directories traversed.
+        assert listed == [".dotdir/in.cfg", "v1..2.cfg"], listed
+        ok, _n, _msg = verify_release_mod.verify_manifest_entries(manifest, os.path.join(d, "assets"))
+        assert ok, "verify_release should accept generated manifest"
+
+        digest = hashlib.sha256(b"abc").hexdigest()
+        for label, content in (
+            ("dotdot", f"{digest} 3 ../x\n"),
+            ("absolute", f"{digest} 3 /abs\n"),
+            ("crlf", f"{digest} 3 v1..2.cfg\r\n"),
+            ("bad size", f"{digest} x v1..2.cfg\n"),
+        ):
+            with open(manifest, "wb") as f:
+                f.write(content.encode())
+            ok, _n, _msg = verify_release_mod.verify_manifest_entries(
+                manifest, os.path.join(d, "assets"))
+            assert not ok, f"verify_release must reject {label} manifest"
+    print("PASS: gen_manifest / verify_release share the C path rules (component-wise)")
 
 
 def main() -> int:
@@ -168,6 +206,8 @@ def main() -> int:
         r = run_cmd([integrity_demo_disabled])
         assert r.returncode == 0 and "status=OK" in r.stdout and "enabled=0" in r.stdout, f"Disabled demo failed: {r}"
         print("PASS: E2E disabled build (-DRESHIELD_DISABLE) passes unsealed for dev/QA")
+
+    test_path_rules()
 
     print("All E2E seal workflow tests passed.")
     return 0

@@ -1,11 +1,28 @@
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #include "reshield/manifest.h"
 
 #include <ctype.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #ifndef RESHIELD_DISABLE
+/* Internal helper in sha256.c: hashes at most max_read bytes of a regular file. */
+extern int reshield_sha256_file_limited(const char *path,
+                                        uint8_t out_hash[RESHIELD_SHA256_SIZE],
+                                        uint64_t *out_size,
+                                        uint64_t max_read);
+
+#define RESHIELD_MANIFEST_MAX_BYTES (4u * 1024u * 1024u)
+#define RESHIELD_MANIFEST_MAX_LINE  1023u
+
 static int hex_nibble(char c) {
     if (c >= '0' && c <= '9') return c - '0';
     if (c >= 'a' && c <= 'f') return c - 'a' + 10;
@@ -25,14 +42,30 @@ static int parse_sha256_hex(const char *hex, uint8_t out[RESHIELD_SHA256_SIZE]) 
     return 0;
 }
 
+/* Component-wise check: rejects absolute paths, empty components, ".." components,
+ * and CR/LF. Names that merely contain ".." (e.g. "v1..2.cfg") are allowed. */
 static int is_safe_relative_path(const char *rel) {
     if (rel == NULL || rel[0] == '\0' || rel[0] == '/') {
         return 0;
     }
-    if (strstr(rel, "..") != NULL) {
-        return 0;
+    const char *p = rel;
+    for (;;) {
+        const char *q = p;
+        while (*q != '\0' && *q != '/') {
+            if (*q == '\n' || *q == '\r') {
+                return 0;
+            }
+            q++;
+        }
+        size_t n = (size_t)(q - p);
+        if (n == 0 || (n == 2 && p[0] == '.' && p[1] == '.')) {
+            return 0;
+        }
+        if (*q == '\0') {
+            return 1;
+        }
+        p = q + 1;
     }
-    return 1;
 }
 
 static void copy_failed_path(char *dst, size_t cap, const char *src) {
@@ -79,9 +112,59 @@ static int parse_manifest_line(const char *line,
     return 0;
 }
 
-static reshield_manifest_status_t verify_manifest_root(
+/* Reads the whole manifest once (single open, regular files only, size-capped) so the
+ * root hash and the parsed entries come from the same bytes. *out_buf is NUL-terminated
+ * and owned by the caller. */
+static int read_manifest_file(const char *path, char **out_buf, size_t *out_len) {
+    int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0) {
+        return -1;
+    }
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) ||
+        st.st_size < 0 || (uint64_t)st.st_size > RESHIELD_MANIFEST_MAX_BYTES) {
+        close(fd);
+        return -1;
+    }
+
+    size_t want = (size_t)st.st_size;
+    char *buf = (char *)malloc(want + 2);
+    if (buf == NULL) {
+        close(fd);
+        return -1;
+    }
+    size_t got = 0;
+    while (got < want + 1) {
+        ssize_t n = read(fd, buf + got, want + 1 - got);
+        if (n < 0 && errno == EINTR) {
+            continue;
+        }
+        if (n <= 0) {
+            if (n < 0) {
+                got = want + 1;
+            }
+            break;
+        }
+        got += (size_t)n;
+    }
+    close(fd);
+
+    /* Grew while reading, read error, embedded NUL, or CRLF: reject. */
+    if (got > want || memchr(buf, '\0', got) != NULL || memchr(buf, '\r', got) != NULL) {
+        free(buf);
+        return -1;
+    }
+    buf[got] = '\0';
+    *out_buf = buf;
+    *out_len = got;
+    return 0;
+}
+
+static reshield_manifest_status_t load_verified_manifest(
     const char *manifest_path,
-    const uint8_t *expected_root_sha256) {
+    const uint8_t *expected_root_sha256,
+    char **out_buf,
+    size_t *out_len) {
     uint8_t root_expected[RESHIELD_SHA256_SIZE];
     if (expected_root_sha256 != NULL) {
         memcpy(root_expected, expected_root_sha256, RESHIELD_SHA256_SIZE);
@@ -89,15 +172,45 @@ static reshield_manifest_status_t verify_manifest_root(
         return RESHIELD_MANIFEST_UNSEALED;
     }
 
-    uint8_t root_actual[RESHIELD_SHA256_SIZE];
-    if (reshield_sha256_file(manifest_path, root_actual, NULL) != 0) {
+    char *buf = NULL;
+    size_t len = 0;
+    if (read_manifest_file(manifest_path, &buf, &len) != 0) {
         return RESHIELD_MANIFEST_IO_ERROR;
     }
 
+    uint8_t root_actual[RESHIELD_SHA256_SIZE];
+    reshield_sha256(buf, len, root_actual);
     if (!reshield_digest_equal(root_actual, root_expected)) {
+        free(buf);
         return RESHIELD_MANIFEST_ROOT_MISMATCH;
     }
+    *out_buf = buf;
+    *out_len = len;
     return RESHIELD_MANIFEST_OK;
+}
+
+/* Returns 1 and fills the outputs for the next entry, 0 at end of buffer, -1 on a
+ * malformed or over-long line. Blank lines and '#' comments are skipped. Modifies buf. */
+static int next_manifest_entry(char **cursor,
+                               char *end,
+                               uint8_t out_hash[RESHIELD_SHA256_SIZE],
+                               uint64_t *out_size,
+                               const char **out_rel_path) {
+    while (*cursor < end) {
+        char *line = *cursor;
+        char *nl = (char *)memchr(line, '\n', (size_t)(end - line));
+        size_t len = nl != NULL ? (size_t)(nl - line) : (size_t)(end - line);
+        *cursor = nl != NULL ? nl + 1 : end;
+        if (len > RESHIELD_MANIFEST_MAX_LINE) {
+            return -1;
+        }
+        line[len] = '\0';
+        if (len == 0 || line[0] == '#') {
+            continue;
+        }
+        return parse_manifest_line(line, out_hash, out_size, out_rel_path) == 0 ? 1 : -1;
+    }
+    return 0;
 }
 
 static int verify_one_asset_entry(const char *asset_base_dir,
@@ -117,7 +230,9 @@ static int verify_one_asset_entry(const char *asset_base_dir,
 
     uint8_t actual_hash[RESHIELD_SHA256_SIZE];
     uint64_t actual_size = 0;
-    if (reshield_sha256_file(full_path, actual_hash, &actual_size) != 0) {
+    /* Read at most expected_size+1 bytes so a FIFO/huge file cannot hang or exhaust us. */
+    uint64_t max_read = expected_size < UINT64_MAX ? expected_size + 1u : UINT64_MAX;
+    if (reshield_sha256_file_limited(full_path, actual_hash, &actual_size, max_read) != 0) {
         return 0;
     }
     if (actual_size != expected_size) {
@@ -145,45 +260,40 @@ reshield_manifest_status_t reshield_verify_manifest_files(
         return RESHIELD_MANIFEST_IO_ERROR;
     }
 
-    reshield_manifest_status_t root_st = verify_manifest_root(manifest_path, expected_root_sha256);
-    if (root_st != RESHIELD_MANIFEST_OK) {
-        return root_st;
+    char *buf = NULL;
+    size_t len = 0;
+    reshield_manifest_status_t st = load_verified_manifest(manifest_path, expected_root_sha256,
+                                                           &buf, &len);
+    if (st != RESHIELD_MANIFEST_OK) {
+        return st;
     }
 
-    FILE *fp = fopen(manifest_path, "r");
-    if (fp == NULL) {
-        return RESHIELD_MANIFEST_IO_ERROR;
-    }
-
-    char line[1024];
+    char *cursor = buf;
     int entries = 0;
-    while (fgets(line, sizeof(line), fp) != NULL) {
-        size_t len = strlen(line);
-        while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) {
-            line[--len] = '\0';
-        }
-        if (len == 0 || line[0] == '#') {
-            continue;
-        }
-
+    for (;;) {
         uint8_t exp_hash[RESHIELD_SHA256_SIZE];
         uint64_t exp_size = 0;
         const char *rel_path = NULL;
-        if (parse_manifest_line(line, exp_hash, &exp_size, &rel_path) != 0) {
-            fclose(fp);
-            return RESHIELD_MANIFEST_IO_ERROR;
+        int r = next_manifest_entry(&cursor, buf + len, exp_hash, &exp_size, &rel_path);
+        if (r < 0) {
+            st = RESHIELD_MANIFEST_IO_ERROR;
+            break;
+        }
+        if (r == 0) {
+            st = entries > 0 ? RESHIELD_MANIFEST_OK : RESHIELD_MANIFEST_IO_ERROR;
+            break;
         }
         entries++;
 
         if (!verify_one_asset_entry(asset_base_dir, rel_path, exp_size, exp_hash)) {
             copy_failed_path(failed_path_buf, failed_path_cap, rel_path);
-            fclose(fp);
-            return RESHIELD_MANIFEST_ASSET_MISMATCH;
+            st = RESHIELD_MANIFEST_ASSET_MISMATCH;
+            break;
         }
     }
 
-    fclose(fp);
-    return entries > 0 ? RESHIELD_MANIFEST_OK : RESHIELD_MANIFEST_IO_ERROR;
+    free(buf);
+    return st;
 #endif
 }
 
@@ -203,42 +313,37 @@ reshield_manifest_status_t reshield_verify_single_asset(
         return RESHIELD_MANIFEST_IO_ERROR;
     }
 
-    reshield_manifest_status_t root_st = verify_manifest_root(manifest_path, expected_root_sha256);
-    if (root_st != RESHIELD_MANIFEST_OK) {
-        return root_st;
+    char *buf = NULL;
+    size_t len = 0;
+    reshield_manifest_status_t st = load_verified_manifest(manifest_path, expected_root_sha256,
+                                                           &buf, &len);
+    if (st != RESHIELD_MANIFEST_OK) {
+        return st;
     }
 
-    FILE *fp = fopen(manifest_path, "r");
-    if (fp == NULL) {
-        return RESHIELD_MANIFEST_IO_ERROR;
-    }
-
-    char line[1024];
-    while (fgets(line, sizeof(line), fp) != NULL) {
-        size_t len = strlen(line);
-        while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) {
-            line[--len] = '\0';
-        }
-        if (len == 0 || line[0] == '#') {
-            continue;
-        }
-
+    char *cursor = buf;
+    st = RESHIELD_MANIFEST_ASSET_MISMATCH;
+    for (;;) {
         uint8_t exp_hash[RESHIELD_SHA256_SIZE];
         uint64_t exp_size = 0;
         const char *rel_path = NULL;
-        if (parse_manifest_line(line, exp_hash, &exp_size, &rel_path) != 0) {
-            fclose(fp);
-            return RESHIELD_MANIFEST_IO_ERROR;
+        int r = next_manifest_entry(&cursor, buf + len, exp_hash, &exp_size, &rel_path);
+        if (r < 0) {
+            st = RESHIELD_MANIFEST_IO_ERROR;
+            break;
         }
-
+        if (r == 0) {
+            break;
+        }
         if (strcmp(rel_path, asset_rel_path) == 0) {
-            int ok = verify_one_asset_entry(asset_base_dir, rel_path, exp_size, exp_hash);
-            fclose(fp);
-            return ok ? RESHIELD_MANIFEST_OK : RESHIELD_MANIFEST_ASSET_MISMATCH;
+            st = verify_one_asset_entry(asset_base_dir, rel_path, exp_size, exp_hash)
+                     ? RESHIELD_MANIFEST_OK
+                     : RESHIELD_MANIFEST_ASSET_MISMATCH;
+            break;
         }
     }
 
-    fclose(fp);
-    return RESHIELD_MANIFEST_ASSET_MISMATCH;
+    free(buf);
+    return st;
 #endif
 }
