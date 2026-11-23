@@ -1,8 +1,9 @@
 #ifndef RESHIELD_H
 #define RESHIELD_H
 
-#include "reshield/debug_policy.h"
+#include "reshield/attestation.h"
 #include "reshield/integrity.h"
+#include "reshield/manifest.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -11,74 +12,79 @@
 extern "C" {
 #endif
 
-/**
- * Unified threat bitmask returned by reshield_init() and reshield_periodic_check().
- */
-typedef enum reshield_threat_flags {
-    RESHIELD_THREAT_NONE            = 0u,
-    RESHIELD_THREAT_DEBUGGER        = 1u << 0, /* OS traced or ptrace deny failed */
-    RESHIELD_THREAT_TAMPERED        = 1u << 1, /* Code section SHA-256 / size mismatch */
-    RESHIELD_THREAT_UNSEALED        = 1u << 2, /* Binary was not sealed at build time */
-    RESHIELD_THREAT_INTEGRITY_ERROR = 1u << 3, /* Runtime code section lookup failed */
-    RESHIELD_THREAT_TIMING          = 1u << 4  /* Timing threshold exceeded */
-} reshield_threat_flags_t;
+typedef enum reshield_status {
+    RESHIELD_OK                    = 0,
+    RESHIELD_ERR_UNSEALED          = 1, /* Binary was not sealed at build time */
+    RESHIELD_ERR_CODE_TAMPERED     = 2, /* Code section SHA-256 / size mismatch */
+    RESHIELD_ERR_PAGE_PERMISSIONS  = 3, /* Code section violates W^X (writable) */
+    RESHIELD_ERR_CODESIGN_INVALID  = 4, /* OS code signature verification failed */
+    RESHIELD_ERR_MANIFEST_MISMATCH = 5, /* Manifest file SHA-256 does not match sealed root */
+    RESHIELD_ERR_ASSET_TAMPERED    = 6, /* Asset file missing, resized, or hash mismatch */
+    RESHIELD_ERR_INTERNAL          = 7  /* Internal section/file lookup error */
+} reshield_status_t;
+
+typedef enum reshield_check_flags {
+    RESHIELD_CHECK_CODE_SECTION     = 1u << 0, /* __TEXT,__text / .text SHA-256 */
+    RESHIELD_CHECK_PAGE_PERMISSIONS = 1u << 1, /* Code segment W^X (r-x, no W) */
+    RESHIELD_CHECK_CODESIGN         = 1u << 2, /* OS code signature validity (macOS) */
+    RESHIELD_CHECK_MANIFEST         = 1u << 3, /* Sealed manifest + asset verification */
+    RESHIELD_CHECK_DEFAULT          = (RESHIELD_CHECK_CODE_SECTION |
+                                       RESHIELD_CHECK_PAGE_PERMISSIONS)
+} reshield_check_flags_t;
+
+typedef struct reshield_report {
+    reshield_status_t           status;
+    uint32_t                    failed_checks;
+    uint32_t                    build_id;
+    reshield_integrity_result_t code_result;
+    char                        failed_asset_path[256];
+} reshield_report_t;
+
+typedef void (*reshield_violation_cb_t)(const reshield_report_t *report, void *user_data);
+
+typedef struct reshield_config {
+    uint32_t                enabled_checks;
+    int                     allow_unsealed; /* Non-zero: treat UNSEALED as OK during dev */
+    const char             *manifest_path;  /* Required when RESHIELD_CHECK_MANIFEST is set */
+    const char             *asset_base_dir; /* Base directory for manifest relative paths */
+    reshield_violation_cb_t on_violation;   /* Optional diagnostic callback on failure */
+    void                   *user_data;
+} reshield_config_t;
 
 /**
- * Unified enforcement action when a threat is detected.
+ * Returns 1 if checks are active, or 0 when compiled with -DRESHIELD_DISABLE.
  */
-typedef enum reshield_action {
-    RESHIELD_ACTION_REPORT    = 0, /* Return threat bitmask only */
-    RESHIELD_ACTION_CALLBACK  = 1, /* Invoke callback with threat bitmask */
-    RESHIELD_ACTION_TERMINATE = 2  /* Terminate process via _exit(1) */
-} reshield_action_t;
-
-typedef void (*reshield_threat_cb_t)(uint32_t threats, void *user_data);
-
-typedef struct reshield_runtime_config {
-    reshield_action_t    action;
-    int                  check_debugger;  /* Non-zero: run OS debugger detection */
-    int                  deny_attach;     /* Non-zero: request PT_DENY_ATTACH / PTRACE_TRACEME */
-    int                  check_integrity; /* Non-zero: verify code section SHA-256 */
-    int                  allow_unsealed;  /* Non-zero: treat UNSEALED as non-fatal */
-    reshield_threat_cb_t callback;        /* Used when action == RESHIELD_ACTION_CALLBACK */
-    void                *user_data;
-} reshield_runtime_config_t;
+int reshield_is_enabled(void);
 
 /**
- * Returns default strict runtime config:
- *   action = RESHIELD_ACTION_TERMINATE,
- *   check_debugger = 1, deny_attach = 1, check_integrity = 1, allow_unsealed = 0.
+ * Returns the active platform backend name ("macos", "linux", "unsupported").
  */
-reshield_runtime_config_t reshield_default_config(void);
+const char *reshield_platform_name(void);
 
 /**
- * One-line startup initialization: runs enabled debugger and integrity checks
- * and enforces config->action. If config is NULL, uses reshield_default_config().
- * Returns a bitmask of reshield_threat_flags_t (0 when clean or RESHIELD_DISABLE).
+ * Returns default configuration:
+ *   enabled_checks = RESHIELD_CHECK_DEFAULT, allow_unsealed = 0, no callback.
  */
-uint32_t reshield_init(const reshield_runtime_config_t *config);
+reshield_config_t reshield_default_config(void);
 
 /**
- * Periodic runtime re-check intended for critical loops (e.g. game tick or
- * validation routines). Runs non-destructive debugger check, code-section
- * integrity check, and optional timing check if timer != NULL and max_ms > 0.
+ * Runs all configured integrity and attestation checks and returns a structured
+ * status + optional detailed report. Never forcibly exits the process; the host
+ * application decides how to report or handle violations.
  */
-uint32_t reshield_periodic_check(const reshield_runtime_config_t *config,
-                                 const reshield_timer_t *timer,
-                                 uint64_t max_ms);
+reshield_status_t reshield_verify(const reshield_config_t *config,
+                                  reshield_report_t *out_report);
+
+/**
+ * Returns a human-readable static string for a reshield_status_t value.
+ */
+const char *reshield_status_name(reshield_status_t status);
 
 /**
  * Overwrites [ptr, ptr + len) with zeroes using a volatile pointer so the
  * compiler does not optimize away the wipe.
  */
 void reshield_secure_zero(void *ptr, size_t len);
-
-/**
- * Simple XOR transform for PoC runtime string/constant deobfuscation.
- * Note: XOR is NOT encryption; it only prevents trivial plaintext `strings` grep
- * and should be paired with reshield_secure_zero() immediately after use.
- */
-void reshield_xor_transform(uint8_t *dst, const uint8_t *src, size_t len, uint8_t key);
 
 #ifdef __cplusplus
 }

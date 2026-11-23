@@ -10,7 +10,7 @@ extern "C" {
 
 #define RESHIELD_SHA256_SIZE 32u
 #define RESHIELD_INTEGRITY_MAGIC_LEN 8u
-#define RESHIELD_INTEGRITY_RECORD_VERSION 1u
+#define RESHIELD_INTEGRITY_RECORD_VERSION 2u
 
 /**
  * Result status of a code-section integrity verification.
@@ -23,38 +23,38 @@ typedef enum reshield_integrity_status {
 } reshield_integrity_status_t;
 
 /**
- * Enforcement policy for reshield_integrity_guard().
- */
-typedef enum reshield_integrity_policy {
-    RESHIELD_INTEGRITY_POLICY_REPORT    = 0, /* Return status only; caller decides */
-    RESHIELD_INTEGRITY_POLICY_CALLBACK  = 1, /* Invoke user callback on non-OK status */
-    RESHIELD_INTEGRITY_POLICY_TERMINATE = 2  /* Terminate process via _exit(1) */
-} reshield_integrity_policy_t;
-
-/**
- * Detailed verification output.
+ * Detailed code-section verification output.
  */
 typedef struct reshield_integrity_result {
     reshield_integrity_status_t status;
+    uint32_t build_id;
+    int      has_manifest;
     uint64_t expected_size;
     uint64_t actual_size;
     uint8_t  expected_sha256[RESHIELD_SHA256_SIZE];
     uint8_t  actual_sha256[RESHIELD_SHA256_SIZE];
+    uint8_t  manifest_root_sha256[RESHIELD_SHA256_SIZE];
 } reshield_integrity_result_t;
-
-typedef void (*reshield_integrity_cb_t)(const reshield_integrity_result_t *result, void *user_data);
-
-typedef struct reshield_integrity_config {
-    reshield_integrity_policy_t policy;
-    int                         allow_unsealed; /* Non-zero treats UNSEALED as non-fatal */
-    reshield_integrity_cb_t     callback;       /* Used when policy == RESHIELD_INTEGRITY_POLICY_CALLBACK */
-    void                       *user_data;
-} reshield_integrity_config_t;
 
 /**
  * Computes SHA-256 over [data, data + len) into out_hash (32 bytes).
  */
 void reshield_sha256(const void *data, size_t len, uint8_t out_hash[RESHIELD_SHA256_SIZE]);
+
+/**
+ * Computes SHA-256 of a file on disk into out_hash (32 bytes) and optionally writes file size.
+ * Returns 0 on success, -1 on I/O error.
+ */
+int reshield_sha256_file(const char *path,
+                         uint8_t out_hash[RESHIELD_SHA256_SIZE],
+                         uint64_t *out_size);
+
+/**
+ * Constant-time comparison of two 32-byte SHA-256 digests.
+ * Returns 1 if equal, 0 otherwise.
+ */
+int reshield_digest_equal(const uint8_t a[RESHIELD_SHA256_SIZE],
+                          const uint8_t b[RESHIELD_SHA256_SIZE]);
 
 /**
  * Verifies that SHA-256(data, len) matches expected_sha256 in constant time.
@@ -71,10 +71,10 @@ int reshield_verify_buffer(const void *data, size_t len,
 reshield_integrity_status_t reshield_verify_code_section(reshield_integrity_result_t *out_result);
 
 /**
- * Runs reshield_verify_code_section() and applies config->policy on failure.
- * If config is NULL, defaults to RESHIELD_INTEGRITY_POLICY_REPORT with allow_unsealed = 0.
+ * Reads the sealed manifest root SHA-256 embedded in this binary.
+ * Returns 0 if a manifest root is sealed, -1 if unsealed or no manifest was bound.
  */
-reshield_integrity_status_t reshield_integrity_guard(const reshield_integrity_config_t *config);
+int reshield_get_sealed_manifest_root(uint8_t out_root[RESHIELD_SHA256_SIZE]);
 
 #ifdef __cplusplus
 }

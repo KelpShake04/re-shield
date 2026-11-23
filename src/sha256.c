@@ -1,5 +1,6 @@
 #include "reshield/integrity.h"
 
+#include <stdio.h>
 #include <string.h>
 
 typedef struct {
@@ -143,4 +144,43 @@ void reshield_sha256(const void *data, size_t len, uint8_t out_hash[RESHIELD_SHA
         sha256_update(&ctx, (const uint8_t *)data, len);
     }
     sha256_final(&ctx, out_hash);
+}
+
+int reshield_sha256_file(const char *path,
+                         uint8_t out_hash[RESHIELD_SHA256_SIZE],
+                         uint64_t *out_size) {
+    if (path == NULL || out_hash == NULL) {
+        return -1;
+    }
+    FILE *fp = fopen(path, "rb");
+    if (fp == NULL) {
+        return -1;
+    }
+
+    sha256_ctx_t ctx;
+    sha256_init(&ctx);
+
+    uint8_t buf[4096];
+    uint64_t total = 0;
+    for (;;) {
+        size_t n = fread(buf, 1, sizeof(buf), fp);
+        if (n > 0) {
+            sha256_update(&ctx, buf, n);
+            total += (uint64_t)n;
+        }
+        if (n < sizeof(buf)) {
+            if (ferror(fp)) {
+                fclose(fp);
+                return -1;
+            }
+            break;
+        }
+    }
+
+    fclose(fp);
+    sha256_final(&ctx, out_hash);
+    if (out_size != NULL) {
+        *out_size = total;
+    }
+    return 0;
 }
