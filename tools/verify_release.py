@@ -19,7 +19,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(__file__))
 import seal_binary  # noqa: E402
-from gen_manifest import is_safe_relative_path  # noqa: E402
+from manifest_path import is_safe_relative_path  # noqa: E402
 
 
 def count_defined_symbols(binary: str) -> int:

@@ -1,0 +1,79 @@
+# Manifest path rule cases shared by tests/test_manifest.c and tests/test_seal_workflow.py,
+# so the C runtime and tools/manifest_path.py are checked against the same expectations.
+# Format: "+ <path>" must be accepted, "- <path>" must be rejected.
+# Path escapes: \xNN is one byte/character (needed for control characters, backslash and
+# trailing spaces). No other escapes. Lines starting with '#' and blank lines are ignored.
+
+# accepted
++ a.cfg
++ sub/dir/ok.cfg
++ v1..2.cfg
++ a..b/c..d
++ .hidden/a.cfg
++ a b.cfg
++ 한글/설정.cfg
++ console.cfg
++ com10.txt
++ nul1
++ conin
++ aux_x
++ lpt.x.y
++ CONFIG
++ a-b_c+d(1).tar.gz
+
+# absolute, empty or dot components
+- /abs
+- ../x
+- a/../b
+- a/..
+- ./a
+- a/.
+- a/...
+- a//b
+- a/
+
+# separators and stream/drive syntax
+- a\x5c..\x5cx
+- a\x5cb
+- C:x
+- a.cfg:ads
+
+# trailing dot or space
+- a.cfg.
+- a.cfg\x20
+- sub./a
+- sub\x20/a
+
+# reserved device names (case-insensitive, with or without extension)
+- CON
+- con
+- PRN
+- AUX
+- NUL
+- nul.txt
+- COM0
+- COM1
+- com9.cfg
+- Lpt9.log
+- LPT0
+- aux.tar.gz
+- CONIN$
+- conout$.x
+- CON\x20.txt
+- sub/NUL/x
+- x/com1
+
+# forbidden characters
+- a<b
+- a>b
+- a"b
+- a|b
+- a?b
+- a*b
+
+# control characters (including CR and LF)
+- a\x01b
+- a\x09b
+- a\x0ab
+- a\x0db
+- a\x1fb

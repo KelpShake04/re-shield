@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -26,6 +27,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
 import seal_binary  # noqa: E402
 import gen_manifest as gen_manifest_mod  # noqa: E402
 import verify_release as verify_release_mod  # noqa: E402
+import manifest_path as manifest_path_mod  # noqa: E402
 
 
 def find_symbol_file_offset(binary_path: str, data: bytes, symbol: str) -> int:
@@ -173,6 +175,58 @@ def test_status_mapping_and_records(tmpdir: str, repo_root: str, assets_dir: str
     r = run_cmd([nomanifest, f"--manifest={manifest}", f"--assets={assets_dir}", "--allow-unsealed"])
     assert r.returncode == 5 and "MANIFEST_MISMATCH" in r.stderr, f"sealed-without-manifest bypass: {r}"
     print("PASS: sealed binary without manifest root fails MANIFEST check even with allow_unsealed")
+
+
+def load_path_rule_table(repo_root: str) -> list[tuple[bool, str]]:
+    """tests/path_rules.txt is shared with tests/test_manifest.c (same expectations)."""
+    cases = []
+    with open(os.path.join(repo_root, "tests", "path_rules.txt"), encoding="utf-8") as f:
+        for line in f:
+            line = line.rstrip("\r\n")
+            if not line or line.startswith("#"):
+                continue
+            assert line[0] in "+-" and line[1] == " ", f"bad table line: {line!r}"
+            path = re.sub(r"\\x([0-9a-fA-F]{2})", lambda m: chr(int(m.group(1), 16)), line[2:])
+            cases.append((line[0] == "+", path))
+    return cases
+
+
+def test_shared_path_rule_table(repo_root: str) -> None:
+    assert gen_manifest_mod.is_safe_relative_path is manifest_path_mod.is_safe_relative_path
+    assert verify_release_mod.is_safe_relative_path is manifest_path_mod.is_safe_relative_path
+    cases = load_path_rule_table(repo_root)
+    assert len(cases) > 40, len(cases)
+    for want_ok, path in cases:
+        got = manifest_path_mod.is_safe_relative_path(path)
+        assert got == want_ok, f"path rule mismatch for {path!r}: want {want_ok}, got {got}"
+    assert not manifest_path_mod.is_safe_relative_path("a\0b")
+    # ASCII-only case folding, like the C side: U+0130 must not turn "con" into a reserved name.
+    assert manifest_path_mod.is_safe_relative_path("c\u0130n") and manifest_path_mod.is_safe_relative_path("co\u0131n")
+    print(f"PASS: tools/manifest_path.py matches the shared path table ({len(cases)} cases, same file as the C test)")
+
+
+def test_gen_manifest_path_policy() -> None:
+    def run(names: list[str]) -> str:
+        """Runs generate_manifest over fake directory entries; returns the error text or ''."""
+        orig_walk, orig_sha = os.walk, gen_manifest_mod.sha256_file
+        try:
+            os.walk = lambda _d: [("/fake", [], names)]  # type: ignore[assignment]
+            gen_manifest_mod.sha256_file = lambda _p: ("0" * 64, 1)
+            with tempfile.TemporaryDirectory(prefix="reshield_gm_") as d:
+                gen_manifest_mod.generate_manifest("/fake", os.path.join(d, "m.manifest"))
+        except ValueError as exc:
+            return str(exc)
+        finally:
+            os.walk, gen_manifest_mod.sha256_file = orig_walk, orig_sha
+        return ""
+
+    assert run(["ok.cfg", "v1..2.cfg", "\ud55c\uae00.cfg"]) == ""
+    for bad in ("nul.txt", "COM1", "a.cfg.", "a.cfg ", "a<b", "a\x01b", "a:b", "a\\b"):
+        assert "Unsafe asset path" in run([bad]), f"gen_manifest must reject {bad!r}"
+    assert "differ only by case" in run(["A.cfg", "a.cfg"])
+    assert "NFC" in run(["e\u0301.cfg"])  # NFD "e" + combining acute
+    assert run(["\u00e9.cfg"]) == ""  # NFC form is fine
+    print("PASS: gen_manifest rejects unsafe names, case-fold duplicates and non-NFC names")
 
 
 def test_path_rules() -> None:
@@ -426,6 +480,8 @@ def main() -> int:
         print("PASS: E2E disabled build (-DRESHIELD_DISABLE) passes unsealed for dev/QA")
 
     test_path_rules()
+    test_shared_path_rule_table(repo_root)
+    test_gen_manifest_path_policy()
     with tempfile.TemporaryDirectory(prefix="reshield_s2_") as tmp2:
         a2 = os.path.join(tmp2, "assets")
         shutil.copytree(assets_src, a2)

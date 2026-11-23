@@ -9,9 +9,10 @@ Policy:
 - Files whose own name starts with "." are skipped.
 - Directories whose name starts with "." are still traversed; their non-dot files
   are listed (only the file name is filtered, not the directory components).
-- Relative paths must follow the same rule as the C runtime (is_safe_relative_path):
-  no absolute path, no empty component, no ".." component, no CR/LF. Violations raise
-  ValueError instead of producing a manifest the runtime would reject.
+- Relative paths must follow the same rule as the C runtime (see manifest_path.py).
+  Violations raise ValueError instead of producing a manifest the runtime would reject.
+- Names that are not NFC-normalized, and names that collide when case-folded
+  ("A.cfg" / "a.cfg"), raise ValueError: they would not verify on every filesystem.
 """
 
 from __future__ import annotations
@@ -19,13 +20,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
+import unicodedata
 
-
-def is_safe_relative_path(rel: str) -> bool:
-    """Same component-wise rule as src/manifest.c (so "v1..2.cfg" is fine, "a/../b" is not)."""
-    if not rel or rel.startswith("/") or "\n" in rel or "\r" in rel or "\0" in rel:
-        return False
-    return all(part not in ("", "..") for part in rel.split("/"))
+from manifest_path import is_safe_relative_path
 
 
 def sha256_file(path: str) -> tuple[str, int]:
@@ -53,10 +50,17 @@ def generate_manifest(asset_dir: str, output_path: str) -> str:
             rel = os.path.relpath(full, asset_dir).replace(os.sep, "/")
             if not is_safe_relative_path(rel):
                 raise ValueError(f"Unsafe asset path for manifest: {rel!r}")
+            if not unicodedata.is_normalized("NFC", rel):
+                raise ValueError(f"Asset path is not NFC-normalized: {rel!r}")
             digest_hex, size = sha256_file(full)
             entries.append((rel, size, digest_hex))
 
     entries.sort(key=lambda item: item[0])
+    seen: dict[str, str] = {}
+    for rel, _size, _digest in entries:
+        other = seen.setdefault(rel.casefold(), rel)
+        if other != rel:
+            raise ValueError(f"Asset paths differ only by case: {other!r} and {rel!r}")
     if not entries:
         raise ValueError(f"No asset files found in {asset_dir}")
 

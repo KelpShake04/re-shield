@@ -36,8 +36,49 @@ static int parse_sha256_hex(const char *hex, uint8_t out[RESHIELD_SHA256_SIZE]) 
     return 0;
 }
 
-/* Component-wise check: rejects absolute paths, empty components, ".." components,
- * and CR/LF. Names that merely contain ".." (e.g. "v1..2.cfg") are allowed. */
+static char ascii_upper(char c) {
+    return (c >= 'a' && c <= 'z') ? (char)(c - 'a' + 'A') : c;
+}
+
+static int ascii_equal_nocase(const char *p, size_t n, const char *upper_name) {
+    if (strlen(upper_name) != n) {
+        return 0;
+    }
+    for (size_t i = 0; i < n; i++) {
+        if (ascii_upper(p[i]) != upper_name[i]) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* Windows reserved device names. The part before the first '.' (trailing spaces
+ * stripped) is compared, so "nul.txt" is reserved too. */
+static int is_reserved_device_name(const char *p, size_t n) {
+    static const char *const names[] = { "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$" };
+    size_t base = 0;
+    while (base < n && p[base] != '.') {
+        base++;
+    }
+    while (base > 0 && p[base - 1] == ' ') {
+        base--;
+    }
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        if (ascii_equal_nocase(p, base, names[i])) {
+            return 1;
+        }
+    }
+    if (base == 4 && p[3] >= '0' && p[3] <= '9') {
+        return ascii_equal_nocase(p, 3, "COM") || ascii_equal_nocase(p, 3, "LPT");
+    }
+    return 0;
+}
+
+/* Component-wise check, identical on every platform (mirrored by tools/manifest_path.py):
+ * '/' is the only separator. Rejects absolute paths, empty components, '\\', ':',
+ * control characters (0x01-0x1F, so CR/LF too), '< > " | ? *', components ending in '.'
+ * or ' ' (which also rules out ".", ".." and "..."), and Windows reserved device names.
+ * Names that merely contain ".." (e.g. "v1..2.cfg") are allowed. */
 static int is_safe_relative_path(const char *rel) {
     if (rel == NULL || rel[0] == '\0' || rel[0] == '/') {
         return 0;
@@ -46,13 +87,14 @@ static int is_safe_relative_path(const char *rel) {
     for (;;) {
         const char *q = p;
         while (*q != '\0' && *q != '/') {
-            if (*q == '\n' || *q == '\r') {
+            unsigned char c = (unsigned char)*q;
+            if (c < 0x20 || strchr("\\:<>\"|?*", c) != NULL) {
                 return 0;
             }
             q++;
         }
         size_t n = (size_t)(q - p);
-        if (n == 0 || (n == 2 && p[0] == '.' && p[1] == '.')) {
+        if (n == 0 || q[-1] == '.' || q[-1] == ' ' || is_reserved_device_name(p, n)) {
             return 0;
         }
         if (*q == '\0') {
