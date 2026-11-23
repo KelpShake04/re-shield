@@ -97,6 +97,66 @@ jobs:
           if ($o -notmatch 'CODE_TAMPERED') { throw "tampered EXE did not report CODE_TAMPERED" }
           exit 0  # the last native call exited 2 on purpose; every real failure above throws
 
+      # Throwaway self-signed code-signing cert, trusted only inside this runner (admin): lets
+      # WinVerifyTrust accept the signed copy so the positive paths are exercised for real.
+      - name: Authenticode-signed sealed EXE (positive codesign + leaf pin)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          function Expect([string]$exe, [int]$want, [string]$what, [string[]]$extra = @()) {
+            $out = & $exe @extra 2>&1 | Out-String
+            Write-Host $out
+            if ($LASTEXITCODE -ne $want) { throw "$what : expected exit $want, got $LASTEXITCODE" }
+            return $out
+          }
+          # reshield_status_t: OK=0 CODE_TAMPERED=2 CODESIGN_INVALID=4
+          $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject "CN=reshield-ci" -CertStoreLocation Cert:\CurrentUser\My -KeyAlgorithm RSA -KeyLength 2048 -HashAlgorithm SHA256 -NotAfter (Get-Date).AddDays(2)
+          Export-Certificate -Cert $cert -FilePath build\reshield-ci.cer | Out-Null
+          foreach ($store in 'Root', 'TrustedPublisher') {
+            Import-Certificate -FilePath build\reshield-ci.cer -CertStoreLocation "Cert:\LocalMachine\$store" | Out-Null
+          }
+          $sha = [System.Security.Cryptography.SHA256]::Create()
+          $leaf = ([System.BitConverter]::ToString($sha.ComputeHash([System.IO.File]::ReadAllBytes("$PWD\build\reshield-ci.cer")))).Replace('-', '').ToLowerInvariant()
+          Write-Host "leaf cert SHA-256: $leaf"
+
+          Copy-Item build\demo_sealed.exe build\demo_signed.exe
+          $sig = Set-AuthenticodeSignature -FilePath build\demo_signed.exe -Certificate $cert -HashAlgorithm SHA256
+          Write-Host "Set-AuthenticodeSignature: $($sig.Status) $($sig.StatusMessage)"
+          $chk = Get-AuthenticodeSignature -FilePath build\demo_signed.exe
+          Write-Host "Get-AuthenticodeSignature: $($chk.Status) $($chk.StatusMessage)"
+          if ($chk.Status -ne 'Valid') { throw "runner does not trust the throwaway cert: $($chk.Status)" }
+
+          # seal first, sign after: the seal and the release checks still hold on the signed file
+          python tools\seal_binary.py build\demo_signed.exe --verify-only
+          if ($LASTEXITCODE -ne 0) { throw "verify-only on signed EXE failed" }
+          python tools\verify_release.py build\demo_signed.exe
+          if ($LASTEXITCODE -ne 0) { throw "verify_release on signed EXE failed" }
+
+          $o = Expect .\build\demo_signed.exe 0 "signed sealed EXE: WinVerifyTrust passes" @("--check-codesign")
+          if ($o -notmatch 'status=OK') { throw "signed EXE did not print status=OK" }
+          Expect .\build\demo_signed.exe 0 "correct leaf pin" @("--check-codesign", "--codesign-requirement=leaf-sha256:$leaf") | Out-Null
+          Expect .\build\demo_signed.exe 0 "correct leaf pin, upper-case hex" @("--check-codesign", "--codesign-requirement=leaf-sha256:$($leaf.ToUpperInvariant())") | Out-Null
+          $wrong = '0' * 64
+          $o = Expect .\build\demo_signed.exe 4 "wrong leaf pin" @("--check-codesign", "--codesign-requirement=leaf-sha256:$wrong")
+          if ($o -notmatch 'CODESIGN_INVALID') { throw "wrong pin did not report CODESIGN_INVALID" }
+          $flip = $leaf.Substring(0, 63) + $(if ($leaf[63] -eq '0') { '1' } else { '0' })
+          Expect .\build\demo_signed.exe 4 "leaf pin differing in one nibble" @("--check-codesign", "--codesign-requirement=leaf-sha256:$flip") | Out-Null
+          foreach ($bad in "anchor apple", "leaf-sha256:", "leaf-sha256:abcd", "leaf-sha256:$($leaf.Substring(0, 63))g", "leaf-sha256:${leaf}00", "LEAF-SHA256:$leaf", "sha1:$leaf") {
+            Expect .\build\demo_signed.exe 4 "malformed requirement '$bad'" @("--check-codesign", "--codesign-requirement=$bad") | Out-Null
+          }
+          # a requirement alone does nothing unless RESHIELD_CHECK_CODESIGN is enabled
+          Expect .\build\demo_signed.exe 0 "pin without --check-codesign is not evaluated" @("--codesign-requirement=leaf-sha256:$wrong") | Out-Null
+
+          # tamper one .text byte of the signed file: the hash seal must report CODE_TAMPERED
+          python tests\tamper_pe_text.py build\demo_signed.exe build\demo_signed_tampered.exe
+          if ($LASTEXITCODE -ne 0) { throw "tamper helper failed on signed EXE" }
+          $o = Expect .\build\demo_signed_tampered.exe 2 "tampered signed EXE: CODE_TAMPERED"
+          if ($o -notmatch 'CODE_TAMPERED') { throw "tampered signed EXE did not report CODE_TAMPERED" }
+          # with the codesign check on, the broken Authenticode hash is flagged too (bit 0x4 + 0x1)
+          $o = Expect .\build\demo_signed_tampered.exe 2 "tampered signed EXE with codesign check" @("--check-codesign")
+          if ($o -notmatch 'failed_checks=0x5') { throw "expected failed_checks=0x5 (code section + codesign)" }
+          exit 0  # the last native call exited 2 on purpose; every real failure above throws
+
       - name: Sealed sample_game with manifest (release-demo equivalent)
         shell: pwsh
         run: |
