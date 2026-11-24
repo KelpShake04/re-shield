@@ -42,7 +42,8 @@ static void fz_write(const char *path, const void *data, size_t len) {
 }
 
 /* Creates <tmp>/reshield-fuzz-XXXXXX/{assets/,manifest}; assets/ holds a.cfg (empty) and
- * sub/b.cfg ("hello\n") so seeds can reach the asset-hashing code. */
+ * sub/b.cfg ("hello\n") so seeds can reach the asset-hashing code, plus extra.bin ("x") that a
+ * strict manifest must list or #allow. */
 static void fz_setup(void) {
     const char *base = access("/dev/shm", W_OK) == 0 ? "/dev/shm" : "/tmp";
     snprintf(g_fz_dir, sizeof(g_fz_dir), "%s/reshield-fuzz-XXXXXX", base);
@@ -63,6 +64,8 @@ static void fz_setup(void) {
     mkdir(p, 0700);
     snprintf(p, sizeof(p), "%s/sub/b.cfg", g_fz_assets);
     fz_write(p, "hello\n", 6);
+    snprintf(p, sizeof(p), "%s/extra.bin", g_fz_assets); /* unlisted: reaches the strict-scan paths */
+    fz_write(p, "x", 1);
 }
 
 #endif

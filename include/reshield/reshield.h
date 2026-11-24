@@ -21,8 +21,10 @@ typedef enum reshield_status {
     RESHIELD_ERR_MANIFEST_MISMATCH = 5, /* Manifest file SHA-256 does not match sealed root */
     RESHIELD_ERR_ASSET_TAMPERED    = 6, /* Asset file missing, resized, or hash mismatch */
     RESHIELD_ERR_INTERNAL          = 7, /* Internal section/file lookup error */
-    RESHIELD_ERR_MANIFEST_IO       = 8  /* Manifest or asset could not be opened/parsed (wrong path, missing
+    RESHIELD_ERR_MANIFEST_IO       = 8, /* Manifest or asset could not be opened/parsed (wrong path, missing
                                          * file, malformed manifest); not a tamper verdict, not INTERNAL */
+    RESHIELD_ERR_ASSET_EXTRA       = 9  /* Strict manifest: unlisted, non-allowed file under the asset dir
+                                         * (or the scan could not finish); failed_asset_path names it */
 } reshield_status_t;
 
 typedef enum reshield_check_flags {
