@@ -1,105 +1,143 @@
 # re-shield
 
-자사(1st-party) 네이티브 소프트웨어·게임의 **빌드 무결성(Code Integrity)**, **에셋 매니페스트 바인딩(Asset Manifest Binding)**, **실행 환경 권한·서명 검증(W^X & OS Code Signing)**을 제공하는 C11 유저스페이스 라이브러리 및 빌드 도구다.
+A zero-dependency C11 library and build tools that make tampering with your own native binaries and assets **evident**. It is tamper-evidence, not tamper-proof.
 
-## 목적
+English | [한국어](README.ko.md)
 
-네이티브 애플리케이션·게임의 실행 파일이나 외부 스테이지·설정 리소스가 무단으로 변조되거나 분리 복제되는 것을 감지하고, 릴리스 파이프라인에서 아티팩트 무결성을 검증할 수 있도록 최소 침습 런타임(`libreshield.a`)과 후처리 CLI를 제공한다.
+[![ci](https://github.com/KelpShake04/re-shield/actions/workflows/ci.yml/badge.svg)](https://github.com/KelpShake04/re-shield/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-## 핵심 기능
+## What it does
 
-- **코드 섹션 무결성 (`include/reshield/integrity.h`)**: 외부 의존성 없는 FIPS 180-4 SHA-256 구현으로 빌드 시 실행 파일의 코드 섹션(`__TEXT,__text` / `.text`) 해시를 기록하고 런타임에 메모리에서 재검증(macOS·Linux·Windows x64 MSVC).
-- **에셋 매니페스트 바인딩 (`include/reshield/manifest.h`)**: `tools/gen_manifest.py`로 에셋 디렉터리의 SHA-256 매니페스트를 생성하고, 그 루트 해시를 바이너리에 함께 봉인해 실행 파일과 리소스 번들의 짝을 런타임에 검증.
-- **메모리 W^X 및 OS 코드 서명 검증 (`include/reshield/attestation.h`)**:
-  - macOS: `mach_vm_region`으로 코드 세그먼트의 W^X(읽기·실행 전용, 쓰기 금지) 확인(코드 섹션 전 범위를 영역 단위로 순회, 공백·쓰기 가능 영역은 실패) 및 `Security.framework`(`SecCodeCheckValidity`) 코드 서명 유효성 검증(기본은 서명 주체를 고정하지 않음. `cfg.codesign_requirement`에 code requirement 문자열, 예: `anchor apple generic and certificate leaf[subject.OU] = "TEAMID"`를 주면 그 서명자로 고정하고, 파싱 실패는 `CODESIGN_INVALID`로 fail-closed).
-  - Linux: `/proc/self/maps`에서 `.text` 범위 전체가 `r-x` 매핑으로 덮이는지 확인.
-- **구조화된 진단 리포트 (`include/reshield/reshield.h`)**: 라이브러리가 프로세스를 임의 강제 종료하지 않고 `reshield_report_t`와 콜백을 반환해 호스트 앱이 안내·로깅·안전 종료를 결정. `reshield_report_to_json()`은 리포트를 한 줄 JSON(`"v":1`)으로 직렬화한다(텔레메트리용. 클라이언트가 보낸 리포트는 위조될 수 있어 서버가 진본 증거로 쓰면 안 된다).
-- **릴리스 검증 CLI (`tools/verify_release.py`)**: CI/CD 단계에서 바이너리 봉인과 매니페스트 일치를 검증하고, 정의 심볼 수는 보고만 한다(검증하지 않음).
+- **Code-section hash.** `tools/seal_binary.py` records the SHA-256 of the executable's code section (`__TEXT,__text` on macOS, `.text` on Linux and Windows) in the binary at build time. At runtime the library hashes the code in memory and compares. SHA-256 is built in (FIPS 180-4), so there is no external dependency.
+- **Asset manifest root.** `tools/gen_manifest.py` writes a SHA-256 manifest of an asset directory. Its root hash is sealed into the binary, so the executable and its asset bundle are checked as a pair.
+- **W^X check.** The code segment must be readable and executable, never writable (`mach_vm_region` on macOS, `/proc/self/maps` on Linux, `VirtualQuery` on Windows).
+- **OS code-signature check.** `SecCodeCheckValidity` on macOS, `WinVerifyTrust` on Windows. By default any valid signer passes. Set `cfg.codesign_requirement` to pin the signer: a code requirement string on macOS, `leaf-sha256:<64 hex>` (SHA-256 of the signing certificate) on Windows.
+- **Report only.** The library never kills the process. `reshield_verify()` returns a status and fills a `reshield_report_t`. Your app decides what to do. `reshield_report_to_json()` writes the report as one line of JSON (`"v":1`) for logs or telemetry.
 
-## Non-goals / Anti-goals
+## When to use it, and when not to
 
-- 서버 라이선스 인증, DRM 전체 시스템 (범위 밖).
-- 커널 레벨 방어(안티치트 드라이버, kext/커널 모듈) — 100% 유저스페이스 구현만 유지.
-- "절대 못 뚫는다"는 주장 — 로컬 실행 파일의 자체 무결성 검증은 변조 마찰을 높이고 사고성·단순 변조를 감지하기 위한 것이며, 절대 방어가 아니다.
-- 정당한 개발·디버깅·프로파일링 방해 — 디버거 attach 차단(`ptrace`)을 사용하지 않으며, `-DRESHIELD_DISABLE` 및 `allow_unsealed`로 개발 빌드를 지원한다.
+re-shield detects tampering. It does not prevent it. There is no secret key, so an attacker who changes the code can seal the record again. Code that hashes itself also has a known generic bypass that separates the code being hashed from the code being run (van Oorschot et al., IEEE TDSC 2005). A report built on the client cannot serve as proof on a server.
 
-## 알려진 한계
+Good fit:
 
-자세한 목록은 [docs/integrity-verification.md](docs/integrity-verification.md#5-한계)를 따른다. 요약: 해시 대상은 `__TEXT,__text`/`.text`뿐이고(`__stubs`, `.plt`, `__const`, 레코드가 있는 `__DATA`는 제외), 레코드의 평문 `RSHLDCHK` 매직이 수정 지점을 노출하며, 매니페스트에 없는 추가 파일은 감지하지 않고, fat/universal Mach-O는 `seal_binary.py`가 지원하지 않는다.
+- A C/C++ game or app without an engine, where you want to know if the asset bundle shipped next to the executable was changed. The authors did not find an open-source, engine-independent tool that pairs an executable with an asset manifest. That search was not exhaustive.
+- You want to catch broken installs, mistakes and simple binary patches, send them to logs or telemetry, and measure the false-positive rate before you ever kill a process.
+- You want a small library that you can read and audit yourself, with no dependencies.
 
-## 언제 쓰고, 언제 쓰지 말아야 하나
+Not a fit:
 
-re-shield는 **변조 감지(tamper evidence)** 도구이지 변조 방지(tamper proof) 도구가 아니다. 키가 없어서 공격자가 코드를 바꾼 뒤 레코드를 다시 봉인할 수 있고, 코드 자기 해시 방식에는 "해시되는 코드"와 "실행되는 코드"를 분리하는 알려진 범용 우회가 있다(van Oorschot 외, IEEE TDSC 2005). 클라이언트가 만든 리포트는 서버가 진본 증거로 쓸 수 없다.
+- You must stop cheats or cracks. Look at anti-cheat or a commercial protector.
+- The server needs a verdict it can trust. Use platform attestation (Apple App Attest, Google Play Integrity and similar) with server-side checks.
+- OS signing and OS policy (Hardened Runtime, App Control and similar) already enforce what you ship. That is stronger. re-shield does not replace OS signing: seal first, then sign. Pinning the signer helps against "re-seal, then re-sign with a different certificate". It does not stop an attacker who patches the verification function itself.
 
-쓰기 좋은 경우:
-- 엔진 기능 없이 C/C++로 만든 게임·앱에서, 실행 파일과 함께 배포하는 에셋 묶음이 바뀌었는지 알고 싶을 때. 엔진 비종속으로 실행 파일과 에셋 매니페스트를 짝지어 검증하는 오픈소스는 조사 범위에서 찾지 못했다(전수 조사는 아니다).
-- 설치 손상, 실수, 단순 바이너리 패치를 감지해 로그·텔레메트리로 모으고, 프로세스를 죽이기 전에 오탐률부터 측정하고 싶을 때(종료하지 않는 설계).
-- 외부 의존성 없이 코드를 직접 읽고 감사할 수 있는 작은 라이브러리가 필요할 때.
+It is not anti-cheat, DRM or a kernel-level defense. It does not block debuggers (no `ptrace`).
 
-쓰지 말아야 하는 경우:
-- 치트·크랙을 막아야 할 때: 안티치트나 상용 보호기를 검토한다.
-- 서버가 신뢰할 판정이 필요할 때: 플랫폼 증명(Apple App Attest, Google Play Integrity 등)과 서버 측 검증을 쓴다.
-- Windows·macOS 서명과 OS 정책(Hardened Runtime, App Control 등)이 이미 배포물을 강제하는 환경이면 그것이 더 강하다. re-shield는 OS 서명을 대체하지 않고, 봉인 뒤에 OS 서명을 얹어 함께 쓴다. macOS(requirement 문자열)와 Windows(`leaf-sha256:` leaf 인증서 해시)에서는 `cfg.codesign_requirement`로 서명자를 고정하면 "재봉인 후 다른 서명으로 재서명"하는 경로를 막는 데 도움이 된다(검증 함수 자체를 패치하는 공격은 못 막는다).
+## Platform support
 
-## 빠른 시작
+| Platform | Supported | What CI checks |
+|---|---|---|
+| macOS, Mach-O 64 | yes | `make clean && make all test release-demo` on `macos-latest` |
+| Linux, ELF64 (glibc and musl) | yes | glibc on `ubuntu-latest`, including `make sanitize`; musl on Alpine for dynamic, `-no-pie`, static and static-pie; `ld.so ./prog` must exit with an error, not crash |
+| Windows x64, PE32+ (MSVC) | yes | `windows-latest` with `cl`: build, seal, run, flip one `.text` byte and expect `CODE_TAMPERED`, sealed-then-signed EXE with a throwaway self-signed certificate (valid signature and `leaf-sha256:` pin match, mismatch, bad format) |
+| Windows with mingw-w64 | cross-compile and tool tests only | Not run in CI. The default link leaves one relocation inside `.text`, so sealing is refused. Linking with `-Wl,--disable-dynamicbase -Wl,--disable-reloc-section` allows sealing but turns ASLR off, so it is not recommended for shipping. |
+| Windows ARM64, 32-bit, fat/universal Mach-O | no | Sealing is refused or fails closed |
 
-```bash
-make all
-make test
-make release-demo
-```
+Not verified: signatures from a public CA, timestamped signatures, and revocation checks on Windows. A real macOS Team ID was not tested either; only ad-hoc negative and positive requirement tests were. Details: [Windows section](docs/integrity-verification.md#7-windows-pe32-x64).
 
-- 아키텍처 설계 및 한계: [docs/architecture.md](docs/architecture.md)
-- 코드 섹션·에셋 매니페스트 봉인 및 검증 가이드: [docs/integrity-verification.md](docs/integrity-verification.md)
+## Quickstart
 
-## 내 프로젝트에 적용하기
-
-지원 플랫폼은 macOS(Mach-O 64), Linux(ELF64), Windows x64(PE32+, MSVC)다. Windows는 런타임 백엔드(코드 섹션 해시, `VirtualQuery` W^X 순회, `WinVerifyTrust` 코드 서명 검사)와 봉인 도구(`seal_binary.py`/`verify_release.py`의 PE 지원)가 구현되어 있다. CI(GitHub Actions `windows-latest`)의 `windows-msvc` 잡이 `cl`로 빌드한 EXE를 봉인해 실행하고, `.text` 1바이트를 바꾼 복사본이 `CODE_TAMPERED`로 탐지되는 것까지 확인한다. 코드 서명 검사는 `WinVerifyTrust` 결과에 더해 `cfg.codesign_requirement`로 서명자 leaf 인증서를 고정할 수 있다. 형식은 `leaf-sha256:<64자리 hex>`(서명 인증서 DER의 SHA-256, 대소문자 무관)이고, 다른 문자열은 `FAILED`(fail-closed)다. 서명 안 된 EXE도 `FAILED`다. CI는 일회용 자체 서명 인증서로 봉인 뒤 서명한 EXE에서 `OK`, leaf pin 일치/불일치/형식 오류를 실제로 확인한다(공인 CA·타임스탬프 서명은 검증하지 못했다). macOS와 Windows의 requirement 문법이 달라 플랫폼별로 `#ifdef` 안에서 설정한다(Linux는 코드 서명 검사가 UNSUPPORTED지만 requirement가 있으면 통과시키지 않는다). CI는 POSIX 전용인 `tests/test_seal_workflow.py`와 `RESHIELD_DISABLE` 변형 테스트를 Windows에서 돌리지 않는다. mingw-w64는 맥/Linux에서의 크로스 컴파일·도구 테스트 전용이며, 기본 링크 EXE는 `.text` 안 relocation 1개 때문에 봉인되지 않는다(`-Wl,--disable-dynamicbase -Wl,--disable-reloc-section`으로 봉인은 되지만 ASLR이 꺼지므로 배포용으로 권장하지 않는다). mingw 빌드는 컴파일·링크만 보고 Windows에서 실행해 검증하지 않았다. Windows ARM64와 fat/universal Mach-O는 지원하지 않는다. 자세한 내용은 [docs/integrity-verification.md](docs/integrity-verification.md#7-windows-pe32-x64).
-
-**1. 링크.** `libreshield.a`를 링크하고 `-Iinclude`를 추가한다. macOS는 `-framework Security -framework CoreFoundation`도 필요하다. `RSHLDCHK` 레코드는 `libreshield.a` 안에 있으며, 앱이 `reshield_verify()`를 호출하면 바이너리에 함께 링크된다.
+Build the library and run the demo flow:
 
 ```bash
-make build/libreshield.a
-cc game.c build/libreshield.a -Iinclude -o game -framework Security -framework CoreFoundation  # 프레임워크는 macOS만
+make all test release-demo      # needs a C11 compiler, make, python3
 ```
 
-**2. 시작 시 검증.** 라이브러리는 프로세스를 종료하지 않는다. 실패 시 반응(종료, 경고, 온라인 기능 차단)은 앱이 정한다.
+Call it at startup. This is the whole program:
 
 ```c
+#include <stdio.h>
 #include "reshield/reshield.h"
 
-reshield_config_t cfg = reshield_default_config();
-cfg.enabled_checks |= RESHIELD_CHECK_MANIFEST;   // 에셋 검증을 쓸 때
-cfg.manifest_path  = "game.manifest";
-cfg.asset_base_dir = "assets";
-cfg.on_violation   = my_report_cb;               // 로그·텔레메트리용(선택)
+int main(void) {
+    reshield_config_t cfg = reshield_default_config();  /* code section + W^X */
+    reshield_report_t report;
+    reshield_status_t st = reshield_verify(&cfg, &report);
 
-reshield_report_t report;
-if (reshield_verify(&cfg, &report) != RESHIELD_OK) {
-    // report.status, report.failed_checks, report.failed_asset_path 참고
+    char json[512];
+    reshield_report_to_json(&report, json, sizeof json);
+    printf("%s\n%s\n", reshield_status_name(st), json);
+    return st == RESHIELD_OK ? 0 : 1;
 }
 ```
 
-**3. 릴리스 파이프라인(CI).** 순서가 중요하다.
-
 ```bash
-python3 tools/gen_manifest.py assets -o build/game.manifest
-strip build/game                                    # 봉인 전에 strip
-python3 tools/seal_binary.py build/game --manifest build/game.manifest --build-id "$BUILD_NUMBER"
-python3 tools/verify_release.py build/game --manifest build/game.manifest --assets assets
+# link: libreshield.a + -Iinclude; macOS also needs -framework Security -framework CoreFoundation
+cc -std=c11 -Iinclude app.c build/libreshield.a -framework Security -framework CoreFoundation -o app
+./app                                          # UNSEALED: it was never sealed
+strip app
+python3 tools/seal_binary.py app --build-id 1
+./app                                          # OK
 ```
 
-- 봉인은 마지막 링크·`strip` 뒤에 한다. 이후 코드 섹션을 바꾸는 단계(패커, 난독화, 재링크)가 있으면 해시가 어긋난다.
-- macOS에서 `seal_binary.py`는 ad-hoc 서명을 적용한다. 배포용이면 봉인 뒤에 Developer ID로 다시 서명한다. 서명은 `__text` 해시에 영향을 주지 않는다.
-- 매니페스트 파일도 함께 배포한다. 루트 해시가 바이너리에 봉인되어 있어, 매니페스트를 바꾸면 `MANIFEST_MISMATCH`가 난다.
+On macOS this prints `UNSEALED` first, then `OK` after sealing. On Linux drop the `-framework` flags.
 
-**4. 에셋 로딩.** 검증한 뒤 같은 경로를 다시 열면 그 사이 파일이 바뀔 수 있다(TOCTOU). 파일을 메모리로 읽고 `reshield_verify_buffer()`로 검증한 뒤 그 버퍼를 사용한다. `reshield_verify_single_asset()`도 경로 기반이라 같은 한계가 있다.
+Release order matters. Every step after sealing must leave the code section unchanged:
 
-**5. 개발 중.** `-DRESHIELD_DISABLE`로 검사를 끈다. 디버거 중단점이 `.text`를 바꾸면 `CODE_TAMPERED`가 나므로 디버깅 중에는 꺼 둔다.
+1. Link, then `strip`.
+2. `python3 tools/seal_binary.py app --build-id N` (add `--manifest game.manifest` when you ship assets; create it first with `python3 tools/gen_manifest.py assets -o game.manifest`).
+3. OS code signing (Developer ID, Authenticode). Signing does not change the sealed code hash. On macOS `seal_binary.py` applies an ad-hoc signature; sign again for distribution.
+4. In CI: `python3 tools/verify_release.py app --manifest game.manifest --assets assets`.
 
-**기대치.** 설치 손상, 실수로 인한 변조, 단순한 바이너리·에셋 패치를 감지하는 용도다. 바이너리와 매니페스트를 함께 재봉인하는 공격이나 런타임 API 교체는 막지 못한다. 안티치트나 DRM 대용으로 쓰지 않는다. 중요한 판정은 서버에서 하고 클라이언트 검사 결과는 신호로만 쓴다.
+Ship the manifest file with the binary. Its root hash is sealed in the binary, so changing the manifest gives `MANIFEST_MISMATCH`.
 
-## 개발·테스트 빌드 옵션
+To check assets at startup, add to the config before calling `reshield_verify()`:
 
-- `-DRESHIELD_DISABLE`: `reshield_verify()` 등 모든 런타임 무결성 검증을 no-op으로 비활성화. 단 `reshield_verify_buffer()`는 앱 로직(예: 키 커밋먼트 비교)이므로 이 빌드에서도 실제 SHA-256 비교를 수행한다.
-- `cfg.allow_unsealed = 1`: `tools/seal_binary.py`를 거치지 않은 로컬 개발 빌드 허용. 라이브러리를 `-DRESHIELD_ALLOW_UNSEALED`로 컴파일했을 때만 동작한다(저장소 Makefile 기본값, 릴리스는 `make ALLOW_UNSEALED=0`). 매크로 없이 컴파일한 라이브러리에서 필드를 켜면 `INTERNAL_ERROR`(설정 오류)다. **경고: 매크로를 켠 빌드를 릴리스에 쓰면 sealed 바이트 변조만으로 코드·매니페스트 검사가 우회된다. 릴리스 금지.** (레코드 magic/version 불일치나 매니페스트 없이 봉인된 바이너리는 unsealed로 취급하지 않고 실패 처리한다.)
+```c
+cfg.enabled_checks |= RESHIELD_CHECK_MANIFEST;
+cfg.manifest_path  = "game.manifest";
+cfg.asset_base_dir = "assets";
+```
+
+If you load an asset after verifying it by path, the file can change in between (TOCTOU). Read the file into memory, check it with `reshield_verify_buffer()`, then use that buffer. See `examples/sample_game.c` for a complete program.
+
+## Development and release builds
+
+- `-DRESHIELD_DISABLE` turns `reshield_verify()` and the other runtime checks into no-ops. It must be set when the **library** is compiled (e.g. `make CFLAGS="-std=c11 -O2 -DRESHIELD_DISABLE"` after `make clean`); adding it only to your app's flags changes nothing. Use it while debugging, because a breakpoint patches `.text` and gives `CODE_TAMPERED`. `reshield_verify_buffer()` still compares hashes in this build, because it is app logic, not an integrity check.
+- `cfg.allow_unsealed = 1` lets a binary that was never sealed pass. It works only if the library was compiled with `-DRESHIELD_ALLOW_UNSEALED`. This repository's Makefile turns that on by default. For a release build use `make ALLOW_UNSEALED=0`.
+- If the field is set on a library built without the macro, `reshield_verify()` returns `INTERNAL_ERROR`. It is neither ignored nor bypassed.
+- Never ship a build with `RESHIELD_ALLOW_UNSEALED`. An attacker could then skip the code and manifest checks by changing the sealed byte in the record.
+
+## Known limitations
+
+- Only `__TEXT,__text` / `.text` is hashed. `__stubs`, `.plt`, `__const` and the `__DATA` that holds the record are not.
+- The record starts with a plain `RSHLDCHK` magic, so the place to edit is easy to find.
+- Files that are not in the manifest are not detected.
+- A binary and its manifest can be re-sealed together. Runtime API replacement is not prevented.
+- A software breakpoint patches code bytes and is reported as `CODE_TAMPERED`.
+- On Linux, `.text` is located from the section headers on disk. An attacker who can edit the file can change them, and copying the original bytes into a code cave in the same segment is not caught.
+- `verify_release.py` only reports the number of defined symbols. It does not check it.
+
+Full list: [docs/integrity-verification.md](docs/integrity-verification.md#5-한계).
+
+## Documentation
+
+The design and verification guides are written in Korean.
+
+- [docs/architecture.md](docs/architecture.md): design, the 96-byte `RSHLDCHK` v2 record, limits.
+- [docs/integrity-verification.md](docs/integrity-verification.md): sealing pipeline, runtime integration, manifest format rules, Windows details.
+- [docs/fuzzing.md](docs/fuzzing.md): sanitizers and fuzzing, in English.
+- Public API: `include/reshield/reshield.h`, `integrity.h`, `manifest.h`, `attestation.h`.
+
+## Testing
+
+```bash
+make all test release-demo      # build, unit tests, sealed demo
+make sanitize                   # same tests under ASan + UBSan
+```
+
+Fuzzing (libFuzzer harnesses and PE parser tests) needs clang with libFuzzer. See [docs/fuzzing.md](docs/fuzzing.md).
+
+## License
+
+[MIT](LICENSE)

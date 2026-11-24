@@ -2,7 +2,7 @@
 
 Trust-boundary inputs of re-shield: the manifest file, asset paths (manifest entries and the
 `asset_rel_path` argument), and the PE/ELF/Mach-O binaries read by `tools/seal_binary.py`.
-This page describes how they are stress-tested and what was found. Nothing here runs in CI.
+This page describes how they are stress-tested and what was found. CI runs `make sanitize` and `tests/fuzz/test_parser_regressions.py` on Linux; the libFuzzer harnesses and the mutational PE fuzzer are run by hand.
 
 ## ASan + UBSan over the test suite
 
