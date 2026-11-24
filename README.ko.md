@@ -27,7 +27,7 @@
 
 ## 알려진 한계
 
-자세한 목록은 [docs/integrity-verification.md](docs/integrity-verification.md#5-한계)를 따른다. 요약: 해시 대상은 `__TEXT,__text`/`.text`뿐이고(`__stubs`, `.plt`, `__const`, 레코드가 있는 `__DATA`는 제외), 레코드의 평문 `RSHLDCHK` 매직이 수정 지점을 노출하며, 매니페스트에 없는 추가 파일은 감지하지 않고, fat/universal Mach-O는 `seal_binary.py`가 지원하지 않는다.
+자세한 목록은 [docs/integrity-verification.md](docs/integrity-verification.md#5-한계)를 따른다. 요약: 코드 검사는 봉인 레코드가 들어 있는 이미지를 본다(정적 링크면 메인 실행 파일, re-shield를 공유 라이브러리 `.so`/`.dylib`/`.dll`에 링크했으면 그 라이브러리이며 호스트 EXE는 검사하지 않고 봉인할 필요도 없다. 다른 모듈은 보지 않고, 코드 서명 검사는 항상 프로세스 EXE 기준이다. Linux에서는 라이브러리를 절대경로로 열어야 한다), 해시 대상은 `__TEXT,__text`/`.text`뿐이고(`__stubs`, `.plt`, `__const`, 레코드가 있는 `__DATA`는 제외), 레코드의 평문 `RSHLDCHK` 매직이 수정 지점을 노출하며, 매니페스트에 없는 추가 파일은 감지하지 않고, fat/universal Mach-O는 `seal_binary.py`가 지원하지 않는다.
 
 ## 언제 쓰고, 언제 쓰지 말아야 하나
 
