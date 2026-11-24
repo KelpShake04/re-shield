@@ -14,6 +14,12 @@ jobs:
       - uses: actions/checkout@v4
       - run: make clean && make all test release-demo
       - run: make sanitize
+      # Prints the backend (shani on a runner with SHA-NI) and MB/s; then the same test with the
+      # hardware path compiled out (-DRESHIELD_NO_HW_SHA), which must also pass.
+      - run: make bench
+      - run: |
+          make BUILD_DIR=build/nohw CFLAGS="-Wall -Wextra -Wpedantic -Werror -O2 -DRESHIELD_NO_HW_SHA" build/nohw/test_sha256_accel
+          ./build/nohw/test_sha256_accel
       - run: python3 tests/fuzz/test_parser_regressions.py
       # `ld.so ./prog` makes /proc/self/exe the loader: must be an error exit, never a crash (>=128).
       - run: |
@@ -34,7 +40,7 @@ jobs:
             apk add --no-cache gcc musl-dev make python3 binutils &&
             make clean && make all test release-demo &&
             for mode in "-pie -fPIE" "-no-pie" "-static" "-static-pie"; do
-              gcc -std=c11 -O2 -Iinclude examples/integrity_demo.c src/sha256.c src/integrity_common.c src/integrity_linux.c src/file_posix.c src/manifest.c src/attestation_linux.c src/reshield.c $mode -o /tmp/p &&
+              gcc -std=c11 -O2 -Iinclude examples/integrity_demo.c src/sha256.c src/sha256_accel.c src/integrity_common.c src/integrity_linux.c src/file_posix.c src/manifest.c src/attestation_linux.c src/reshield.c $mode -o /tmp/p &&
               python3 tools/seal_binary.py /tmp/p --build-id 3 >/dev/null &&
               /tmp/p | grep -q "status=OK" || { echo "FAILED: $mode"; exit 1; }
               echo "OK: $mode"
@@ -45,6 +51,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: make clean && make all test release-demo
+      - run: make bench
 
   # Windows x64 (MSVC) runtime backend: builds with cl (no make on Windows), seals a copy of the
   # demo EXE, runs it, tampers .text and checks detection. Skipped on purpose: the POSIX-only
@@ -68,8 +75,8 @@ jobs:
           call "%VSDIR%\VC\Auxiliary\Build\vcvars64.bat"
           set CFLAGS=/nologo /std:c11 /O2 /W3 /WX /DRESHIELD_ALLOW_UNSEALED /I include
           set TFLAGS=%CFLAGS% /D_CRT_SECURE_NO_WARNINGS /D_CRT_NONSTDC_NO_WARNINGS
-          cl %CFLAGS% /c /Fo:build\lib\ src\sha256.c src\integrity_common.c src\integrity_windows.c src\file_windows.c src\manifest.c src\attestation_windows.c src\reshield.c src\verify_app.c || exit /b 1
-          lib /nologo /OUT:build\reshield.lib build\lib\sha256.obj build\lib\integrity_common.obj build\lib\integrity_windows.obj build\lib\file_windows.obj build\lib\manifest.obj build\lib\attestation_windows.obj build\lib\reshield.obj build\lib\verify_app.obj || exit /b 1
+          cl %CFLAGS% /c /Fo:build\lib\ src\sha256.c src\sha256_accel.c src\integrity_common.c src\integrity_windows.c src\file_windows.c src\manifest.c src\attestation_windows.c src\reshield.c src\verify_app.c || exit /b 1
+          lib /nologo /OUT:build\reshield.lib build\lib\sha256.obj build\lib\sha256_accel.obj build\lib\integrity_common.obj build\lib\integrity_windows.obj build\lib\file_windows.obj build\lib\manifest.obj build\lib\attestation_windows.obj build\lib\reshield.obj build\lib\verify_app.obj || exit /b 1
           cl %CFLAGS% /Fo:build\ examples\integrity_demo.c build\reshield.lib /Fe:build\integrity_demo.exe /link /INCREMENTAL:NO || set FAIL=1
           cl %CFLAGS% /Fo:build\ examples\sample_game.c build\reshield.lib /Fe:build\sample_game.exe /link /INCREMENTAL:NO || set FAIL=1
           cl %TFLAGS% /Fo:build\ tests\test_integrity.c build\reshield.lib /Fe:build\test_integrity.exe /link /INCREMENTAL:NO || set FAIL=1
@@ -77,6 +84,8 @@ jobs:
           cl %TFLAGS% /Fo:build\ tests\test_runtime.c build\reshield.lib /Fe:build\test_runtime.exe /link /INCREMENTAL:NO || set FAIL=1
           cl %TFLAGS% /Fo:build\ tests\test_wx.c build\reshield.lib /Fe:build\test_wx.exe /link /INCREMENTAL:NO || set FAIL=1
           cl %TFLAGS% /Fo:build\ tests\test_verify_app.c build\reshield.lib /Fe:build\test_verify_app.exe /link /INCREMENTAL:NO || set FAIL=1
+          cl %TFLAGS% /Fo:build\ tests\test_sha256_accel.c build\reshield.lib /Fe:build\test_sha256_accel.exe /link /INCREMENTAL:NO || set FAIL=1
+          cl %TFLAGS% /Fo:build\ tests\bench_sha256.c build\reshield.lib /Fe:build\bench_sha256.exe /link /INCREMENTAL:NO || set FAIL=1
           cl %TFLAGS% /Fo:build\ tests\test_codesign_toctou_windows.c build\reshield.lib /Fe:build\test_codesign_toctou_windows.exe /link /INCREMENTAL:NO || set FAIL=1
           if defined FAIL exit /b 1
 
@@ -84,12 +93,17 @@ jobs:
         shell: pwsh
         run: |
           $bad = 0
-          foreach ($t in 'test_integrity', 'test_manifest', 'test_runtime', 'test_wx') {
+          foreach ($t in 'test_integrity', 'test_manifest', 'test_runtime', 'test_wx', 'test_sha256_accel') {
             "=== $t ==="
             & ".\build\$t.exe"
             if ($LASTEXITCODE -ne 0) { "FAILED: $t exit=$LASTEXITCODE"; $bad = 1 }
           }
           exit $bad
+
+      # Prints the backend (shani if the runner CPU has SHA-NI) and MB/s; not a gate.
+      - name: SHA-256 throughput
+        shell: pwsh
+        run: .\build\bench_sha256.exe
 
       - name: Seal, run, tamper, verify_release (integrity_demo)
         shell: pwsh
@@ -255,7 +269,7 @@ jobs:
         shell: cmd
         run: |
           call "%VSDIR%\VC\Auxiliary\Build\vcvars64.bat"
-          cl /nologo /std:c11 /O2 /W3 /I include /Fo:build\ src\sha256.c src\integrity_common.c src\integrity_windows.c src\attestation_windows.c src\manifest.c src\file_windows.c src\reshield.c examples\integrity_demo.c /Fe:build\integrity_demo.exe /link /INCREMENTAL:NO > build\build.log 2>&1
+          cl /nologo /std:c11 /O2 /W3 /I include /Fo:build\ src\sha256.c src\sha256_accel.c src\integrity_common.c src\integrity_windows.c src\attestation_windows.c src\manifest.c src\file_windows.c src\reshield.c examples\integrity_demo.c /Fe:build\integrity_demo.exe /link /INCREMENTAL:NO > build\build.log 2>&1
           set RC=%ERRORLEVEL%
           type build\build.log
           exit /b %RC%
