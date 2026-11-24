@@ -1,7 +1,16 @@
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #include "reshield/manifest.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 static int g_failures = 0;
 
@@ -23,6 +32,193 @@ static void hash_to_hex(const uint8_t hash[RESHIELD_SHA256_SIZE], char out[65]) 
     }
     out[64] = '\0';
 }
+
+#ifndef RESHIELD_DISABLE
+#define ADIR "build/mt_assets"
+#define MPATH "build/mt_manifest.txt"
+
+static void write_file(const char *path, const void *data, size_t len) {
+    FILE *f = fopen(path, "wb");
+    if (f != NULL) {
+        fwrite(data, 1, len, f);
+        fclose(f);
+    }
+}
+
+/* Writes `content` as the manifest, uses its own SHA-256 as the root, and verifies. */
+static reshield_manifest_status_t verify_content(const char *content, size_t len,
+                                                 char *failed, size_t failed_cap) {
+    write_file(MPATH, content, len);
+    uint8_t root[RESHIELD_SHA256_SIZE];
+    reshield_sha256_file(MPATH, root, NULL);
+    return reshield_verify_manifest_files(MPATH, ADIR, root, failed, failed_cap);
+}
+
+static reshield_manifest_status_t verify_str(const char *content) {
+    return verify_content(content, strlen(content), NULL, 0);
+}
+
+static void sha_hex(const char *data, size_t len, char out[65]) {
+    uint8_t h[RESHIELD_SHA256_SIZE];
+    reshield_sha256(data, len, h);
+    hash_to_hex(h, out);
+}
+
+/* Runs fn in a child with an alarm so a regression that blocks cannot hang the suite. */
+static int run_with_timeout(int (*fn)(void), unsigned secs) {
+    pid_t pid = fork();
+    if (pid < 0) {
+        return 0;
+    }
+    if (pid == 0) {
+        alarm(secs);
+        _exit(fn() ? 0 : 1);
+    }
+    int st = 0;
+    if (waitpid(pid, &st, 0) < 0) {
+        return 0;
+    }
+    return WIFEXITED(st) && WEXITSTATUS(st) == 0;
+}
+
+static int child_fifo_asset(void) {
+    char hex[65];
+    sha_hex("x", 1, hex);
+    char line[256];
+    snprintf(line, sizeof(line), "%s 1 fifo.bin\n", hex);
+    return verify_str(line) == RESHIELD_MANIFEST_ASSET_MISMATCH;
+}
+
+static int child_zero_symlink_asset(void) {
+    char hex[65];
+    sha_hex("x", 1, hex);
+    char line[256];
+    snprintf(line, sizeof(line), "%s 1 zero.bin\n", hex);
+    return verify_str(line) == RESHIELD_MANIFEST_ASSET_MISMATCH;
+}
+
+static int child_fifo_manifest(void) {
+    uint8_t root[RESHIELD_SHA256_SIZE] = { 0 };
+    return reshield_verify_manifest_files(ADIR "/fifo.bin", ADIR, root, NULL, 0) ==
+           RESHIELD_MANIFEST_IO_ERROR;
+}
+
+static void test_manifest_edge_cases(void) {
+    char hex[65];
+    char buf[2048];
+    char failed[128];
+
+    mkdir("build", 0755);
+    mkdir(ADIR, 0755);
+    write_file(ADIR "/a.cfg", "abc", 3);
+    write_file(ADIR "/v1..2.cfg", "abc", 3);
+    sha_hex("abc", 3, hex);
+
+    snprintf(buf, sizeof(buf), "%s 3 a.cfg\n", hex);
+    ASSERT_TRUE(verify_str(buf) == RESHIELD_MANIFEST_OK, "edge: baseline valid manifest passes");
+    snprintf(buf, sizeof(buf), "%s 3 a.cfg", hex);
+    ASSERT_TRUE(verify_str(buf) == RESHIELD_MANIFEST_OK, "edge: last line without newline passes");
+
+    snprintf(buf, sizeof(buf), "%s 3 v1..2.cfg\n", hex);
+    ASSERT_TRUE(verify_str(buf) == RESHIELD_MANIFEST_OK, "edge: 'v1..2.cfg' is an allowed name");
+
+    snprintf(buf, sizeof(buf), "%s 3 ../x\n", hex);
+    ASSERT_TRUE(verify_str(buf) == RESHIELD_MANIFEST_IO_ERROR, "edge: '../x' entry rejected");
+    snprintf(buf, sizeof(buf), "%s 3 sub/../a.cfg\n", hex);
+    ASSERT_TRUE(verify_str(buf) == RESHIELD_MANIFEST_IO_ERROR, "edge: 'sub/../a.cfg' entry rejected");
+    snprintf(buf, sizeof(buf), "%s 3 /abs\n", hex);
+    ASSERT_TRUE(verify_str(buf) == RESHIELD_MANIFEST_IO_ERROR, "edge: '/abs' entry rejected");
+    snprintf(buf, sizeof(buf), "%s 3 sub//a.cfg\n", hex);
+    ASSERT_TRUE(verify_str(buf) == RESHIELD_MANIFEST_IO_ERROR, "edge: empty path component rejected");
+
+    snprintf(buf, sizeof(buf), "%.63sZ 3 a.cfg\n", hex);
+    ASSERT_TRUE(verify_str(buf) == RESHIELD_MANIFEST_IO_ERROR, "edge: bad hex digit rejected");
+    snprintf(buf, sizeof(buf), "%s a.cfg\n", hex);
+    ASSERT_TRUE(verify_str(buf) == RESHIELD_MANIFEST_IO_ERROR, "edge: missing size field rejected");
+    snprintf(buf, sizeof(buf), "%s abc a.cfg\n", hex);
+    ASSERT_TRUE(verify_str(buf) == RESHIELD_MANIFEST_IO_ERROR, "edge: non-numeric size rejected");
+
+    ASSERT_TRUE(verify_str("# only a comment\n") == RESHIELD_MANIFEST_IO_ERROR,
+                "edge: comment-only manifest is IO_ERROR");
+    ASSERT_TRUE(verify_str("") == RESHIELD_MANIFEST_IO_ERROR, "edge: empty manifest is IO_ERROR");
+
+    snprintf(buf, sizeof(buf), "%s 3 missing.cfg\n", hex);
+    ASSERT_TRUE(verify_content(buf, strlen(buf), failed, sizeof(failed)) ==
+                    RESHIELD_MANIFEST_ASSET_MISMATCH && strcmp(failed, "missing.cfg") == 0,
+                "edge: missing asset is ASSET_MISMATCH and reported");
+
+    snprintf(buf, sizeof(buf), "%s 4 a.cfg\n", hex);
+    ASSERT_TRUE(verify_str(buf) == RESHIELD_MANIFEST_ASSET_MISMATCH,
+                "edge: wrong size (asset shorter) is ASSET_MISMATCH");
+    write_file(ADIR "/big.cfg", "abcd", 4);
+    snprintf(buf, sizeof(buf), "%s 3 big.cfg\n", hex);
+    ASSERT_TRUE(verify_str(buf) == RESHIELD_MANIFEST_ASSET_MISMATCH,
+                "edge: wrong size (asset longer) is ASSET_MISMATCH");
+
+    snprintf(buf, sizeof(buf), "%s 3 a.cfg\r\n", hex);
+    ASSERT_TRUE(verify_str(buf) == RESHIELD_MANIFEST_IO_ERROR, "edge: CRLF manifest rejected");
+
+    {
+        size_t n = (size_t)snprintf(buf, sizeof(buf), "%s 3 ", hex);
+        memset(buf + n, 'a', 1100);
+        buf[n + 1100] = '\n';
+        ASSERT_TRUE(verify_content(buf, n + 1101, NULL, 0) == RESHIELD_MANIFEST_IO_ERROR,
+                    "edge: line longer than 1023 chars is IO_ERROR (no truncation)");
+    }
+
+    {
+        size_t cap = 4u * 1024u * 1024u + 1u;
+        char *huge = (char *)malloc(cap);
+        if (huge != NULL) {
+            memset(huge, '#', cap);
+            huge[cap - 1] = '\n';
+            ASSERT_TRUE(verify_content(huge, cap, NULL, 0) == RESHIELD_MANIFEST_IO_ERROR,
+                        "edge: manifest over 4 MiB is IO_ERROR");
+            free(huge);
+        }
+    }
+
+    /* Sealed-root lookups: the test binary is unsealed, so expected_root=NULL must not pass. */
+    snprintf(buf, sizeof(buf), "%s 3 a.cfg\n", hex);
+    write_file(MPATH, buf, strlen(buf));
+    ASSERT_TRUE(reshield_verify_manifest_files(MPATH, ADIR, NULL, NULL, 0) == RESHIELD_MANIFEST_UNSEALED,
+                "edge: expected_root=NULL on unsealed binary is UNSEALED");
+    ASSERT_TRUE(reshield_verify_single_asset(MPATH, ADIR, "a.cfg", NULL) == RESHIELD_MANIFEST_UNSEALED,
+                "edge: single_asset expected_root=NULL on unsealed binary is UNSEALED");
+
+    uint8_t root[RESHIELD_SHA256_SIZE];
+    reshield_sha256_file(MPATH, root, NULL);
+    ASSERT_TRUE(reshield_verify_single_asset(MPATH, ADIR, "other.cfg", root) == RESHIELD_MANIFEST_ASSET_MISMATCH,
+                "edge: single_asset not listed in manifest is ASSET_MISMATCH");
+    ASSERT_TRUE(reshield_verify_single_asset(MPATH, ADIR, "../a.cfg", root) == RESHIELD_MANIFEST_IO_ERROR,
+                "edge: single_asset with '../' path is IO_ERROR");
+    ASSERT_TRUE(reshield_verify_single_asset(MPATH, ADIR, "a.cfg", root) == RESHIELD_MANIFEST_OK,
+                "edge: single_asset listed asset passes");
+    ASSERT_TRUE(reshield_verify_manifest_files(NULL, ADIR, root, NULL, 0) == RESHIELD_MANIFEST_IO_ERROR,
+                "edge: manifest_path=NULL is IO_ERROR (verify_manifest_files)");
+    ASSERT_TRUE(reshield_verify_single_asset(NULL, ADIR, "a.cfg", root) == RESHIELD_MANIFEST_IO_ERROR,
+                "edge: manifest_path=NULL is IO_ERROR (verify_single_asset)");
+    ASSERT_TRUE(reshield_verify_manifest_files("build/does_not_exist.manifest", ADIR, root, NULL, 0) ==
+                    RESHIELD_MANIFEST_IO_ERROR,
+                "edge: nonexistent manifest is IO_ERROR");
+
+    /* Non-regular assets must not block the verifier. */
+    ASSERT_TRUE(mkfifo(ADIR "/fifo.bin", 0600) == 0, "edge: create FIFO");
+    ASSERT_TRUE(run_with_timeout(child_fifo_asset, 3), "edge: FIFO asset is ASSET_MISMATCH within 3s");
+    ASSERT_TRUE(run_with_timeout(child_fifo_manifest, 3), "edge: FIFO manifest is IO_ERROR within 3s");
+    ASSERT_TRUE(symlink("/dev/zero", ADIR "/zero.bin") == 0, "edge: create /dev/zero symlink");
+    ASSERT_TRUE(run_with_timeout(child_zero_symlink_asset, 3),
+                "edge: /dev/zero symlink asset is ASSET_MISMATCH within 3s");
+
+    remove(ADIR "/a.cfg");
+    remove(ADIR "/v1..2.cfg");
+    remove(ADIR "/big.cfg");
+    remove(ADIR "/fifo.bin");
+    remove(ADIR "/zero.bin");
+    rmdir(ADIR);
+    remove(MPATH);
+}
+#endif
 
 int main(void) {
     const char *asset_path = "build/test_asset_tmp.txt";
@@ -86,6 +282,10 @@ int main(void) {
 
     remove(asset_path);
     remove(manifest_path);
+
+#ifndef RESHIELD_DISABLE
+    test_manifest_edge_cases();
+#endif
 
     if (g_failures > 0) {
         fprintf(stderr, "%d test(s) failed.\n", g_failures);

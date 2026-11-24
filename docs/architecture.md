@@ -15,7 +15,7 @@
 | --- | --- | --- |
 | `integrity` | `include/reshield/integrity.h`, `src/sha256.c`, `src/integrity_*.c` | FIPS 180-4 SHA-256, `RSHLDCHK` v2(96바이트) 레코드 조회, 메모리 코드 섹션 해시 대조 |
 | `manifest` | `include/reshield/manifest.h`, `src/manifest.c` | 봉인된 매니페스트 루트 해시 대조 및 에셋 파일별 크기·SHA-256 검증 |
-| `attestation` | `include/reshield/attestation.h`, `src/attestation_*.c` | 코드 페이지 W^X(쓰기 금지) 권한 검증 및 macOS `SecCodeCheckValidity` 검증 |
+| `attestation` | `include/reshield/attestation.h`, `src/attestation_*.c` | 코드 섹션 전 범위의 W^X(쓰기 금지) 권한 검증 및 macOS `SecCodeCheckValidity` 유효성 검증 |
 | `runtime` | `include/reshield/reshield.h`, `src/reshield.c` | 통합 `reshield_verify()` 파이프라인, `reshield_secure_zero()` |
 | `tools` | `tools/gen_manifest.py`, `tools/seal_binary.py`, `tools/verify_release.py` | 에셋 매니페스트 생성, 바이너리 봉인, 릴리스 아티팩트 CI 검증 |
 
@@ -34,3 +34,13 @@ Offset  Size  Field
 32      32    expected_sha256 (code section SHA-256)
 64      32    manifest_root_sha256 (manifest file SHA-256)
 ```
+
+## 한계
+
+- 해시 대상은 `__TEXT,__text` / `.text`뿐이다. `__stubs`, `.plt`, `__const`, 레코드가 놓이는 `__DATA`는 포함되지 않는다.
+- 레코드의 평문 `RSHLDCHK` 매직이 수정 지점을 노출한다.
+- 소프트웨어 breakpoint(코드 바이트 패치)가 설치된 상태에서는 `CODE_TAMPERED`로 보고된다.
+- 매니페스트에 없는 추가 파일은 감지하지 못한다.
+- macOS 코드 서명 검증은 `SecCodeCheckValidity`를 requirement `NULL`로 호출해 서명 유효성만 확인하며 서명 주체는 고정하지 않는다.
+- fat/universal Mach-O는 `seal_binary.py`가 지원하지 않는다.
+- 자세한 내용: [integrity-verification.md](integrity-verification.md#5-한계).

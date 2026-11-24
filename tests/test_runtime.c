@@ -51,6 +51,67 @@ static void test_verify_unsealed_and_callback(void) {
 #endif
 }
 
+static void test_null_config_and_report(void) {
+    reshield_report_t report;
+    memset(&report, 0xAB, sizeof(report));
+#ifdef RESHIELD_DISABLE
+    ASSERT_TRUE(reshield_verify(NULL, NULL) == RESHIELD_OK, "disabled: config=NULL, out_report=NULL returns OK");
+    ASSERT_TRUE(reshield_verify(NULL, &report) == RESHIELD_OK && report.failed_checks == 0u,
+                "disabled: config=NULL yields a zeroed OK report");
+#else
+    ASSERT_TRUE(reshield_verify(NULL, NULL) == RESHIELD_ERR_UNSEALED,
+                "config=NULL and out_report=NULL: default (strict) config reports UNSEALED");
+    ASSERT_TRUE(reshield_verify(NULL, &report) == RESHIELD_ERR_UNSEALED &&
+                report.status == RESHIELD_ERR_UNSEALED &&
+                report.failed_checks == RESHIELD_CHECK_CODE_SECTION,
+                "config=NULL fills report: UNSEALED with only the code-section bit set");
+
+    reshield_config_t cfg = reshield_default_config();
+    cfg.allow_unsealed = 1;
+    ASSERT_TRUE(reshield_verify(&cfg, NULL) == RESHIELD_OK, "out_report=NULL with allow_unsealed returns OK");
+#endif
+}
+
+static void test_manifest_flag_with_unsealed_binary(void) {
+    reshield_report_t report;
+    reshield_config_t cfg = reshield_default_config();
+    cfg.enabled_checks = RESHIELD_CHECK_MANIFEST;
+    cfg.manifest_path = "build/does_not_exist.manifest";
+
+#ifdef RESHIELD_DISABLE
+    ASSERT_TRUE(reshield_verify(&cfg, &report) == RESHIELD_OK, "disabled: MANIFEST check is skipped");
+#else
+    ASSERT_TRUE(reshield_verify(&cfg, &report) == RESHIELD_ERR_UNSEALED &&
+                report.failed_checks == RESHIELD_CHECK_MANIFEST,
+                "MANIFEST on unsealed binary: UNSEALED, only the manifest bit set");
+
+    cfg.allow_unsealed = 1;
+    ASSERT_TRUE(reshield_verify(&cfg, &report) == RESHIELD_OK && report.failed_checks == 0u,
+                "allow_unsealed + MANIFEST on unsealed binary passes (dev only)");
+
+    cfg.enabled_checks = RESHIELD_CHECK_CODE_SECTION | RESHIELD_CHECK_MANIFEST;
+    ASSERT_TRUE(reshield_verify(&cfg, &report) == RESHIELD_OK && report.failed_checks == 0u,
+                "allow_unsealed + CODE_SECTION|MANIFEST passes on unsealed binary");
+
+    cfg.allow_unsealed = 0;
+    ASSERT_TRUE(reshield_verify(&cfg, &report) == RESHIELD_ERR_UNSEALED &&
+                report.failed_checks == (RESHIELD_CHECK_CODE_SECTION | RESHIELD_CHECK_MANIFEST),
+                "strict CODE_SECTION|MANIFEST: both failed_checks bits set, status UNSEALED");
+
+    cfg.enabled_checks = 0u;
+    ASSERT_TRUE(reshield_verify(&cfg, &report) == RESHIELD_OK && report.failed_checks == 0u,
+                "no enabled checks returns OK");
+#endif
+}
+
+static void test_status_names(void) {
+    ASSERT_TRUE(strcmp(reshield_status_name(RESHIELD_ERR_MANIFEST_MISMATCH), "MANIFEST_MISMATCH") == 0 &&
+                strcmp(reshield_status_name(RESHIELD_ERR_ASSET_TAMPERED), "ASSET_TAMPERED") == 0 &&
+                strcmp(reshield_status_name(RESHIELD_ERR_INTERNAL), "INTERNAL_ERROR") == 0 &&
+                strcmp(reshield_status_name((reshield_status_t)99), "UNKNOWN") == 0,
+                "reshield_status_name() names manifest/asset/internal/unknown statuses");
+}
+
 static void test_secure_zero(void) {
     uint8_t buf[16];
     memset(buf, 0xAB, sizeof(buf));
@@ -74,6 +135,9 @@ int main(void) {
 #endif
 
     test_verify_unsealed_and_callback();
+    test_null_config_and_report();
+    test_manifest_flag_with_unsealed_binary();
+    test_status_names();
     test_secure_zero();
 
     if (g_failures > 0) {

@@ -55,13 +55,11 @@ static void test_verify_buffer(void) {
                 "reshield_verify_buffer() returns 1 on matching buffer");
 
     buf[7] ^= 0x01u;
-#ifdef RESHIELD_DISABLE
-    ASSERT_TRUE(reshield_verify_buffer(buf, sizeof(buf), expected) == 1,
-                "reshield_verify_buffer() returns 1 when RESHIELD_DISABLE is set");
-#else
+    /* App-logic comparison: must reject a mismatch even with -DRESHIELD_DISABLE. */
     ASSERT_TRUE(reshield_verify_buffer(buf, sizeof(buf), expected) == 0,
-                "reshield_verify_buffer() returns 0 on 1-bit mismatch");
-#endif
+                "reshield_verify_buffer() returns 0 on 1-bit mismatch (also when disabled)");
+    ASSERT_TRUE(reshield_verify_buffer(buf, sizeof(buf), NULL) == 0,
+                "reshield_verify_buffer() returns 0 for NULL expected digest");
 }
 
 static void test_unsealed_and_wx(void) {

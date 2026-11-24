@@ -14,6 +14,7 @@ Verifies:
 
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import struct
@@ -23,6 +24,8 @@ import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
 import seal_binary  # noqa: E402
+import gen_manifest as gen_manifest_mod  # noqa: E402
+import verify_release as verify_release_mod  # noqa: E402
 
 
 def find_symbol_file_offset(binary_path: str, data: bytes, symbol: str) -> int:
@@ -74,6 +77,259 @@ def find_symbol_file_offset(binary_path: str, data: bytes, symbol: str) -> int:
 
 def run_cmd(cmd: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(cmd, capture_output=True, text=True)
+
+
+def resign(path: str) -> None:
+    """Re-sign after patching bytes so macOS still launches the binary."""
+    if sys.platform == "darwin":
+        subprocess.run(["codesign", "-s", "-", "--force", path], check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def patch_file(src: str, dst: str, offset: int, value: int) -> None:
+    shutil.copy2(src, dst)
+    with open(dst, "r+b") as f:
+        f.seek(offset)
+        f.write(bytes([value]))
+    resign(dst)
+
+
+def test_status_mapping_and_records(tmpdir: str, repo_root: str, assets_dir: str) -> None:
+    build = os.path.join(repo_root, "build")
+    integrity_demo = os.path.join(build, "integrity_demo")
+    sample_game = os.path.join(build, "sample_game")
+    sample_game_disabled = os.path.join(build, "sample_game_disabled")
+    gen_tool = os.path.join(repo_root, "tools", "gen_manifest.py")
+    seal_tool = os.path.join(repo_root, "tools", "seal_binary.py")
+
+    manifest = os.path.join(tmpdir, "s2.manifest")
+    subprocess.run([sys.executable, gen_tool, assets_dir, "-o", manifest], check=True,
+                   stdout=subprocess.DEVNULL)
+
+    # Disabled sample_game still rejects a wrong key (reshield_verify_buffer is app logic).
+    args = [manifest, assets_dir]
+    r = run_cmd([sample_game_disabled, *args, "WRONG-KEY"])
+    assert r.returncode == 1 and "ACCESS DENIED" in r.stdout, f"disabled wrong key accepted: {r}"
+    r = run_cmd([sample_game_disabled, *args, "STAGE-1-CLEAR-2026"])
+    assert r.returncode == 0 and "STAGE UNLOCKED" in r.stdout, f"disabled right key rejected: {r}"
+    print("PASS: disabled sample_game rejects wrong key and accepts the right key")
+
+    game = os.path.join(tmpdir, "s2_game")
+    shutil.copy2(sample_game, game)
+    subprocess.run([sys.executable, seal_tool, game, "--manifest", manifest, "--build-id", "7"],
+                   check=True, stdout=subprocess.DEVNULL)
+
+    # ROOT_MISMATCH / ASSET_TAMPERED / IO error map to distinct statuses (exit = 10 + status).
+    r = run_cmd([game, os.path.join(tmpdir, "missing.manifest"), assets_dir, "STAGE-1-CLEAR-2026"])
+    assert r.returncode == 17 and "INTERNAL_ERROR" in r.stderr, f"IO error mapping failed: {r}"
+    print("PASS: unreadable manifest maps to INTERNAL_ERROR")
+
+    # Multiple failures: code status wins, both failed_checks bits are reported.
+    demo = os.path.join(tmpdir, "s2_demo")
+    shutil.copy2(integrity_demo, demo)
+    subprocess.run([sys.executable, seal_tool, demo, "--manifest", manifest, "--build-id", "7"],
+                   check=True, stdout=subprocess.DEVNULL)
+    with open(demo, "rb") as f:
+        demo_bytes = f.read()
+    sentinel_off = find_symbol_file_offset(demo, demo_bytes, "reshield_checksum_sentinel")
+    bad_manifest = os.path.join(tmpdir, "s2_bad.manifest")
+    shutil.copy2(manifest, bad_manifest)
+    with open(bad_manifest, "ab") as f:
+        f.write(b"# tampered\n")
+    both = os.path.join(tmpdir, "s2_both")
+    patch_file(demo, both, sentinel_off, demo_bytes[sentinel_off] ^ 0x01)
+    r = run_cmd([both, f"--manifest={bad_manifest}", f"--assets={assets_dir}"])
+    assert r.returncode == 2 and "status=CODE_TAMPERED" in r.stdout and "failed_checks=0x9" in r.stderr, \
+        f"priority/bits failed: {r}"
+    print("PASS: CODE_TAMPERED wins over MANIFEST_MISMATCH and failed_checks has both bits (0x9)")
+
+    # Invalid records must not be treated as UNSEALED (allow_unsealed must not rescue them).
+    rec_off = seal_binary.find_integrity_record_offset(demo_bytes)
+    ver_off = rec_off + 8
+    bad_ver = os.path.join(tmpdir, "s2_badver")
+    patch_file(demo, bad_ver, ver_off, 3)
+    r = run_cmd([bad_ver, "--allow-unsealed"])
+    assert r.returncode == 2 and "status=CODE_TAMPERED" in r.stdout, f"bad version bypassed allow_unsealed: {r}"
+    bad_magic = os.path.join(tmpdir, "s2_badmagic")
+    patch_file(demo, bad_magic, rec_off, ord("X"))
+    r = run_cmd([bad_magic, "--allow-unsealed"])
+    assert r.returncode == 2 and "status=CODE_TAMPERED" in r.stdout, f"bad magic bypassed allow_unsealed: {r}"
+    print("PASS: invalid record (version/magic) is CODE_TAMPERED even with allow_unsealed")
+
+    # Documented dev-only behavior: clearing the sealed byte + allow_unsealed passes.
+    unsealed = os.path.join(tmpdir, "s2_unsealed")
+    patch_file(demo, unsealed, rec_off + 12, 0)
+    r = run_cmd([unsealed])
+    assert r.returncode == 1 and "status=UNSEALED" in r.stdout, f"strict unsealed failed: {r}"
+    r = run_cmd([unsealed, "--allow-unsealed"])
+    assert r.returncode == 0, f"allow_unsealed on valid unsealed record failed: {r}"
+    print("PASS: valid sealed==0 record is UNSEALED; allow_unsealed (dev only) accepts it")
+
+    # Sealed WITHOUT a manifest, but the app asks for manifest checking: not UNSEALED, no bypass.
+    nomanifest = os.path.join(tmpdir, "s2_nomanifest")
+    shutil.copy2(integrity_demo, nomanifest)
+    subprocess.run([sys.executable, seal_tool, nomanifest, "--build-id", "7"], check=True,
+                   stdout=subprocess.DEVNULL)
+    r = run_cmd([nomanifest, f"--manifest={manifest}", f"--assets={assets_dir}", "--allow-unsealed"])
+    assert r.returncode == 5 and "MANIFEST_MISMATCH" in r.stderr, f"sealed-without-manifest bypass: {r}"
+    print("PASS: sealed binary without manifest root fails MANIFEST check even with allow_unsealed")
+
+
+def test_path_rules() -> None:
+    safe = gen_manifest_mod.is_safe_relative_path
+    assert safe("a.cfg") and safe("sub/a.cfg") and safe("v1..2.cfg") and safe(".hidden/a.cfg")
+    for bad in ("", "/abs", "../x", "a/../b", "a/..", "a//b", "a/", "a\nb", "a\rb"):
+        assert not safe(bad), f"path should be rejected: {bad!r}"
+
+    with tempfile.TemporaryDirectory(prefix="reshield_paths_") as d:
+        os.makedirs(os.path.join(d, "assets", ".dotdir"))
+        for name in ("v1..2.cfg", ".dotfile", os.path.join(".dotdir", "in.cfg")):
+            with open(os.path.join(d, "assets", name), "wb") as f:
+                f.write(b"abc")
+        manifest = os.path.join(d, "m.manifest")
+        gen_manifest_mod.generate_manifest(os.path.join(d, "assets"), manifest)
+        with open(manifest, "r", encoding="utf-8") as f:
+            listed = [ln.split(" ", 2)[2].rstrip("\n") for ln in f]
+        # Policy: dot-files skipped, dot-directories traversed.
+        assert listed == [".dotdir/in.cfg", "v1..2.cfg"], listed
+        ok, _n, _msg = verify_release_mod.verify_manifest_entries(manifest, os.path.join(d, "assets"))
+        assert ok, "verify_release should accept generated manifest"
+
+        digest = hashlib.sha256(b"abc").hexdigest()
+        for label, content in (
+            ("dotdot", f"{digest} 3 ../x\n"),
+            ("absolute", f"{digest} 3 /abs\n"),
+            ("crlf", f"{digest} 3 v1..2.cfg\r\n"),
+            ("bad size", f"{digest} x v1..2.cfg\n"),
+        ):
+            with open(manifest, "wb") as f:
+                f.write(content.encode())
+            ok, _n, _msg = verify_release_mod.verify_manifest_entries(
+                manifest, os.path.join(d, "assets"))
+            assert not ok, f"verify_release must reject {label} manifest"
+    print("PASS: gen_manifest / verify_release share the C path rules (component-wise)")
+
+
+def patch_text_section(data: bytes, new_off: int, new_size: int) -> bytes:
+    """Rewrites the code section's file offset/size in the section header (Mach-O or ELF)."""
+    buf = bytearray(data)
+    if struct.unpack_from("<I", buf, 0)[0] == seal_binary.MH_MAGIC_64:
+        ncmds = struct.unpack_from("<I", buf, 16)[0]
+        offset = 32
+        for _ in range(ncmds):
+            cmd, cmdsize = struct.unpack_from("<II", buf, offset)
+            if cmd == seal_binary.LC_SEGMENT_64:
+                nsects = struct.unpack_from("<I", buf, offset + 64)[0]
+                sect_off = offset + 72
+                for _ in range(nsects):
+                    if buf[sect_off : sect_off + 6] == b"__text" and buf[sect_off + 16 : sect_off + 22] == b"__TEXT":
+                        struct.pack_into("<Q", buf, sect_off + 40, new_size)
+                        struct.pack_into("<I", buf, sect_off + 48, new_off)
+                        return bytes(buf)
+                    sect_off += 80
+            offset += cmdsize
+    else:
+        e_shoff = struct.unpack_from("<Q", buf, 40)[0]
+        e_shentsize, e_shnum, e_shstrndx = struct.unpack_from("<HHH", buf, 58)
+        stroff = struct.unpack_from("<Q", buf, e_shoff + e_shstrndx * e_shentsize + 24)[0]
+        for i in range(e_shnum):
+            sh = e_shoff + i * e_shentsize
+            name_off = stroff + struct.unpack_from("<I", buf, sh)[0]
+            if buf[name_off : name_off + 6] == b".text\x00":
+                struct.pack_into("<QQ", buf, sh + 24, new_off, new_size)
+                return bytes(buf)
+    raise RuntimeError("code section header not found")
+
+
+def test_seal_tool_and_release_cases(tmpdir: str, repo_root: str, assets_dir: str) -> None:
+    build = os.path.join(repo_root, "build")
+    gen_tool = os.path.join(repo_root, "tools", "gen_manifest.py")
+    seal_tool = os.path.join(repo_root, "tools", "seal_binary.py")
+    verify_tool = os.path.join(repo_root, "tools", "verify_release.py")
+    py = sys.executable
+
+    manifest = os.path.join(tmpdir, "s4.manifest")
+    subprocess.run([py, gen_tool, assets_dir, "-o", manifest], check=True, stdout=subprocess.DEVNULL)
+
+    demo = os.path.join(tmpdir, "s4_demo")
+    shutil.copy2(os.path.join(build, "integrity_demo"), demo)
+    os.chmod(demo, 0o751)
+    r = run_cmd([py, seal_tool, demo, "--manifest", manifest, "--build-id", "9"])
+    assert r.returncode == 0, r
+    assert (os.stat(demo).st_mode & 0o777) == 0o751, "seal_binary must keep permission bits"
+    assert not [n for n in os.listdir(tmpdir) if n.startswith(".seal_")], "temp file left behind"
+    print("PASS: seal_binary keeps permission bits and leaves no temp file")
+
+    # --verify-only
+    r = run_cmd([py, seal_tool, demo, "--manifest", manifest, "--verify-only"])
+    assert r.returncode == 0 and "match=True" in r.stdout, r
+    unsealed_copy = os.path.join(tmpdir, "s4_unsealed")
+    shutil.copy2(os.path.join(build, "integrity_demo"), unsealed_copy)
+    r = run_cmd([py, seal_tool, unsealed_copy, "--verify-only"])
+    assert r.returncode == 1 and "match=False" in r.stdout, r
+    other = os.path.join(tmpdir, "s4_other.manifest")
+    shutil.copy2(manifest, other)
+    with open(other, "ab") as f:
+        f.write(b"# x\n")
+    r = run_cmd([py, seal_tool, demo, "--manifest", other, "--verify-only"])
+    assert r.returncode == 1 and "match=False" in r.stdout, r
+    print("PASS: seal_binary --verify-only succeeds on sealed, fails on unsealed / wrong manifest")
+
+    with open(os.path.join(build, "integrity_demo"), "rb") as f:
+        raw = f.read()
+    rec_off = seal_binary.find_integrity_record_offset(raw)
+
+    # 0 records / 2 records
+    no_rec = os.path.join(tmpdir, "s4_norec")
+    with open(no_rec, "wb") as f:
+        f.write(raw[:rec_off] + b"XSHLDCHK" + raw[rec_off + 8:])
+    r = run_cmd([py, seal_tool, no_rec, "--no-codesign"])
+    assert r.returncode == 2 and "No RSHLDCHK" in r.stderr, r
+    two_rec = os.path.join(tmpdir, "s4_tworec")
+    with open(two_rec, "wb") as f:
+        f.write(raw + raw[rec_off : rec_off + seal_binary.RECORD_SIZE])
+    r = run_cmd([py, seal_tool, two_rec, "--no-codesign"])
+    assert r.returncode == 2 and "Ambiguous" in r.stderr, r
+    print("PASS: seal_binary rejects 0 records and ambiguous 2 records")
+
+    # record overlapping the code section (section starts inside the record)
+    _fmt, text_off, text_size = seal_binary.find_code_section(raw)
+    overlap = os.path.join(tmpdir, "s4_overlap")
+    with open(overlap, "wb") as f:
+        f.write(patch_text_section(raw, rec_off + 10, 100))
+    r = run_cmd([py, seal_tool, overlap, "--no-codesign"])
+    assert r.returncode == 2 and "overlap" in r.stderr, r
+    print("PASS: seal_binary rejects a record that overlaps the code section (partial overlap)")
+
+    # fat Mach-O
+    fat = os.path.join(tmpdir, "s4_fat")
+    with open(fat, "wb") as f:
+        f.write(b"\xca\xfe\xba\xbe" + b"\x00\x00\x00\x00" + b"\x00" * 64)
+    r = run_cmd([py, seal_tool, fat, "--no-codesign"])
+    assert r.returncode == 2 and "fat/universal" in r.stderr, r
+    print("PASS: seal_binary exits with a clear error on fat/universal Mach-O")
+
+    # verify_release exit codes
+    r = run_cmd([py, verify_tool, demo, "--manifest", manifest, "--assets", assets_dir])
+    assert r.returncode == 0, r
+    r = run_cmd([py, verify_tool, demo, "--manifest", other, "--assets", assets_dir])
+    assert r.returncode == 1 and "manifest_assets: FAIL" in r.stdout, r
+    with open(demo, "rb") as f:
+        demo_bytes = f.read()
+    sentinel_off = find_symbol_file_offset(demo, demo_bytes, "reshield_checksum_sentinel")
+    corrupt = os.path.join(tmpdir, "s4_corrupt")
+    patch_file(demo, corrupt, sentinel_off, demo_bytes[sentinel_off] ^ 0x01)
+    r = run_cmd([py, verify_tool, corrupt, "--manifest", manifest, "--assets", assets_dir])
+    assert r.returncode == 1 and "code_seal:       FAIL" in r.stdout, r
+    print("PASS: verify_release returns 1 on code and manifest mismatch")
+
+    # gen_manifest on an empty directory
+    empty = os.path.join(tmpdir, "empty_assets")
+    os.makedirs(empty)
+    r = run_cmd([py, gen_tool, empty, "-o", os.path.join(tmpdir, "empty.manifest")])
+    assert r.returncode != 0 and "No asset files" in r.stderr, r
+    assert not os.path.exists(os.path.join(tmpdir, "empty.manifest"))
+    print("PASS: gen_manifest fails on an empty asset directory")
 
 
 def main() -> int:
@@ -168,6 +424,13 @@ def main() -> int:
         r = run_cmd([integrity_demo_disabled])
         assert r.returncode == 0 and "status=OK" in r.stdout and "enabled=0" in r.stdout, f"Disabled demo failed: {r}"
         print("PASS: E2E disabled build (-DRESHIELD_DISABLE) passes unsealed for dev/QA")
+
+    test_path_rules()
+    with tempfile.TemporaryDirectory(prefix="reshield_s2_") as tmp2:
+        a2 = os.path.join(tmp2, "assets")
+        shutil.copytree(assets_src, a2)
+        test_status_mapping_and_records(tmp2, repo_root, a2)
+        test_seal_tool_and_release_cases(tmp2, repo_root, a2)
 
     print("All E2E seal workflow tests passed.")
     return 0

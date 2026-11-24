@@ -11,9 +11,12 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import os
+import shutil
 import struct
 import subprocess
 import sys
+import tempfile
 
 MAGIC = b"RSHLDCHK"
 RECORD_VERSION = 2
@@ -21,6 +24,8 @@ RECORD_FMT = "<8sIIIIQ32s32s"
 RECORD_SIZE = struct.calcsize(RECORD_FMT)
 
 MH_MAGIC_64 = 0xFEEDFACF
+# fat/universal Mach-O headers (stored big-endian on disk, so a little-endian read sees the CIGAM forms too)
+FAT_MAGICS = (b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca", b"\xca\xfe\xba\xbf", b"\xbf\xba\xfe\xca")
 LC_SEGMENT_64 = 0x19
 
 
@@ -84,6 +89,11 @@ def find_elf64_text(data: bytes) -> tuple[int, int]:
 
 
 def find_code_section(data: bytes) -> tuple[str, int, int]:
+    if data[:4] in FAT_MAGICS:
+        raise ValueError(
+            "fat/universal Mach-O is not supported; seal each architecture slice "
+            "(e.g. `lipo -thin`) and re-assemble, or build a thin binary"
+        )
     if len(data) >= 4 and struct.unpack_from("<I", data, 0)[0] == MH_MAGIC_64:
         off, size = find_macho64_text(data)
         return "macho64(__TEXT,__text)", off, size
@@ -142,8 +152,9 @@ def main() -> int:
         has_manifest = 1
 
     rec_off = find_integrity_record_offset(bytes(buf))
-    if text_off <= rec_off < text_off + text_size:
-        raise ValueError("Integrity record must not reside inside the hashed code section")
+    # Any overlap with the hashed section is an error, not only a record that starts inside it.
+    if rec_off < text_off + text_size and rec_off + RECORD_SIZE > text_off:
+        raise ValueError("Integrity record must not overlap the hashed code section")
 
     if args.verify_only:
         _magic, _ver, sealed, bid, rec_has_m, exp_size, exp_code, exp_manifest = (
@@ -171,8 +182,18 @@ def main() -> int:
     )
     buf[rec_off : rec_off + RECORD_SIZE] = packed
 
-    with open(args.binary, "wb") as f:
-        f.write(buf)
+    # Write next to the target and rename over it so a failed write never leaves a truncated binary.
+    target = os.path.realpath(args.binary)
+    fd, tmp_path = tempfile.mkstemp(prefix=".seal_", dir=os.path.dirname(target))
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(buf)
+        shutil.copymode(target, tmp_path)
+        os.replace(tmp_path, target)
+    except BaseException:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+        raise
 
     if sys.platform == "darwin" and not args.no_codesign:
         subprocess.run(
@@ -190,4 +211,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except ValueError as exc:
+        print(f"[seal_binary] error: {exc}", file=sys.stderr)
+        raise SystemExit(2)

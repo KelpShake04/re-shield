@@ -17,8 +17,8 @@ extern "C" {
  */
 typedef enum reshield_integrity_status {
     RESHIELD_INTEGRITY_OK       = 0, /* Hash and section size match sealed record (or RESHIELD_DISABLE) */
-    RESHIELD_INTEGRITY_UNSEALED = 1, /* Binary has not been sealed at build time (sealed == 0) */
-    RESHIELD_INTEGRITY_TAMPERED = 2, /* Code section size or SHA-256 mismatch */
+    RESHIELD_INTEGRITY_UNSEALED = 1, /* Valid record (magic+version) with sealed == 0; nothing else maps here */
+    RESHIELD_INTEGRITY_TAMPERED = 2, /* Code section size/SHA-256 mismatch, or an invalid record (bad magic/version/flags) */
     RESHIELD_INTEGRITY_ERROR    = 3  /* Could not locate runtime code section or unsupported platform */
 } reshield_integrity_status_t;
 
@@ -58,7 +58,9 @@ int reshield_digest_equal(const uint8_t a[RESHIELD_SHA256_SIZE],
 
 /**
  * Verifies that SHA-256(data, len) matches expected_sha256 in constant time.
- * Returns 1 on match (or when compiled with -DRESHIELD_DISABLE), 0 on mismatch.
+ * Returns 1 on match, 0 on mismatch. The comparison is performed even when compiled
+ * with -DRESHIELD_DISABLE: it is application logic (e.g. key commitments), not an
+ * integrity check.
  */
 int reshield_verify_buffer(const void *data, size_t len,
                            const uint8_t expected_sha256[RESHIELD_SHA256_SIZE]);
@@ -72,7 +74,9 @@ reshield_integrity_status_t reshield_verify_code_section(reshield_integrity_resu
 
 /**
  * Reads the sealed manifest root SHA-256 embedded in this binary.
- * Returns 0 if a manifest root is sealed, -1 if unsealed or no manifest was bound.
+ * Returns 0 if a manifest root is sealed, -1 if the binary is unsealed (valid record,
+ * sealed == 0), and -2 if the record is invalid or the binary was sealed without a
+ * manifest (not "unsealed": callers must not let allow_unsealed bypass it).
  */
 int reshield_get_sealed_manifest_root(uint8_t out_root[RESHIELD_SHA256_SIZE]);
 

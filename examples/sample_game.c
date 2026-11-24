@@ -57,7 +57,15 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    /* Load verified asset */
+    /*
+     * Load verified asset.
+     * Warning: reshield_verify() checked the file by path, and fopen() below opens it
+     * again, so the file can be swapped in between (TOCTOU). A hardened loader should
+     * read the asset into memory once and hash that same buffer (reshield_sha256 /
+     * reshield_verify_buffer) against a trusted digest before using it. This sample
+     * has no per-asset digest to compare against (the manifest API verifies by path),
+     * so it keeps the simple re-open pattern.
+     */
     char cfg_path[1024];
     snprintf(cfg_path, sizeof(cfg_path), "%s/stage1.cfg", asset_dir);
     FILE *fp = fopen(cfg_path, "r");

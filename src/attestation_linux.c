@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 extern int reshield_platform_get_code_section(const uint8_t **out_ptr, uint64_t *out_size);
 
@@ -19,26 +20,48 @@ reshield_attestation_status_t reshield_verify_code_page_wx(void) {
         return RESHIELD_ATTEST_FAILED;
     }
 
-    uintptr_t target = (uintptr_t)code_ptr;
+    /* [start, end) must be covered by contiguous r-x mappings (maps lines are address-sorted). */
+    uintptr_t start = (uintptr_t)code_ptr;
+    if (code_size > UINTPTR_MAX - start) {
+        return RESHIELD_ATTEST_FAILED;
+    }
+    uintptr_t end = start + (uintptr_t)code_size;
+
     FILE *fp = fopen("/proc/self/maps", "r");
     if (fp == NULL) {
         return RESHIELD_ATTEST_FAILED;
     }
 
     char line[512];
+    uintptr_t cur = start;
     reshield_attestation_status_t status = RESHIELD_ATTEST_FAILED;
     while (fgets(line, sizeof(line), fp) != NULL) {
-        unsigned long long start = 0;
-        unsigned long long end = 0;
-        char perms[8] = { 0 };
-        if (sscanf(line, "%llx-%llx %7s", &start, &end, perms) == 3) {
-            if (target >= (uintptr_t)start && target < (uintptr_t)end) {
-                /* Must be r-x (no 'w') */
-                if (perms[0] == 'r' && perms[1] == '-' && perms[2] == 'x') {
-                    status = RESHIELD_ATTEST_OK;
-                }
-                break;
+        /* Skip the tail of over-long lines (long paths) so fragments are never parsed. */
+        if (strchr(line, '\n') == NULL) {
+            int ch;
+            while ((ch = fgetc(fp)) != EOF && ch != '\n') {
             }
+        }
+        unsigned long long lo = 0;
+        unsigned long long hi = 0;
+        char perms[8] = { 0 };
+        if (sscanf(line, "%llx-%llx %7s", &lo, &hi, perms) != 3) {
+            continue;
+        }
+        if ((uintptr_t)hi <= cur) {
+            continue;
+        }
+        if ((uintptr_t)lo > cur) {
+            break; /* gap: nothing maps [cur, lo) */
+        }
+        /* Must be r-x (no 'w') */
+        if (!(perms[0] == 'r' && perms[1] == '-' && perms[2] == 'x')) {
+            break;
+        }
+        cur = (uintptr_t)hi;
+        if (cur >= end) {
+            status = RESHIELD_ATTEST_OK;
+            break;
         }
     }
 

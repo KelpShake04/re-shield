@@ -31,6 +31,7 @@ DEMO_INTEGRITY          = $(BUILD_DIR)/integrity_demo
 DEMO_INTEGRITY_DISABLED = $(BUILD_DIR)/integrity_demo_disabled
 SAMPLE_GAME             = $(BUILD_DIR)/sample_game
 SAMPLE_GAME_SEALED      = $(BUILD_DIR)/sample_game_sealed
+SAMPLE_GAME_DISABLED    = $(BUILD_DIR)/sample_game_disabled
 SAMPLE_MANIFEST         = $(BUILD_DIR)/sample_assets.manifest
 
 TEST_INTEGRITY          = $(BUILD_DIR)/test_integrity
@@ -39,11 +40,12 @@ TEST_MANIFEST           = $(BUILD_DIR)/test_manifest
 TEST_MANIFEST_DISABLED  = $(BUILD_DIR)/test_manifest_disabled
 TEST_RUNTIME            = $(BUILD_DIR)/test_runtime
 TEST_RUNTIME_DISABLED   = $(BUILD_DIR)/test_runtime_disabled
+TEST_WX                 = $(BUILD_DIR)/test_wx
 
 .PHONY: all clean test release-demo
 
 all: $(LIB_TARGET) $(DEMO_INTEGRITY) $(SAMPLE_GAME) $(SAMPLE_GAME_SEALED) \
-     $(TEST_INTEGRITY) $(TEST_MANIFEST) $(TEST_RUNTIME)
+     $(TEST_INTEGRITY) $(TEST_MANIFEST) $(TEST_RUNTIME) $(TEST_WX)
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
@@ -62,6 +64,9 @@ $(DEMO_INTEGRITY_DISABLED): examples/integrity_demo.c $(LIB_SRCS) | $(BUILD_DIR)
 
 $(SAMPLE_GAME): examples/sample_game.c $(LIB_TARGET)
 	$(CC) $(CFLAGS) $(INCLUDES) $< $(LIB_TARGET) $(LDFLAGS) -o $@
+
+$(SAMPLE_GAME_DISABLED): examples/sample_game.c $(LIB_SRCS) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -DRESHIELD_DISABLE $(INCLUDES) $^ $(LDFLAGS) -o $@
 
 $(SAMPLE_MANIFEST): examples/assets/stage1.cfg | $(BUILD_DIR)
 	$(PYTHON3) tools/gen_manifest.py examples/assets -o $@
@@ -83,6 +88,9 @@ $(TEST_MANIFEST): tests/test_manifest.c $(LIB_TARGET)
 $(TEST_MANIFEST_DISABLED): tests/test_manifest.c $(LIB_SRCS) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -DRESHIELD_DISABLE $(INCLUDES) $^ $(LDFLAGS) -o $@
 
+$(TEST_WX): tests/test_wx.c $(LIB_TARGET)
+	$(CC) $(CFLAGS) $(INCLUDES) $< $(LIB_TARGET) $(LDFLAGS) -o $@
+
 $(TEST_RUNTIME): tests/test_runtime.c $(LIB_TARGET)
 	$(CC) $(CFLAGS) $(INCLUDES) $< $(LIB_TARGET) $(LDFLAGS) -o $@
 
@@ -95,15 +103,16 @@ release-demo: $(SAMPLE_GAME_SEALED) $(SAMPLE_MANIFEST)
 
 test: $(TEST_INTEGRITY) $(TEST_INTEGRITY_DISABLED) \
       $(TEST_MANIFEST) $(TEST_MANIFEST_DISABLED) \
-      $(TEST_RUNTIME) $(TEST_RUNTIME_DISABLED) \
+      $(TEST_RUNTIME) $(TEST_RUNTIME_DISABLED) $(TEST_WX) \
       $(DEMO_INTEGRITY) $(DEMO_INTEGRITY_DISABLED) \
-      $(SAMPLE_GAME) $(SAMPLE_GAME_SEALED) $(SAMPLE_MANIFEST)
+      $(SAMPLE_GAME) $(SAMPLE_GAME_SEALED) $(SAMPLE_GAME_DISABLED) $(SAMPLE_MANIFEST)
 	./$(TEST_INTEGRITY)
 	./$(TEST_INTEGRITY_DISABLED)
 	./$(TEST_MANIFEST)
 	./$(TEST_MANIFEST_DISABLED)
 	./$(TEST_RUNTIME)
 	./$(TEST_RUNTIME_DISABLED)
+	./$(TEST_WX)
 	$(PYTHON3) tests/test_seal_workflow.py
 	$(PYTHON3) tools/verify_release.py $(SAMPLE_GAME_SEALED) --manifest $(SAMPLE_MANIFEST) --assets examples/assets
 

@@ -21,31 +21,42 @@ reshield_attestation_status_t reshield_verify_code_page_wx(void) {
         return RESHIELD_ATTEST_FAILED;
     }
 
-    mach_vm_address_t addr = (mach_vm_address_t)(uintptr_t)code_ptr;
-    mach_vm_size_t vmsize = 0;
-    vm_region_basic_info_data_64_t info;
-    mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
-    mach_port_t object_name = MACH_PORT_NULL;
-
-    kern_return_t kr = mach_vm_region(
-        mach_task_self(),
-        &addr,
-        &vmsize,
-        VM_REGION_BASIC_INFO_64,
-        (vm_region_info_t)&info,
-        &count,
-        &object_name
-    );
-    if (object_name != MACH_PORT_NULL) {
-        mach_port_deallocate(mach_task_self(), object_name);
-    }
-    if (kr != KERN_SUCCESS) {
+    /* The whole [start, end) range must be covered by contiguous regions that are all
+     * executable and NOT writable; a gap between regions is a failure. */
+    mach_vm_address_t start = (mach_vm_address_t)(uintptr_t)code_ptr;
+    if (code_size > UINT64_MAX - start) {
         return RESHIELD_ATTEST_FAILED;
     }
+    mach_vm_address_t end = start + (mach_vm_address_t)code_size;
 
-    /* Code section must be executable and NOT writable (W^X) */
-    if ((info.protection & VM_PROT_WRITE) != 0 || (info.protection & VM_PROT_EXECUTE) == 0) {
-        return RESHIELD_ATTEST_FAILED;
+    mach_vm_address_t cur = start;
+    while (cur < end) {
+        mach_vm_address_t addr = cur;
+        mach_vm_size_t vmsize = 0;
+        vm_region_basic_info_data_64_t info;
+        mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+        mach_port_t object_name = MACH_PORT_NULL;
+
+        kern_return_t kr = mach_vm_region(
+            mach_task_self(),
+            &addr,
+            &vmsize,
+            VM_REGION_BASIC_INFO_64,
+            (vm_region_info_t)&info,
+            &count,
+            &object_name
+        );
+        if (object_name != MACH_PORT_NULL) {
+            mach_port_deallocate(mach_task_self(), object_name);
+        }
+        if (kr != KERN_SUCCESS || addr > cur || vmsize == 0 || vmsize > UINT64_MAX - addr) {
+            return RESHIELD_ATTEST_FAILED;
+        }
+
+        if ((info.protection & VM_PROT_WRITE) != 0 || (info.protection & VM_PROT_EXECUTE) == 0) {
+            return RESHIELD_ATTEST_FAILED;
+        }
+        cur = addr + vmsize;
     }
     return RESHIELD_ATTEST_OK;
 #endif
