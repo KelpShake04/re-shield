@@ -6,7 +6,11 @@ Checks:
 1. Binary has a valid, matching RSHLDCHK v2 seal (code section SHA-256).
 2. If --manifest and --assets are provided, verifies manifest root binding and all assets.
 3. Reports defined symbol count via nm (helpful to confirm release strip).
-4. Warns (exit code unchanged) when a steam_appid.txt sits next to the binary, in --assets or in
+4. Refuses (exit code 2) a binary that was linked against a development build of re-shield
+   (the RESHIELD-DEV-BUILD-v1 marker, present only with -DRESHIELD_ALLOW_UNSEALED); --allow-dev-build
+   overrides it for demos and CI. The marker only guards against shipping the wrong build by mistake:
+   an attacker can erase it, so it is not a defense.
+5. Warns (exit code unchanged) when a steam_appid.txt sits next to the binary, in --assets or in
    the manifest: Steam uses that file for development runs, so shipping it is not recommended.
 """
 
@@ -39,6 +43,18 @@ def count_defined_symbols(binary: str) -> int | str:
 
 
 STEAM_APPID = "steam_appid.txt"
+
+# Compiled into integrity_common.c only when RESHIELD_ALLOW_UNSEALED is defined (development build).
+DEV_BUILD_MARKER = b"RESHIELD-DEV-BUILD-v1"
+DEV_BUILD_HELP = (
+    "linked against a DEVELOPMENT build of re-shield (RESHIELD_ALLOW_UNSEALED): flipping the sealed byte "
+    "in the record would bypass the checks. Rebuild with `make ALLOW_UNSEALED=0 lib` / `make release-shared`, "
+    "or drop -DRESHIELD_ALLOW_UNSEALED from your own build. --allow-dev-build is for demos and CI only."
+)
+
+
+def is_dev_build(data: bytes) -> bool:
+    return DEV_BUILD_MARKER in data
 
 
 def steam_appid_warnings(binary: str, asset_dir: str | None, manifest: str | None) -> list[str]:
@@ -90,10 +106,19 @@ def main() -> int:
     parser.add_argument("binary", help="Path to sealed executable")
     parser.add_argument("--manifest", help="Path to bound asset manifest")
     parser.add_argument("--assets", help="Path to asset base directory")
+    parser.add_argument("--allow-dev-build", action="store_true",
+                        help="Accept a binary linked against a development build of re-shield (demos and CI only)")
     args = parser.parse_args()
 
     with open(args.binary, "rb") as f:
         data = f.read()
+
+    if is_dev_build(data):
+        if not args.allow_dev_build:
+            print(f"[verify_release] error: {args.binary}: {DEV_BUILD_HELP}", file=sys.stderr)
+            return 2
+        print(f"[verify_release] warning: {args.binary} is a development build; "
+              "--allow-dev-build is for demos and CI, never for a shipped build.", file=sys.stderr)
 
     fmt_name, text_off, text_size = seal_binary.find_code_section(data)
     rec_off = seal_binary.find_integrity_record_offset(data)
