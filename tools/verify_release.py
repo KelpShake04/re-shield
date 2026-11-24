@@ -6,6 +6,8 @@ Checks:
 1. Binary has a valid, matching RSHLDCHK v2 seal (code section SHA-256).
 2. If --manifest and --assets are provided, verifies manifest root binding and all assets.
 3. Reports defined symbol count via nm (helpful to confirm release strip).
+4. Warns (exit code unchanged) when a steam_appid.txt sits next to the binary, in --assets or in
+   the manifest: Steam uses that file for development runs, so shipping it is not recommended.
 """
 
 from __future__ import annotations
@@ -34,6 +36,24 @@ def count_defined_symbols(binary: str) -> int | str:
         1 for ln in proc.stdout.splitlines()
         if len(ln.split()) >= 3 and ln.split()[1] != "U"
     )
+
+
+STEAM_APPID = "steam_appid.txt"
+
+
+def steam_appid_warnings(binary: str, asset_dir: str | None, manifest: str | None) -> list[str]:
+    """Where a steam_appid.txt was found (case-insensitive, like Windows). Only a hint, never a failure."""
+    found = []
+    for label, d in (("next to the binary", os.path.dirname(os.path.abspath(binary))),
+                     ("in --assets", asset_dir)):
+        if d and os.path.isdir(d) and any(n.lower() == STEAM_APPID for n in os.listdir(d)):
+            found.append(f"{label} ({d})")
+    if manifest:
+        with open(manifest, "rb") as f:
+            for raw in f.read().decode("utf-8", "replace").split("\n"):
+                if raw and not raw.startswith("#") and raw.split(" ", 2)[-1].lower().split("/")[-1] == STEAM_APPID:
+                    found.append(f"in the manifest ({raw.split(' ', 2)[-1]})")
+    return found
 
 
 def verify_manifest_entries(manifest_path: str, asset_dir: str) -> tuple[bool, int, str]:
@@ -102,6 +122,10 @@ def main() -> int:
     print(f"  code_seal:       {'OK' if code_ok else 'FAIL'} (size={text_size})")
     print(f"  manifest_assets: {'OK' if manifest_ok else 'FAIL'} ({asset_msg})")
     print(f"  defined_symbols: {syms}")
+
+    for where in steam_appid_warnings(args.binary, args.assets, args.manifest):
+        print(f"[verify_release] warning: {STEAM_APPID} found {where}. Steam reads it for development runs; "
+              "recommended: do not ship it in a release build.", file=sys.stderr)
 
     return 0 if (code_ok and manifest_ok) else 1
 
