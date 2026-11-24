@@ -1,6 +1,7 @@
 #include "reshield/integrity.h"
 
 #include "file_platform.h"
+#include "sha256_accel.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -99,14 +100,34 @@ static void sha256_init(sha256_ctx_t *ctx) {
     ctx->state[7] = 0x5be0cd19u;
 }
 
+/* n whole blocks: CPU instructions when available, else the portable transform. */
+static void sha256_blocks(sha256_ctx_t *ctx, const uint8_t *p, size_t n) {
+    if (reshield_sha256_backend() != 0) {
+        reshield_sha256_hw_compress(ctx->state, p, n);
+    } else {
+        for (size_t i = 0; i < n; i++) {
+            sha256_transform(ctx, p + i * 64);
+        }
+    }
+    ctx->bitlen += (uint64_t)n * 512;
+}
+
 static void sha256_update(sha256_ctx_t *ctx, const uint8_t *data, size_t len) {
-    for (size_t i = 0; i < len; i++) {
-        ctx->data[ctx->datalen++] = data[i];
+    size_t i = 0;
+    while (ctx->datalen > 0 && i < len) {
+        ctx->data[ctx->datalen++] = data[i++];
         if (ctx->datalen == 64) {
-            sha256_transform(ctx, ctx->data);
-            ctx->bitlen += 512;
+            sha256_blocks(ctx, ctx->data, 1);
             ctx->datalen = 0;
         }
+    }
+    if (len - i >= 64) {
+        size_t n = (len - i) / 64;
+        sha256_blocks(ctx, data + i, n);
+        i += n * 64;
+    }
+    while (i < len) {
+        ctx->data[ctx->datalen++] = data[i++];
     }
 }
 
