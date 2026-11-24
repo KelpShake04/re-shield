@@ -657,6 +657,53 @@ def test_pe_support(tmpdir: str, repo_root: str) -> None:
         print(f"PASS: real PE {os.path.basename(real)} refused as documented: {r.stderr.strip()}")
 
 
+# `codesign -dvv` output captured from real binaries (the Developer ID one is the documented format).
+CODESIGN_LINKER = """Identifier=sample_game
+Format=Mach-O thin (arm64)
+CodeDirectory v=20400 size=516 flags=0x20002(adhoc,linker-signed) hashes=13+0 location=embedded
+Signature=adhoc
+TeamIdentifier=not set
+"""
+CODESIGN_ADHOC_RUNTIME = CODESIGN_LINKER.replace("0x20002(adhoc,linker-signed)", "0x10002(adhoc,runtime)")
+CODESIGN_DEVID = """Identifier=com.example.game
+Format=Mach-O thin (arm64)
+CodeDirectory v=20500 size=300 flags=0x10000(runtime) hashes=2+7 location=embedded
+Signature size=9012
+Authority=Developer ID Application: Example (ABCDE12345)
+Authority=Developer ID Certification Authority
+Authority=Apple Root CA
+TeamIdentifier=ABCDE12345
+"""
+CODESIGN_UNSIGNED = "/x/game: code object is not signed at all\n"
+
+
+def test_macho_signature_policy(tmpdir: str, repo_root: str) -> None:
+    blocker = seal_binary.macho_signature_blocker
+    assert blocker(CODESIGN_LINKER) is None and blocker(CODESIGN_UNSIGNED) is None
+    assert blocker(CODESIGN_DEVID) and "non-ad-hoc" in blocker(CODESIGN_DEVID)
+    assert blocker(CODESIGN_ADHOC_RUNTIME) and "hardened runtime" in blocker(CODESIGN_ADHOC_RUNTIME)
+    assert blocker("something unexpected") is not None, "unrecognised output must fail closed"
+    print("PASS: Mach-O signature policy: linker-signed/unsigned ok, identity/runtime/unknown refused")
+    if sys.platform != "darwin":
+        return
+
+    seal_tool = os.path.join(repo_root, "tools", "seal_binary.py")
+    src = os.path.join(repo_root, "build", "sample_game")
+    # A throwaway self-signed identity would need a keychain import (and prompts), so the
+    # real-binary case uses ad-hoc + hardened runtime, which the re-sign would also destroy.
+    signed = os.path.join(tmpdir, "signed_runtime")
+    shutil.copy2(src, signed)
+    subprocess.run(["codesign", "-s", "-", "--force", "--options", "runtime", signed], check=True,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    before = open(signed, "rb").read()
+    r = run_cmd([sys.executable, seal_tool, signed, "--build-id", "3"])
+    assert r.returncode == 2 and "Seal first, then sign" in r.stderr, r
+    assert open(signed, "rb").read() == before, "refused seal must not modify the file"
+    r = run_cmd([sys.executable, seal_tool, signed, "--build-id", "3", "--no-codesign"])
+    assert r.returncode == 0, r
+    print("PASS: seal_binary refuses a signed Mach-O (unmodified) unless --no-codesign")
+
+
 def main() -> int:
     repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     integrity_demo = os.path.join(repo_root, "build", "integrity_demo")
@@ -758,6 +805,7 @@ def main() -> int:
         shutil.copytree(assets_src, a2)
         test_status_mapping_and_records(tmp2, repo_root, a2)
         test_seal_tool_and_release_cases(tmp2, repo_root, a2)
+        test_macho_signature_policy(tmp2, repo_root)
     with tempfile.TemporaryDirectory(prefix="reshield_pe_") as tmp3:
         test_pe_support(tmp3, repo_root)
 
