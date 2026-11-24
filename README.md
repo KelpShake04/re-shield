@@ -8,12 +8,12 @@
 
 ## 핵심 기능
 
-- **코드 섹션 무결성 (`include/reshield/integrity.h`)**: 외부 의존성 없는 FIPS 180-4 SHA-256 구현으로 빌드 시 실행 파일의 코드 섹션(`__TEXT,__text` / `.text`) 해시를 기록하고 런타임에 메모리에서 재검증.
+- **코드 섹션 무결성 (`include/reshield/integrity.h`)**: 외부 의존성 없는 FIPS 180-4 SHA-256 구현으로 빌드 시 실행 파일의 코드 섹션(`__TEXT,__text` / `.text`) 해시를 기록하고 런타임에 메모리에서 재검증(macOS·Linux·Windows x64 MSVC).
 - **에셋 매니페스트 바인딩 (`include/reshield/manifest.h`)**: `tools/gen_manifest.py`로 에셋 디렉터리의 SHA-256 매니페스트를 생성하고, 그 루트 해시를 바이너리에 함께 봉인해 실행 파일과 리소스 번들의 짝을 런타임에 검증.
 - **메모리 W^X 및 OS 코드 서명 검증 (`include/reshield/attestation.h`)**:
-  - macOS: `mach_vm_region`으로 코드 세그먼트의 W^X(읽기·실행 전용, 쓰기 금지) 확인(코드 섹션 전 범위를 영역 단위로 순회, 공백·쓰기 가능 영역은 실패) 및 `Security.framework`(`SecCodeCheckValidity`) 코드 서명 유효성 검증(서명 주체는 고정하지 않음).
+  - macOS: `mach_vm_region`으로 코드 세그먼트의 W^X(읽기·실행 전용, 쓰기 금지) 확인(코드 섹션 전 범위를 영역 단위로 순회, 공백·쓰기 가능 영역은 실패) 및 `Security.framework`(`SecCodeCheckValidity`) 코드 서명 유효성 검증(기본은 서명 주체를 고정하지 않음. `cfg.codesign_requirement`에 code requirement 문자열, 예: `anchor apple generic and certificate leaf[subject.OU] = "TEAMID"`를 주면 그 서명자로 고정하고, 파싱 실패는 `CODESIGN_INVALID`로 fail-closed).
   - Linux: `/proc/self/maps`에서 `.text` 범위 전체가 `r-x` 매핑으로 덮이는지 확인.
-- **구조화된 진단 리포트 (`include/reshield/reshield.h`)**: 라이브러리가 프로세스를 임의 강제 종료하지 않고 `reshield_report_t`와 콜백을 반환해 호스트 앱이 안내·로깅·안전 종료를 결정.
+- **구조화된 진단 리포트 (`include/reshield/reshield.h`)**: 라이브러리가 프로세스를 임의 강제 종료하지 않고 `reshield_report_t`와 콜백을 반환해 호스트 앱이 안내·로깅·안전 종료를 결정. `reshield_report_to_json()`은 리포트를 한 줄 JSON(`"v":1`)으로 직렬화한다(텔레메트리용. 클라이언트가 보낸 리포트는 위조될 수 있어 서버가 진본 증거로 쓰면 안 된다).
 - **릴리스 검증 CLI (`tools/verify_release.py`)**: CI/CD 단계에서 바이너리 봉인과 매니페스트 일치를 검증하고, 정의 심볼 수는 보고만 한다(검증하지 않음).
 
 ## Non-goals / Anti-goals
@@ -26,6 +26,20 @@
 ## 알려진 한계
 
 자세한 목록은 [docs/integrity-verification.md](docs/integrity-verification.md#5-한계)를 따른다. 요약: 해시 대상은 `__TEXT,__text`/`.text`뿐이고(`__stubs`, `.plt`, `__const`, 레코드가 있는 `__DATA`는 제외), 레코드의 평문 `RSHLDCHK` 매직이 수정 지점을 노출하며, 매니페스트에 없는 추가 파일은 감지하지 않고, fat/universal Mach-O는 `seal_binary.py`가 지원하지 않는다.
+
+## 언제 쓰고, 언제 쓰지 말아야 하나
+
+re-shield는 **변조 감지(tamper evidence)** 도구이지 변조 방지(tamper proof) 도구가 아니다. 키가 없어서 공격자가 코드를 바꾼 뒤 레코드를 다시 봉인할 수 있고, 코드 자기 해시 방식에는 "해시되는 코드"와 "실행되는 코드"를 분리하는 알려진 범용 우회가 있다(van Oorschot 외, IEEE TDSC 2005). 클라이언트가 만든 리포트는 서버가 진본 증거로 쓸 수 없다.
+
+쓰기 좋은 경우:
+- 엔진 기능 없이 C/C++로 만든 게임·앱에서, 실행 파일과 함께 배포하는 에셋 묶음이 바뀌었는지 알고 싶을 때. 엔진 비종속으로 실행 파일과 에셋 매니페스트를 짝지어 검증하는 오픈소스는 조사 범위에서 찾지 못했다(전수 조사는 아니다).
+- 설치 손상, 실수, 단순 바이너리 패치를 감지해 로그·텔레메트리로 모으고, 프로세스를 죽이기 전에 오탐률부터 측정하고 싶을 때(종료하지 않는 설계).
+- 외부 의존성 없이 코드를 직접 읽고 감사할 수 있는 작은 라이브러리가 필요할 때.
+
+쓰지 말아야 하는 경우:
+- 치트·크랙을 막아야 할 때: 안티치트나 상용 보호기를 검토한다.
+- 서버가 신뢰할 판정이 필요할 때: 플랫폼 증명(Apple App Attest, Google Play Integrity 등)과 서버 측 검증을 쓴다.
+- Windows·macOS 서명과 OS 정책(Hardened Runtime, App Control 등)이 이미 배포물을 강제하는 환경이면 그것이 더 강하다. re-shield는 OS 서명을 대체하지 않고, 봉인 뒤에 OS 서명을 얹어 함께 쓴다. macOS(requirement 문자열)와 Windows(`leaf-sha256:` leaf 인증서 해시)에서는 `cfg.codesign_requirement`로 서명자를 고정하면 "재봉인 후 다른 서명으로 재서명"하는 경로를 막는 데 도움이 된다(검증 함수 자체를 패치하는 공격은 못 막는다).
 
 ## 빠른 시작
 
@@ -40,7 +54,7 @@ make release-demo
 
 ## 내 프로젝트에 적용하기
 
-지원 플랫폼은 macOS(Mach-O 64)와 Linux(ELF64)다. Windows와 fat/universal Mach-O는 지원하지 않는다.
+지원 플랫폼은 macOS(Mach-O 64), Linux(ELF64), Windows x64(PE32+, MSVC)다. Windows는 런타임 백엔드(코드 섹션 해시, `VirtualQuery` W^X 순회, `WinVerifyTrust` 코드 서명 검사)와 봉인 도구(`seal_binary.py`/`verify_release.py`의 PE 지원)가 구현되어 있다. CI(GitHub Actions `windows-latest`)의 `windows-msvc` 잡이 `cl`로 빌드한 EXE를 봉인해 실행하고, `.text` 1바이트를 바꾼 복사본이 `CODE_TAMPERED`로 탐지되는 것까지 확인한다. 코드 서명 검사는 `WinVerifyTrust` 결과에 더해 `cfg.codesign_requirement`로 서명자 leaf 인증서를 고정할 수 있다. 형식은 `leaf-sha256:<64자리 hex>`(서명 인증서 DER의 SHA-256, 대소문자 무관)이고, 다른 문자열은 `FAILED`(fail-closed)다. 서명 안 된 EXE도 `FAILED`다. CI는 일회용 자체 서명 인증서로 봉인 뒤 서명한 EXE에서 `OK`, leaf pin 일치/불일치/형식 오류를 실제로 확인한다(공인 CA·타임스탬프 서명은 검증하지 못했다). macOS와 Windows의 requirement 문법이 달라 플랫폼별로 `#ifdef` 안에서 설정한다(Linux는 코드 서명 검사가 UNSUPPORTED지만 requirement가 있으면 통과시키지 않는다). CI는 POSIX 전용인 `tests/test_seal_workflow.py`와 `RESHIELD_DISABLE` 변형 테스트를 Windows에서 돌리지 않는다. mingw-w64는 맥/Linux에서의 크로스 컴파일·도구 테스트 전용이며, 기본 링크 EXE는 `.text` 안 relocation 1개 때문에 봉인되지 않는다(`-Wl,--disable-dynamicbase -Wl,--disable-reloc-section`으로 봉인은 되지만 ASLR이 꺼지므로 배포용으로 권장하지 않는다). mingw 빌드는 컴파일·링크만 보고 Windows에서 실행해 검증하지 않았다. Windows ARM64와 fat/universal Mach-O는 지원하지 않는다. 자세한 내용은 [docs/integrity-verification.md](docs/integrity-verification.md#7-windows-pe32-x64).
 
 **1. 링크.** `libreshield.a`를 링크하고 `-Iinclude`를 추가한다. macOS는 `-framework Security -framework CoreFoundation`도 필요하다. `RSHLDCHK` 레코드는 `libreshield.a` 안에 있으며, 앱이 `reshield_verify()`를 호출하면 바이너리에 함께 링크된다.
 

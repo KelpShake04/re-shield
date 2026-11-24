@@ -4,13 +4,20 @@
 
 #include "reshield/manifest.h"
 
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#ifdef _WIN32
+#include <direct.h>
+#include <windows.h>
+#define mkdir(path, mode) _mkdir(path)
+#else
 #include <sys/wait.h>
 #include <unistd.h>
+#endif
 
 static int g_failures = 0;
 
@@ -37,8 +44,26 @@ static void hash_to_hex(const uint8_t hash[RESHIELD_SHA256_SIZE], char out[65]) 
 #define ADIR "build/mt_assets"
 #define MPATH "build/mt_manifest.txt"
 
+#ifdef _WIN32
+/* The library treats paths as UTF-8; narrow fopen()/remove() would use the ANSI code page. */
+static int utf8_to_wide(const char *s, wchar_t *w, int cap) {
+    return MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, s, -1, w, cap) > 0;
+}
+static FILE *fopen_utf8(const char *path, const char *mode) {
+    wchar_t wp[512], wm[8];
+    return (utf8_to_wide(path, wp, 512) && utf8_to_wide(mode, wm, 8)) ? _wfopen(wp, wm) : NULL;
+}
+static int remove_utf8(const char *path) {
+    wchar_t wp[512];
+    return utf8_to_wide(path, wp, 512) ? _wremove(wp) : -1;
+}
+#else
+#define fopen_utf8 fopen
+#define remove_utf8 remove
+#endif
+
 static void write_file(const char *path, const void *data, size_t len) {
-    FILE *f = fopen(path, "wb");
+    FILE *f = fopen_utf8(path, "wb");
     if (f != NULL) {
         fwrite(data, 1, len, f);
         fclose(f);
@@ -64,6 +89,100 @@ static void sha_hex(const char *data, size_t len, char out[65]) {
     hash_to_hex(h, out);
 }
 
+/* Decodes \xNN escapes (the only escape in tests/path_rules.txt); returns 0 on a bad escape. */
+static int unescape_path(const char *src, char *dst, size_t cap) {
+    size_t n = 0;
+    while (*src != '\0') {
+        if (n + 1 >= cap) {
+            return 0;
+        }
+        if (src[0] == '\\') {
+            unsigned v = 0;
+            if (src[1] != 'x' || sscanf(src + 2, "%2x", &v) != 1 ||
+                !isxdigit((unsigned char)src[2]) || !isxdigit((unsigned char)src[3])) {
+                return 0;
+            }
+            dst[n++] = (char)v;
+            src += 4;
+        } else {
+            dst[n++] = *src++;
+        }
+    }
+    dst[n] = '\0';
+    return n > 0;
+}
+
+/* Runs every case of tests/path_rules.txt (the Python tools check the same file) through
+ * reshield_verify_single_asset() and, where possible, through a manifest line. A path the
+ * rule accepts is never IO_ERROR (the asset is just not listed / not on disk). */
+static void test_shared_path_rules(const uint8_t root[RESHIELD_SHA256_SIZE], const char *hex) {
+    FILE *f = fopen("tests/path_rules.txt", "r");
+    ASSERT_TRUE(f != NULL, "path rules: open tests/path_rules.txt");
+    if (f == NULL) {
+        return;
+    }
+    int cases = 0, bad_single = 0, bad_line = 0;
+    char line[512];
+    while (fgets(line, sizeof(line), f) != NULL) {
+        size_t len = strlen(line);
+        while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) {
+            line[--len] = '\0';
+        }
+        if (len == 0 || line[0] == '#') {
+            continue;
+        }
+        char path[512];
+        if ((line[0] != '+' && line[0] != '-') || line[1] != ' ' ||
+            !unescape_path(line + 2, path, sizeof(path))) {
+            fprintf(stderr, "FAIL: bad path_rules.txt line: %s\n", line);
+            g_failures++;
+            continue;
+        }
+        int want_ok = line[0] == '+';
+        cases++;
+        int single_ok = reshield_verify_single_asset(MPATH, ADIR, path, root) != RESHIELD_MANIFEST_IO_ERROR;
+        if (single_ok != want_ok) {
+            fprintf(stderr, "FAIL: single_asset path rule mismatch: %s\n", line);
+            bad_single++;
+        }
+        if (strchr(path, '\n') == NULL && strchr(path, '\r') == NULL) {
+            char entry[1024];
+            snprintf(entry, sizeof(entry), "%s 3 %s\n", hex, path);
+            int line_ok = verify_str(entry) != RESHIELD_MANIFEST_IO_ERROR;
+            if (line_ok != want_ok) {
+                fprintf(stderr, "FAIL: manifest line path rule mismatch: %s\n", line);
+                bad_line++;
+            }
+        }
+    }
+    fclose(f);
+    ASSERT_TRUE(cases > 40, "path rules: table loaded");
+    ASSERT_TRUE(bad_single == 0, "path rules: reshield_verify_single_asset matches the shared table");
+    ASSERT_TRUE(bad_line == 0, "path rules: manifest lines match the shared table");
+    ASSERT_TRUE(reshield_verify_single_asset(MPATH, ADIR, "", root) == RESHIELD_MANIFEST_IO_ERROR,
+                "path rules: empty path rejected");
+}
+
+/* Accepted names that need real files: nested directories and non-ASCII names. */
+static void test_path_rules_real_files(void) {
+    char hex[65];
+    char buf[512];
+    sha_hex("abc", 3, hex);
+    mkdir(ADIR "/sub", 0755);
+    mkdir(ADIR "/sub/dir", 0755);
+    write_file(ADIR "/sub/dir/ok.cfg", "abc", 3);
+    write_file(ADIR "/\xed\x95\x9c\xea\xb8\x80.cfg", "abc", 3); /* UTF-8 for hangul "han-geul" */
+    snprintf(buf, sizeof(buf), "%s 3 sub/dir/ok.cfg\n", hex);
+    ASSERT_TRUE(verify_str(buf) == RESHIELD_MANIFEST_OK, "path rules: 'sub/dir/ok.cfg' verifies");
+    snprintf(buf, sizeof(buf), "%s 3 \xed\x95\x9c\xea\xb8\x80.cfg\n", hex);
+    ASSERT_TRUE(verify_str(buf) == RESHIELD_MANIFEST_OK, "path rules: non-ASCII (hangul) name verifies");
+    remove(ADIR "/sub/dir/ok.cfg");
+    remove_utf8(ADIR "/\xed\x95\x9c\xea\xb8\x80.cfg");
+    rmdir(ADIR "/sub/dir");
+    rmdir(ADIR "/sub");
+}
+
+#ifndef _WIN32
 /* Runs fn in a child with an alarm so a regression that blocks cannot hang the suite. */
 static int run_with_timeout(int (*fn)(void), unsigned secs) {
     pid_t pid = fork();
@@ -102,6 +221,8 @@ static int child_fifo_manifest(void) {
     return reshield_verify_manifest_files(ADIR "/fifo.bin", ADIR, root, NULL, 0) ==
            RESHIELD_MANIFEST_IO_ERROR;
 }
+
+#endif /* !_WIN32 */
 
 static void test_manifest_edge_cases(void) {
     char hex[65];
@@ -202,6 +323,10 @@ static void test_manifest_edge_cases(void) {
                     RESHIELD_MANIFEST_IO_ERROR,
                 "edge: nonexistent manifest is IO_ERROR");
 
+    test_shared_path_rules(root, hex);
+    test_path_rules_real_files();
+
+#ifndef _WIN32
     /* Non-regular assets must not block the verifier. */
     ASSERT_TRUE(mkfifo(ADIR "/fifo.bin", 0600) == 0, "edge: create FIFO");
     ASSERT_TRUE(run_with_timeout(child_fifo_asset, 3), "edge: FIFO asset is ASSET_MISMATCH within 3s");
@@ -209,6 +334,7 @@ static void test_manifest_edge_cases(void) {
     ASSERT_TRUE(symlink("/dev/zero", ADIR "/zero.bin") == 0, "edge: create /dev/zero symlink");
     ASSERT_TRUE(run_with_timeout(child_zero_symlink_asset, 3),
                 "edge: /dev/zero symlink asset is ASSET_MISMATCH within 3s");
+#endif
 
     remove(ADIR "/a.cfg");
     remove(ADIR "/v1..2.cfg");

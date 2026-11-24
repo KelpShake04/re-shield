@@ -70,7 +70,8 @@ reshield_attestation_status_t reshield_verify_code_page_wx(void) {
 #endif
 }
 
-reshield_attestation_status_t reshield_verify_os_codesign(void) {
+reshield_attestation_status_t reshield_verify_os_codesign_req(const char *requirement) {
+    (void)requirement;
     return RESHIELD_ATTEST_UNSUPPORTED;
 }
 

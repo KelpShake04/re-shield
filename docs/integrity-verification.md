@@ -58,7 +58,8 @@ make release-demo
 ## 5. 한계
 
 - 로컬 바이너리의 자체 무결성 검증은 바이너리와 매니페스트가 동시에 재봉인되거나 런타임 API가 교체될 경우 우회될 수 있다.
-- macOS 코드 서명 검증(`RESHIELD_CHECK_CODESIGN`)은 `SecCodeCheckValidity`를 requirement `NULL`로 호출해 서명 유효성만 확인하며, 서명 주체(Developer ID/Team ID)는 고정하지 않는다. ad-hoc 서명이나 다른 주체의 유효한 서명으로 재서명한 바이너리도 이 검사는 통과한다.
+- macOS 코드 서명 검증(`RESHIELD_CHECK_CODESIGN`)은 `SecCodeCheckValidity`를 requirement `NULL`로 호출해 서명 유효성만 확인하며, 서명 주체(Developer ID/Team ID)는 고정하지 않는다. ad-hoc 서명이나 다른 주체의 유효한 서명으로 재서명한 바이너리도 이 검사는 통과한다. 서명자를 고정하려면 `cfg.codesign_requirement`(또는 `reshield_verify_os_codesign_req()`)에 requirement 문자열을 준다(예: `anchor apple generic and certificate leaf[subject.OU] = "TEAMID"`). 문자열이 파싱되지 않으면 통과시키지 않고 `CODESIGN_INVALID`로 처리한다. 이 저장소에서는 Developer ID 인증서가 없어 ad-hoc 바이너리에 대한 음성·양성 테스트(`anchor apple` 실패, `!anchor apple` 통과, 잘못된 문법 실패)만 검증했고, 실제 Team ID 문자열은 검증하지 못했다. 검증 함수 자체를 패치하는 공격은 이 옵션으로도 막지 못한다.
+- Linux 런타임은 `.text` 위치를 `/proc/self/exe`의 디스크 section header에서 읽는다(로더는 이 헤더를 쓰지 않으므로 파일을 고칠 수 있는 공격자가 바꿀 수 있다). 그래서 범위가 main 이미지(`AT_PHDR`와 일치하는 `dl_iterate_phdr` 항목)의 실행 가능·쓰기 불가 `PT_LOAD` 안에 완전히 들어가는지 검증하고 아니면 `INTERNAL_ERROR`로 처리한다. 같은 세그먼트 안의 다른 구간으로 돌리는 공격(코드 케이브에 원본 바이트 복사)은 막지 못한다. `ld.so ./prog`로 직접 실행하면 `/proc/self/exe`가 로더라 `INTERNAL_ERROR`(fail-closed, 크래시 아님)다. musl(dynamic, static, static-pie)과 glibc를 CI에서 확인한다. `seal_binary.py`는 `DT_TEXTREL`/`DF_TEXTREL`이 있는 ELF(로더가 `.text`를 패치)를 거부한다.
 - 해시 대상은 `__TEXT,__text`(macOS) 또는 `.text`(Linux)뿐이다. `__stubs`, `.plt`, `__const`, 그리고 레코드가 놓이는 `__DATA`는 해시 대상이 아니다.
 - 레코드는 평문 `RSHLDCHK` 매직으로 시작하므로 바이너리에서 문자열 검색만으로 수정 지점이 드러난다(`seal_binary.py`도 같은 방식으로 찾는다).
 - 소프트웨어 breakpoint는 코드 바이트를 패치하므로, 설치된 상태에서 검사하면 `CODE_TAMPERED`로 보고된다.
@@ -70,6 +71,45 @@ make release-demo
 
 - 매니페스트는 한 번만 읽어(최대 4 MiB, 일반 파일만) 같은 버퍼로 루트 해시를 계산하고 파싱한다. 해시 후 재오픈하지 않는다.
 - 1023자를 넘는 줄, CR(`\r`, CRLF 포함)·NUL이 있는 매니페스트, 잘못된 줄은 `IO_ERROR`다. 항목이 하나도 없는 매니페스트도 `IO_ERROR`다.
-- 경로는 구성요소 단위로 검사한다: 절대경로, 빈 구성요소, `..` 구성요소, CR/LF는 거부하고 `v1..2.cfg` 같은 이름은 허용한다.
+- 경로 규칙은 모든 플랫폼에서 같다(C: `src/manifest.c`의 `is_safe_relative_path`, Python: `tools/manifest_path.py`). 구분자는 `/`만 허용하고 구성요소 단위로 검사한다. 다음은 거부한다.
+  - 선행 `/`(절대경로)와 빈 구성요소
+  - `\`, `:`, 제어문자(0x00–0x1F, CR/LF 포함), `< > " | ? *`
+  - `.` 또는 공백으로 끝나는 구성요소(`.`, `..`, `...` 포함)
+  - Windows 예약 장치명 `CON PRN AUX NUL COM0`–`COM9` `LPT0`–`LPT9` `CONIN$` `CONOUT$`: 대소문자(ASCII)를 구분하지 않고, 첫 `.` 앞 부분에서 끝 공백을 제거해 비교하므로 `nul.txt`, `CON .txt`도 거부한다.
+  - `v1..2.cfg`, 한글 이름, `sub/dir/ok.cfg`는 허용한다. 두 구현은 `tests/path_rules.txt`의 같은 케이스 표로 검증한다.
+- **동작 변경**: 이 규칙은 이전보다 엄격하다(예: `a.cfg.`, `a:b`, `con.txt`, `a<b`). 이런 항목이 들어 있는 기존 매니페스트는 런타임에서 `IO_ERROR`가 되고 `verify_release.py`도 거부한다. 해당 에셋 이름을 바꾸고 매니페스트를 다시 생성·재봉인해야 한다.
+- `gen_manifest.py`는 규칙을 어기는 파일, 대소문자만 다른 중복 경로(`A.cfg`/`a.cfg`), NFC가 아닌 파일명이 있으면 오류로 종료한다(대소문자 비구분·정규화 비구분 파일시스템에서 모호해지는 것을 막기 위함).
 - 에셋은 일반 파일이어야 하며(FIFO·장치 파일·그것을 가리키는 심볼릭 링크는 불일치) 기대 크기+1바이트까지만 읽는다.
 - `gen_manifest.py`는 이름이 `.`으로 시작하는 파일을 제외하고, `.`으로 시작하는 디렉터리는 순회한다.
+
+## 7. Windows (PE32+ x64)
+
+봉인 도구와 런타임 백엔드(MSVC x64)가 모두 구현되어 있다.
+
+- 코드 섹션 위치(`src/integrity_windows.c`): `GetModuleHandleW(NULL)`로 매핑된 EXE 이미지를 얻고 PE 헤더를 직접 읽어 `.text`를 찾는다. 봉인 도구와 같은 규칙이다(이름이 정확히 `.text`인 섹션 하나, 쓰기 불가, `VirtualSize <= SizeOfRawData`, 해시 범위는 `base + VirtualAddress`부터 `VirtualSize` 바이트). 모든 헤더 읽기는 먼저 첫 페이지(0x1000)로, 이어서 `SizeOfHeaders`/`SizeOfImage`로 범위를 검사하고, 어긋나면 `-1`(→ `RESHIELD_ERR_INTERNAL`, fail-closed)이다. 봉인 레코드는 macOS·Linux와 같이 정적 변수이며 `integrity_common.c`를 그대로 쓴다.
+- W^X(`src/attestation_windows.c`): `.text` 범위 전체를 `VirtualQuery`로 따라가며 모든 영역이 커밋됨·실행 가능·쓰기 불가(`PAGE_GUARD` 아님)여야 하고, 틈(미커밋·예약·해제 영역)이 있으면 실패한다. 의미는 macOS·Linux 구현과 같다.
+- 코드 서명(`reshield_verify_os_codesign_req`): 실행 중인 메인 이미지를 받치는 파일을 `WinVerifyTrust`(`WINTRUST_ACTION_GENERIC_VERIFY_V2`, UI 없음, 폐기 확인 끔, 네트워크 조회 없음)로 검사해 `OK`/`FAILED`를 반환한다. `requirement`가 `NULL`이면 유효성만 확인한다. 서명자를 고정하려면 `requirement`(= `cfg.codesign_requirement`)에 정확히 `leaf-sha256:` 다음 64자리 hex(대소문자 무관)를 준다. 값은 서명(leaf) 인증서 DER 바이트의 SHA-256이다(thumbprint는 SHA-1이라 다르다). 구현은 `WinVerifyTrust`를 `WTD_STATEACTION_VERIFY`로 실행해 성공하면 `WTHelperProvDataFromStateData`/`WTHelperGetProvSignerFromChain`/`WTHelperGetProvCertFromChain`로 첫 번째 서명자의 leaf 인증서를 얻고, 라이브러리 자신의 `reshield_sha256`으로 해시해 비교한 뒤 모든 경로에서 `WTD_STATEACTION_CLOSE`를 호출한다. 형식이 다르거나(접두어·길이·hex 아님) 어느 단계든 실패하면 `FAILED`(fail-closed)다. 첫 서명자만 보며 중첩·다중 서명은 구분하지 않는다. macOS와 Windows의 requirement 문법이 서로 다르므로 플랫폼별로 `#ifdef` 안에서 설정한다. 서명 인증서만 고정하므로 같은 인증서로 서명된 다른 빌드는 막지 못한다(그 구분은 봉인 해시의 몫). Authenticode 서명이 없는 EXE는 `FAILED`이므로, `RESHIELD_CHECK_CODESIGN`을 켠 서명 안 한 개발 빌드는 `reshield_verify()`가 `RESHIELD_ERR_CODESIGN_INVALID`를 반환한다. 기본 검사 집합(`RESHIELD_CHECK_DEFAULT`)에는 코드 서명이 없다. 검사 대상 파일은 모듈 경로가 아니라 매핑된 이미지의 파일이다. `GetMappedFileNameW`로 NT 경로를 얻어 `GetLogicalDriveStringsW`+`QueryDosDeviceW`로 DOS 경로로 바꾸고, `CreateFileW`(읽기 전용, `FILE_SHARE_READ|FILE_SHARE_DELETE`)로 연 핸들을 `WINTRUST_FILE_INFO.hFile`로 넘긴다. 그래서 실행 중인 EXE를 rename한 뒤 서명된 파일을 같은 경로에 복사해도 검증 대상은 바뀌지 않는다(CI의 `tests/test_codesign_toctou_windows.c`가 이 공격을 재현하고 `FAILED`를 확인). 변환이 실패하면(예: UNC 공유의 EXE) `FAILED`(fail-closed)다. 검증은 파일 내용에 대한 것이고 메모리의 `.text`는 코드 섹션 해시가 따로 본다. `psapi.lib`도 MSVC에서 자동 링크되고 mingw는 `-lpsapi`(Makefile)지만, 이번 변경 이후 mingw 빌드는 컴파일도 실행도 확인하지 않았다(로컬에 mingw가 없고 CI는 MSVC만 돌린다). `wintrust.lib`는 MSVC에서 `#pragma comment(lib)`로 자동 링크되고, mingw는 `-lwintrust`(Makefile이 지정)다.
+
+검증 범위: CI의 `windows-msvc` 잡(GitHub Actions `windows-latest`)이 `cl`로 라이브러리·예제·테스트를 빌드하고 다음을 실제로 실행한다. 봉인 전 EXE의 `UNSEALED` 보고와 `--allow-unsealed` 통과(W^X 검사 포함), `seal_binary.py`로 봉인한 복사본의 `status=OK` 실행, `verify_release.py`, `.text`의 int3 패딩 1바이트를 바꾼 복사본의 `CODE_TAMPERED` 탐지(`tests/tamper_pe_text.py`), 서명 안 된 봉인 EXE에서 `--check-codesign`이 `CODESIGN_INVALID`를 내는지, 일회용 자체 서명 인증서(`New-SelfSignedCertificate`, 러너의 Root·TrustedPublisher 저장소에만 등록)로 봉인 뒤 서명한 복사본에서 `--check-codesign`이 `status=OK`를 내는지, 올바른 `leaf-sha256:` 값(대소문자 모두)은 통과하고 다른 값·한 니블만 다른 값·형식이 틀린 값은 `CODESIGN_INVALID`인지, 서명한 파일에 `seal_binary.py --verify-only`·`verify_release.py`가 통과하는지, 실행 중 EXE rename-and-replace 후에도 검사가 `FAILED`인지(`test_codesign_toctou_windows`), 서명한 파일의 `.text` 1바이트를 바꾸면 `CODE_TAMPERED`이고 `--check-codesign`을 켜면 `failed_checks=0x5`(코드 섹션+코드 서명)인지, 매니페스트를 묶은 `sample_game` 봉인·실행, 그리고 `test_integrity`·`test_manifest`·`test_runtime`·`test_wx`. `test_wx`는 플랫폼 훅을 덮어써 `VirtualAlloc`한 페이지(쓰기 가능·실행 불가·결번)로 W^X 순회를 검사한다. 건너뛴 것: `tests/test_seal_workflow.py`(`nm`과 POSIX 경로 필요), `-DRESHIELD_DISABLE` 변형, `test_manifest.c` 안의 POSIX 전용 케이스(`#ifndef _WIN32`). 검증하지 못한 것: 공인 CA가 발급한 인증서·타임스탬프가 있는 서명(CI는 타임스탬프 없는 자체 서명 인증서만 쓴다), 폐기 확인, 다중·중첩 서명, 서명 뒤 봉인 순서 이외의 Authenticode 경로, Windows ARM64와 32비트 x86(후자는 헤더 검사에서 fail-closed).
+
+지원 정책: 정식 지원 대상은 MSVC 빌드이고, mingw-w64는 맥/Linux에서의 크로스 컴파일·도구 테스트 전용이다. CI의 `windows-msvc-probe` 잡(`.github/workflows/ci.yml`)이 `cl`로 `examples/integrity_demo.c`를 빌드해 `tools/pe_probe.py`와 `dumpbin` 결과를 아티팩트로 남긴다. 2026-11-24 측정(GitHub Actions `windows-latest`, run 45239478134)에서 `.text` 안 base relocation은 0개(전체 797개는 다른 섹션)였고 `seal_binary.py` 봉인에 성공했다. 즉 MSVC 링크 EXE는 봉인 가정(`.text`가 로드 시 바뀌지 않음)을 만족한다. 측정은 이 데모 한 개에 대한 것이므로, 다른 프로젝트의 링크 설정에서는 `pe_probe.py`로 직접 확인한다. 런타임 검증은 위의 `windows-msvc` 잡이 같은 MSVC 설정으로 실행해 확인한다.
+
+`seal_binary.py`와 `verify_release.py`는 PE32+ x64(Machine `0x8664`)를 지원한다. ARM64(`0xAA64`)와 PE32(32비트)는 오류로 거부한다.
+
+- 해시 대상: 이름이 정확히 `.text`인 섹션 하나. 파일의 `[PointerToRawData, PointerToRawData + VirtualSize)` 구간이다. `.text`가 0개나 2개 이상이거나, `IMAGE_SCN_MEM_WRITE`가 켜져 있거나, `VirtualSize > SizeOfRawData`이면 오류다.
+- 봉인 시 거부 조건:
+  - base relocation이 `.text` RVA 범위 안에 하나라도 있으면 거부한다(`IMAGE_REL_BASED_ABSOLUTE` 패딩은 제외). 재배치되면 메모리의 코드가 파일과 달라져 해시가 맞지 않기 때문이다.
+  - 레코드가 쓰기 가능한 데이터 섹션(`.data` 등)의 raw 범위 안에 없거나 `.text`와 겹치면 거부한다.
+  - Security 디렉터리(Authenticode)가 이미 있으면 거부한다. 서명 전에 봉인해야 한다. 이미 봉인된 파일을 나중에 서명해도 `.text`는 바뀌지 않으므로 `--verify-only`와 `verify_release.py`는 통과한다.
+- OptionalHeader의 CheckSum이 0이 아니면 봉인 뒤 표준 알고리즘으로 다시 계산해 기록하고, 0이면 그대로 둔다.
+- `.text` 외의 실행 가능 섹션은 해시 대상이 아니며 stderr 경고로 나열만 한다.
+- `verify_release.py`는 `nm`이 없으면 `defined_symbols`를 `n/a`로 보고하고 실패로 처리하지 않는다.
+- macOS에서 PE를 봉인해도 ad-hoc codesign은 실행하지 않는다(Mach-O만 대상).
+
+### mingw-w64 빌드 실측
+
+`examples/integrity_demo.c`를 `x86_64-w64-mingw32-gcc`(Ubuntu 24.04 gcc-mingw-w64-x86-64)로 `-O2`·`-O0` 빌드해 확인한 결과다.
+
+- 기본 링크 옵션: `.text`(VirtualSize 35064/37752 바이트, 플래그 `0x60000060`) 안에 base relocation이 1개 있다(`.ctors`/`__CTOR_LIST__`의 포인터, DIR64). 전체 relocation은 53개다. 그래서 `seal_binary.py`가 봉인을 거부한다.
+- `-Wl,--disable-dynamicbase -Wl,--disable-reloc-section`으로 링크하면 relocation 디렉터리가 없어 봉인과 `--verify-only`가 통과한다. 이 경우 이미지는 재배치할 수 없으므로 고정 ImageBase(`0x140000000`)에 로드되어야 한다(ASLR 없음). 따라서 이 옵션은 크로스 테스트 용도로만 쓰고 배포용으로는 권장하지 않는다. `-Wl,--disable-dynamicbase`만으로는 relocation이 남아 거부된다.
+- 이에 따라 mingw로 `make all`을 하면 `sample_game_sealed` 봉인 단계가 기본 옵션에서는 실패한다. `make CC=x86_64-w64-mingw32-gcc ... LDFLAGS="-Wl,--disable-dynamicbase -Wl,--disable-reloc-section" all`처럼 링크 옵션을 지정해야 한다. mingw 기본 링크 옵션은 바꾸지 않는다(mingw는 정식 지원 대상이 아니다).

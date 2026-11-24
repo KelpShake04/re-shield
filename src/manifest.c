@@ -1,17 +1,11 @@
-#ifndef _POSIX_C_SOURCE
-#define _POSIX_C_SOURCE 200809L
-#endif
-
 #include "reshield/manifest.h"
 
+#include "file_platform.h"
+
 #include <ctype.h>
-#include <errno.h>
-#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <unistd.h>
 
 #ifndef RESHIELD_DISABLE
 /* Internal helper in sha256.c: hashes at most max_read bytes of a regular file. */
@@ -42,8 +36,49 @@ static int parse_sha256_hex(const char *hex, uint8_t out[RESHIELD_SHA256_SIZE]) 
     return 0;
 }
 
-/* Component-wise check: rejects absolute paths, empty components, ".." components,
- * and CR/LF. Names that merely contain ".." (e.g. "v1..2.cfg") are allowed. */
+static char ascii_upper(char c) {
+    return (c >= 'a' && c <= 'z') ? (char)(c - 'a' + 'A') : c;
+}
+
+static int ascii_equal_nocase(const char *p, size_t n, const char *upper_name) {
+    if (strlen(upper_name) != n) {
+        return 0;
+    }
+    for (size_t i = 0; i < n; i++) {
+        if (ascii_upper(p[i]) != upper_name[i]) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* Windows reserved device names. The part before the first '.' (trailing spaces
+ * stripped) is compared, so "nul.txt" is reserved too. */
+static int is_reserved_device_name(const char *p, size_t n) {
+    static const char *const names[] = { "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$" };
+    size_t base = 0;
+    while (base < n && p[base] != '.') {
+        base++;
+    }
+    while (base > 0 && p[base - 1] == ' ') {
+        base--;
+    }
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        if (ascii_equal_nocase(p, base, names[i])) {
+            return 1;
+        }
+    }
+    if (base == 4 && p[3] >= '0' && p[3] <= '9') {
+        return ascii_equal_nocase(p, 3, "COM") || ascii_equal_nocase(p, 3, "LPT");
+    }
+    return 0;
+}
+
+/* Component-wise check, identical on every platform (mirrored by tools/manifest_path.py):
+ * '/' is the only separator. Rejects absolute paths, empty components, '\\', ':',
+ * control characters (0x01-0x1F, so CR/LF too), '< > " | ? *', components ending in '.'
+ * or ' ' (which also rules out ".", ".." and "..."), and Windows reserved device names.
+ * Names that merely contain ".." (e.g. "v1..2.cfg") are allowed. */
 static int is_safe_relative_path(const char *rel) {
     if (rel == NULL || rel[0] == '\0' || rel[0] == '/') {
         return 0;
@@ -52,13 +87,14 @@ static int is_safe_relative_path(const char *rel) {
     for (;;) {
         const char *q = p;
         while (*q != '\0' && *q != '/') {
-            if (*q == '\n' || *q == '\r') {
+            unsigned char c = (unsigned char)*q;
+            if (c < 0x20 || strchr("\\:<>\"|?*", c) != NULL) {
                 return 0;
             }
             q++;
         }
         size_t n = (size_t)(q - p);
-        if (n == 0 || (n == 2 && p[0] == '.' && p[1] == '.')) {
+        if (n == 0 || q[-1] == '.' || q[-1] == ' ' || is_reserved_device_name(p, n)) {
             return 0;
         }
         if (*q == '\0') {
@@ -116,41 +152,28 @@ static int parse_manifest_line(const char *line,
  * root hash and the parsed entries come from the same bytes. *out_buf is NUL-terminated
  * and owned by the caller. */
 static int read_manifest_file(const char *path, char **out_buf, size_t *out_len) {
-    int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
-    if (fd < 0) {
+    reshield_file_t file;
+    uint64_t size = 0;
+    if (reshield_file_open_regular(path, &file, &size) != 0) {
         return -1;
     }
-    struct stat st;
-    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) ||
-        st.st_size < 0 || (uint64_t)st.st_size > RESHIELD_MANIFEST_MAX_BYTES) {
-        close(fd);
+    if (size > RESHIELD_MANIFEST_MAX_BYTES) {
+        reshield_file_close(file);
         return -1;
     }
 
-    size_t want = (size_t)st.st_size;
+    size_t want = (size_t)size;
     char *buf = (char *)malloc(want + 2);
     if (buf == NULL) {
-        close(fd);
+        reshield_file_close(file);
         return -1;
     }
-    size_t got = 0;
-    while (got < want + 1) {
-        ssize_t n = read(fd, buf + got, want + 1 - got);
-        if (n < 0 && errno == EINTR) {
-            continue;
-        }
-        if (n <= 0) {
-            if (n < 0) {
-                got = want + 1;
-            }
-            break;
-        }
-        got += (size_t)n;
-    }
-    close(fd);
+    intptr_t n = reshield_file_read_full(file, buf, want + 1);
+    reshield_file_close(file);
+    size_t got = n < 0 ? 0 : (size_t)n;
 
     /* Grew while reading, read error, embedded NUL, or CRLF: reject. */
-    if (got > want || memchr(buf, '\0', got) != NULL || memchr(buf, '\r', got) != NULL) {
+    if (n < 0 || got > want || memchr(buf, '\0', got) != NULL || memchr(buf, '\r', got) != NULL) {
         free(buf);
         return -1;
     }

@@ -16,15 +16,32 @@ typedef enum reshield_attestation_status {
  * (readable + executable, NOT writable).
  * - macOS: mach_vm_region() walked over the whole __TEXT,__text range (gaps fail).
  * - Linux: /proc/self/maps; the whole .text range must be covered by r-x mappings.
+ * - Windows: VirtualQuery over the whole .text range; every region must be committed,
+ *   executable and not writable (gaps fail).
  */
 reshield_attestation_status_t reshield_verify_code_page_wx(void);
 
 /**
  * Verifies OS-level code signature validity for the running executable.
  * - macOS: Security.framework SecCodeCopySelf + SecCodeCheckValidity.
+ * - Windows: WinVerifyTrust (Authenticode, no UI, no revocation check) on the EXE file.
+ *   An UNSIGNED executable returns RESHIELD_ATTEST_FAILED.
+ *   The file checked is the one backing the mapped image (not the module path).
  * - Linux: returns RESHIELD_ATTEST_UNSUPPORTED.
  */
 reshield_attestation_status_t reshield_verify_os_codesign(void);
+
+/**
+ * Same, but the signature must also satisfy `requirement` (code requirement language,
+ * e.g. a Team ID pin). NULL behaves like reshield_verify_os_codesign(). A requirement
+ * that does not parse returns RESHIELD_ATTEST_FAILED. Linux: UNSUPPORTED (ignored).
+ * Windows: `requirement` must be exactly "leaf-sha256:" followed by 64 hex chars
+ * (case-insensitive) = SHA-256 of the DER-encoded signing (leaf) certificate of the first
+ * Authenticode signer; the signature must also pass WinVerifyTrust. Any other string (wrong
+ * prefix, length or non-hex) returns FAILED (fail closed). The macOS and Windows requirement
+ * syntaxes differ: set the value per platform under #ifdef.
+ */
+reshield_attestation_status_t reshield_verify_os_codesign_req(const char *requirement);
 
 #ifdef __cplusplus
 }

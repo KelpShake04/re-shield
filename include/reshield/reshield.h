@@ -26,7 +26,7 @@ typedef enum reshield_status {
 typedef enum reshield_check_flags {
     RESHIELD_CHECK_CODE_SECTION     = 1u << 0, /* __TEXT,__text / .text SHA-256 */
     RESHIELD_CHECK_PAGE_PERMISSIONS = 1u << 1, /* Code segment W^X (r-x, no W) */
-    RESHIELD_CHECK_CODESIGN         = 1u << 2, /* OS code signature validity (macOS) */
+    RESHIELD_CHECK_CODESIGN         = 1u << 2, /* OS code signature validity (macOS, Windows) */
     RESHIELD_CHECK_MANIFEST         = 1u << 3, /* Sealed manifest + asset verification */
     RESHIELD_CHECK_DEFAULT          = (RESHIELD_CHECK_CODE_SECTION |
                                        RESHIELD_CHECK_PAGE_PERMISSIONS)
@@ -52,6 +52,20 @@ typedef struct reshield_config {
     const char             *asset_base_dir; /* Base directory for manifest relative paths */
     reshield_violation_cb_t on_violation;   /* Optional diagnostic callback on failure */
     void                   *user_data;
+    const char             *codesign_requirement; /* Signer pin, syntax differs per platform.
+                                                   * macOS: code requirement language string, e.g.
+                                                   * `anchor apple generic and certificate leaf[subject.OU] = "TEAMID"`.
+                                                   * Windows: `leaf-sha256:<64 hex>` = SHA-256 of the
+                                                   * DER signing (leaf) certificate.
+                                                   * NULL = validity only, any signer (an attacker can
+                                                   * re-sign with their own certificate). A string that
+                                                   * fails to parse or does not match is reported as
+                                                   * CODESIGN_INVALID. Where the platform cannot enforce
+                                                   * a pin (Linux) a non-NULL value also fails with
+                                                   * CODESIGN_INVALID when RESHIELD_CHECK_CODESIGN is
+                                                   * enabled: set it per platform under #ifdef. Adding
+                                                   * this field changed the struct size: recompile
+                                                   * callers with the header. */
 } reshield_config_t;
 
 /**
@@ -82,6 +96,18 @@ reshield_status_t reshield_verify(const reshield_config_t *config,
  * Returns a human-readable static string for a reshield_status_t value.
  */
 const char *reshield_status_name(reshield_status_t status);
+
+/**
+ * Serializes a report as one line of JSON (schema version "v":1) for logging or
+ * telemetry: {"v","status","status_code","failed_checks","build_id",
+ * "failed_asset_path","code":{expected/actual size and sha256}}.
+ * snprintf semantics: returns the length the full output needs (excluding the NUL),
+ * writes at most cap bytes including the NUL, truncates safely; buf may be NULL with
+ * cap 0 to size the buffer. Returns 0 for a NULL report. Non-ASCII bytes in the
+ * asset path are written as \u00XX. A report is an unauthenticated claim from the
+ * client: do not treat it as proof of integrity on the server.
+ */
+size_t reshield_report_to_json(const reshield_report_t *report, char *buf, size_t cap);
 
 /**
  * Overwrites [ptr, ptr + len) with zeroes using a volatile pointer so the

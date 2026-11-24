@@ -104,6 +104,105 @@ static void test_manifest_flag_with_unsealed_binary(void) {
 #endif
 }
 
+#define ZEROS64 "0000000000000000000000000000000000000000000000000000000000000000"
+
+static void test_codesign_requirement(void) {
+    reshield_config_t cfg = reshield_default_config();
+    cfg.enabled_checks = RESHIELD_CHECK_CODESIGN;
+    reshield_report_t report;
+#if defined(RESHIELD_DISABLE)
+    (void)cfg;
+    (void)report;
+    ASSERT_TRUE(reshield_verify_os_codesign_req("anchor apple") != RESHIELD_ATTEST_FAILED,
+                "disabled: codesign requirement is not enforced");
+#elif defined(__APPLE__)
+    /* The test binary is ad-hoc signed by the linker: valid, but not Apple-anchored. */
+    ASSERT_TRUE(reshield_verify_os_codesign_req(NULL) == RESHIELD_ATTEST_OK,
+                "codesign: NULL requirement checks validity only");
+    ASSERT_TRUE(reshield_verify_os_codesign_req("!anchor apple") == RESHIELD_ATTEST_OK,
+                "codesign: satisfied requirement passes");
+    ASSERT_TRUE(reshield_verify_os_codesign_req("anchor apple") == RESHIELD_ATTEST_FAILED,
+                "codesign: unsatisfied requirement (anchor apple) fails");
+    ASSERT_TRUE(reshield_verify_os_codesign_req("identifier \"no.such.identifier\"") == RESHIELD_ATTEST_FAILED,
+                "codesign: wrong identifier fails");
+    ASSERT_TRUE(reshield_verify_os_codesign_req("this is ((( not a requirement") == RESHIELD_ATTEST_FAILED,
+                "codesign: unparsable requirement fails closed");
+    cfg.codesign_requirement = "anchor apple";
+    ASSERT_TRUE(reshield_verify(&cfg, &report) == RESHIELD_ERR_CODESIGN_INVALID &&
+                report.failed_checks == RESHIELD_CHECK_CODESIGN,
+                "reshield_verify() passes cfg.codesign_requirement through");
+#elif defined(_WIN32)
+    /* This test EXE is unsigned (no Authenticode), so even NULL fails; a malformed requirement
+     * fails closed, and a well-formed leaf pin still fails because there is no valid signature.
+     * The signed-EXE cases run in CI against a signed copy of integrity_demo.exe. */
+    ASSERT_TRUE(reshield_verify_os_codesign_req(NULL) == RESHIELD_ATTEST_FAILED,
+                "codesign: unsigned EXE fails WinVerifyTrust");
+    ASSERT_TRUE(reshield_verify_os_codesign_req("anchor apple") == RESHIELD_ATTEST_FAILED,
+                "codesign: a non-leaf-sha256 requirement fails closed on Windows");
+    ASSERT_TRUE(reshield_verify_os_codesign_req("leaf-sha256:" ZEROS64) == RESHIELD_ATTEST_FAILED,
+                "codesign: well-formed leaf pin on an unsigned EXE fails");
+    ASSERT_TRUE(reshield_verify_os_codesign_req("leaf-sha256:00") == RESHIELD_ATTEST_FAILED,
+                "codesign: leaf pin with a short hash fails closed");
+    ASSERT_TRUE(reshield_verify(&cfg, &report) == RESHIELD_ERR_CODESIGN_INVALID &&
+                report.failed_checks == RESHIELD_CHECK_CODESIGN,
+                "reshield_verify() reports CODESIGN_INVALID for an unsigned EXE");
+#else
+    ASSERT_TRUE(reshield_verify_os_codesign_req("anchor apple") == RESHIELD_ATTEST_UNSUPPORTED,
+                "codesign requirement is UNSUPPORTED off macOS");
+    ASSERT_TRUE(reshield_verify(&cfg, &report) == RESHIELD_OK,
+                "off macOS: CODESIGN check without a requirement is skipped as UNSUPPORTED");
+    cfg.codesign_requirement = "anchor apple";
+    ASSERT_TRUE(reshield_verify(&cfg, &report) == RESHIELD_ERR_CODESIGN_INVALID &&
+                report.failed_checks == RESHIELD_CHECK_CODESIGN,
+                "off macOS: a requirement that cannot be enforced fails closed");
+#endif
+}
+
+static void test_report_json(void) {
+    reshield_report_t r;
+    memset(&r, 0, sizeof(r));
+    r.status = RESHIELD_ERR_ASSET_TAMPERED;
+    r.failed_checks = RESHIELD_CHECK_MANIFEST;
+    r.build_id = 7u;
+    r.code_result.expected_size = 100u;
+    strcpy(r.failed_asset_path, "a\"b\\c\n\xc3");
+
+    const char *want =
+        "{\"v\":1,\"status\":\"ASSET_TAMPERED\",\"status_code\":6,\"failed_checks\":8,"
+        "\"build_id\":7,\"failed_asset_path\":\"a\\\"b\\\\c\\u000a\\u00c3\","
+        "\"code\":{\"expected_size\":100,\"actual_size\":0,"
+        "\"expected_sha256\":\"" ZEROS64 "\",\"actual_sha256\":\"" ZEROS64 "\"}}";
+
+    char buf[1024];
+    size_t n = reshield_report_to_json(&r, buf, sizeof(buf));
+    ASSERT_TRUE(n == strlen(want) && strcmp(buf, want) == 0,
+                "report_to_json: exact output, path escaped (quote, backslash, control, non-ASCII)");
+    ASSERT_TRUE(reshield_report_to_json(&r, NULL, 0) == n,
+                "report_to_json: NULL buf sizes the output");
+
+    char small[10];
+    memset(small, 'X', sizeof(small));
+    n = reshield_report_to_json(&r, small, sizeof(small));
+    ASSERT_TRUE(n == strlen(want) && strlen(small) == sizeof(small) - 1u &&
+                strncmp(small, want, sizeof(small) - 1u) == 0,
+                "report_to_json: truncates safely, NUL-terminated, returns full length");
+
+    char untouched[4] = { 'X', 'X', 'X', 'X' };
+    n = reshield_report_to_json(&r, untouched, 0);
+    ASSERT_TRUE(n == strlen(want) && untouched[0] == 'X', "report_to_json: cap 0 writes nothing");
+
+    ASSERT_TRUE(reshield_report_to_json(NULL, buf, sizeof(buf)) == 0u, "report_to_json: NULL report returns 0");
+
+    r.code_result.expected_size = UINT64_MAX;
+    reshield_report_to_json(&r, buf, sizeof(buf));
+    ASSERT_TRUE(strstr(buf, "\"expected_size\":18446744073709551615,") != NULL,
+                "report_to_json: uint64 max formats correctly");
+
+    memset(r.failed_asset_path, 'a', sizeof(r.failed_asset_path));
+    n = reshield_report_to_json(&r, buf, sizeof(buf));
+    ASSERT_TRUE(n < sizeof(buf), "report_to_json: unterminated asset path is bounded");
+}
+
 static void test_status_names(void) {
     ASSERT_TRUE(strcmp(reshield_status_name(RESHIELD_ERR_MANIFEST_MISMATCH), "MANIFEST_MISMATCH") == 0 &&
                 strcmp(reshield_status_name(RESHIELD_ERR_ASSET_TAMPERED), "ASSET_TAMPERED") == 0 &&
@@ -137,6 +236,8 @@ int main(void) {
     test_verify_unsealed_and_callback();
     test_null_config_and_report();
     test_manifest_flag_with_unsealed_binary();
+    test_codesign_requirement();
+    test_report_json();
     test_status_names();
     test_secure_zero();
 
