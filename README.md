@@ -103,7 +103,7 @@ If you load an asset after verifying it by path, the file can change in between 
 
 ## Development and release builds
 
-- `-DRESHIELD_DISABLE` turns `reshield_verify()` and the other runtime checks into no-ops. Use it while debugging, because a breakpoint patches `.text` and gives `CODE_TAMPERED`. `reshield_verify_buffer()` still compares hashes in this build, because it is app logic, not an integrity check.
+- `-DRESHIELD_DISABLE` turns `reshield_verify()` and the other runtime checks into no-ops. It must be set when the **library** is compiled (e.g. `make CFLAGS="-std=c11 -O2 -DRESHIELD_DISABLE"` after `make clean`); adding it only to your app's flags changes nothing. Use it while debugging, because a breakpoint patches `.text` and gives `CODE_TAMPERED`. `reshield_verify_buffer()` still compares hashes in this build, because it is app logic, not an integrity check.
 - `cfg.allow_unsealed = 1` lets a binary that was never sealed pass. It works only if the library was compiled with `-DRESHIELD_ALLOW_UNSEALED`. This repository's Makefile turns that on by default. For a release build use `make ALLOW_UNSEALED=0`.
 - If the field is set on a library built without the macro, `reshield_verify()` returns `INTERNAL_ERROR`. It is neither ignored nor bypassed.
 - Never ship a build with `RESHIELD_ALLOW_UNSEALED`. An attacker could then skip the code and manifest checks by changing the sealed byte in the record.

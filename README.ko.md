@@ -97,7 +97,7 @@ python3 tools/verify_release.py build/game --manifest build/game.manifest --asse
 
 **4. 에셋 로딩.** 검증한 뒤 같은 경로를 다시 열면 그 사이 파일이 바뀔 수 있다(TOCTOU). 파일을 메모리로 읽고 `reshield_verify_buffer()`로 검증한 뒤 그 버퍼를 사용한다. `reshield_verify_single_asset()`도 경로 기반이라 같은 한계가 있다.
 
-**5. 개발 중.** `-DRESHIELD_DISABLE`로 검사를 끈다. 디버거 중단점이 `.text`를 바꾸면 `CODE_TAMPERED`가 나므로 디버깅 중에는 꺼 둔다.
+**5. 개발 중.** `-DRESHIELD_DISABLE`로 검사를 끈다. 이 매크로는 **라이브러리를 컴파일할 때** 줘야 한다(`make clean` 후 `make CFLAGS="-std=c11 -O2 -DRESHIELD_DISABLE"` 등). 앱 컴파일 플래그에만 넣으면 아무 효과가 없다. 디버거 중단점이 `.text`를 바꾸면 `CODE_TAMPERED`가 나므로 디버깅 중에는 꺼 둔다.
 
 **기대치.** 설치 손상, 실수로 인한 변조, 단순한 바이너리·에셋 패치를 감지하는 용도다. 바이너리와 매니페스트를 함께 재봉인하는 공격이나 런타임 API 교체는 막지 못한다. 안티치트나 DRM 대용으로 쓰지 않는다. 중요한 판정은 서버에서 하고 클라이언트 검사 결과는 신호로만 쓴다.
 
