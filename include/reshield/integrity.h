@@ -66,9 +66,13 @@ int reshield_verify_buffer(const void *data, size_t len,
                            const uint8_t expected_sha256[RESHIELD_SHA256_SIZE]);
 
 /**
- * Hashes the main executable's in-memory code section (__TEXT,__text on macOS;
- * .text on Linux and Windows PE32+ x64) and compares it against the build-time sealed record.
- * out_result may be NULL.
+ * Hashes the in-memory code section (__TEXT,__text on macOS; .text on Linux and Windows
+ * PE32+ x64) of the image that holds the sealed record and compares it against that record.
+ * The record lives in the module that linked re-shield: the main executable for a statically
+ * linked program, or a shared library (.so/.dylib/.dll) when re-shield is linked into one.
+ * Seal that same file with tools/seal_binary.py. The host process need not be sealed.
+ * On Linux the image's file must be reachable by an absolute path (dlopen with a relative name
+ * fails closed with RESHIELD_INTEGRITY_ERROR). out_result may be NULL.
  */
 reshield_integrity_status_t reshield_verify_code_section(reshield_integrity_result_t *out_result);
 

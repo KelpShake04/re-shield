@@ -26,9 +26,11 @@ typedef enum reshield_status {
 } reshield_status_t;
 
 typedef enum reshield_check_flags {
-    RESHIELD_CHECK_CODE_SECTION     = 1u << 0, /* __TEXT,__text / .text SHA-256 */
+    RESHIELD_CHECK_CODE_SECTION     = 1u << 0, /* __TEXT,__text / .text SHA-256 of the image holding the record
+                                                * (the module that linked re-shield, see integrity.h) */
     RESHIELD_CHECK_PAGE_PERMISSIONS = 1u << 1, /* Code segment W^X (r-x, no W) */
-    RESHIELD_CHECK_CODESIGN         = 1u << 2, /* OS code signature validity (macOS, Windows) */
+    RESHIELD_CHECK_CODESIGN         = 1u << 2, /* OS code signature validity (macOS, Windows) of the process
+                                                * EXE, also when re-shield lives in a shared library */
     RESHIELD_CHECK_MANIFEST         = 1u << 3, /* Sealed manifest + asset verification */
     RESHIELD_CHECK_DEFAULT          = (RESHIELD_CHECK_CODE_SECTION |
                                        RESHIELD_CHECK_PAGE_PERMISSIONS)
