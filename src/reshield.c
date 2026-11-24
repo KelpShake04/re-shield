@@ -82,13 +82,22 @@ reshield_status_t reshield_verify(const reshield_config_t *config,
 #else
     reshield_config_t cfg = (config != NULL) ? *config : reshield_default_config();
 
+    /* allow_unsealed only works in a build compiled with -DRESHIELD_ALLOW_UNSEALED. Elsewhere a
+     * set field is a configuration error, not a silent no-op: it would otherwise look like the
+     * dev bypass is active (or was safely ignored) when neither is clear to the caller. */
+#ifdef RESHIELD_ALLOW_UNSEALED
+    const int allow_unsealed = cfg.allow_unsealed != 0;
+#else
+    const int allow_unsealed = 0;
+#endif
+
     if ((cfg.enabled_checks & RESHIELD_CHECK_CODE_SECTION) != 0u) {
         reshield_integrity_status_t ist = reshield_verify_code_section(&report.code_result);
         report.build_id = report.code_result.build_id;
         if (ist == RESHIELD_INTEGRITY_TAMPERED) {
             report.failed_checks |= RESHIELD_CHECK_CODE_SECTION;
             report.status = RESHIELD_ERR_CODE_TAMPERED;
-        } else if (ist == RESHIELD_INTEGRITY_UNSEALED && !cfg.allow_unsealed) {
+        } else if (ist == RESHIELD_INTEGRITY_UNSEALED && !allow_unsealed) {
             report.failed_checks |= RESHIELD_CHECK_CODE_SECTION;
             report.status = RESHIELD_ERR_UNSEALED;
         } else if (ist == RESHIELD_INTEGRITY_ERROR) {
@@ -126,7 +135,7 @@ reshield_status_t reshield_verify(const reshield_config_t *config,
             report.failed_asset_path,
             sizeof(report.failed_asset_path)
         );
-        if (ms == RESHIELD_MANIFEST_UNSEALED && cfg.allow_unsealed) {
+        if (ms == RESHIELD_MANIFEST_UNSEALED && allow_unsealed) {
             /* Allowed in unsealed development builds */
         } else if (ms != RESHIELD_MANIFEST_OK) {
             report.failed_checks |= RESHIELD_CHECK_MANIFEST;
@@ -148,6 +157,12 @@ reshield_status_t reshield_verify(const reshield_config_t *config,
             }
         }
     }
+
+#ifndef RESHIELD_ALLOW_UNSEALED
+    if (cfg.allow_unsealed != 0) {
+        report.status = RESHIELD_ERR_INTERNAL; /* configuration error wins over any other result */
+    }
+#endif
 
     if (out_report != NULL) {
         *out_report = report;

@@ -5,6 +5,14 @@ PYTHON3 ?= python3
 CFLAGS  ?= -std=c11 -Wall -Wextra -Wpedantic -Werror -O2
 INCLUDES = -Iinclude
 
+# This repo's own build is a development build: tests and demos use cfg.allow_unsealed.
+# A release build must pass ALLOW_UNSEALED=0 (or compile without -DRESHIELD_ALLOW_UNSEALED);
+# the library then reports INTERNAL_ERROR if a caller sets the field.
+ALLOW_UNSEALED ?= 1
+ifeq ($(ALLOW_UNSEALED),1)
+CFLAGS += -DRESHIELD_ALLOW_UNSEALED
+endif
+
 # Target platform comes from the compiler (so cross builds work), not from the host uname.
 TARGET_TRIPLE := $(shell $(CC) -dumpmachine)
 ifneq ($(findstring mingw,$(TARGET_TRIPLE)),)
@@ -54,6 +62,7 @@ TEST_MANIFEST_DISABLED  = $(BUILD_DIR)/test_manifest_disabled$(EXE)
 TEST_RUNTIME            = $(BUILD_DIR)/test_runtime$(EXE)
 TEST_RUNTIME_DISABLED   = $(BUILD_DIR)/test_runtime_disabled$(EXE)
 TEST_WX                 = $(BUILD_DIR)/test_wx$(EXE)
+TEST_NO_ALLOW           = $(BUILD_DIR)/test_no_allow_unsealed$(EXE)
 
 .PHONY: all clean test release-demo sanitize fuzz-build fuzz fuzz-pe
 
@@ -110,13 +119,16 @@ $(TEST_RUNTIME): tests/test_runtime.c $(LIB_TARGET)
 $(TEST_RUNTIME_DISABLED): tests/test_runtime.c $(LIB_SRCS) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -DRESHIELD_DISABLE $(INCLUDES) $^ $(LDFLAGS) -o $@
 
+$(TEST_NO_ALLOW): tests/test_no_allow_unsealed.c $(LIB_SRCS) | $(BUILD_DIR)
+	$(CC) $(filter-out -DRESHIELD_ALLOW_UNSEALED,$(CFLAGS)) $(INCLUDES) $^ $(LDFLAGS) -o $@
+
 release-demo: $(SAMPLE_GAME_SEALED) $(SAMPLE_MANIFEST)
 	$(PYTHON3) tools/verify_release.py $(SAMPLE_GAME_SEALED) --manifest $(SAMPLE_MANIFEST) --assets examples/assets
 	$(RUN) ./$(SAMPLE_GAME_SEALED) $(SAMPLE_MANIFEST) examples/assets STAGE-1-CLEAR-2026
 
 test: $(TEST_INTEGRITY) $(TEST_INTEGRITY_DISABLED) \
       $(TEST_MANIFEST) $(TEST_MANIFEST_DISABLED) \
-      $(TEST_RUNTIME) $(TEST_RUNTIME_DISABLED) $(TEST_WX) \
+      $(TEST_RUNTIME) $(TEST_RUNTIME_DISABLED) $(TEST_WX) $(TEST_NO_ALLOW) \
       $(DEMO_INTEGRITY) $(DEMO_INTEGRITY_DISABLED) \
       $(SAMPLE_GAME) $(SAMPLE_GAME_SEALED) $(SAMPLE_GAME_DISABLED) $(SAMPLE_MANIFEST)
 	$(RUN) ./$(TEST_INTEGRITY)
@@ -125,6 +137,7 @@ test: $(TEST_INTEGRITY) $(TEST_INTEGRITY_DISABLED) \
 	$(RUN) ./$(TEST_MANIFEST_DISABLED)
 	$(RUN) ./$(TEST_RUNTIME)
 	$(RUN) ./$(TEST_RUNTIME_DISABLED)
+	$(RUN) ./$(TEST_NO_ALLOW)
 	$(RUN) ./$(TEST_WX)
 	$(SEAL_WORKFLOW_TEST)
 	$(PYTHON3) tools/verify_release.py $(SAMPLE_GAME_SEALED) --manifest $(SAMPLE_MANIFEST) --assets examples/assets
@@ -134,7 +147,7 @@ clean:
 
 # ASan+UBSan run of the C test flow in build/san/ (tests still write scratch files under build/).
 # Skipped on purpose: tests/test_seal_workflow.py (drives build/ binaries and unsanitized Python).
-SAN_CFLAGS = -std=c11 -Wall -Wextra -Wpedantic -Werror -O1 -g -fno-omit-frame-pointer \
+SAN_CFLAGS = -std=c11 -DRESHIELD_ALLOW_UNSEALED -Wall -Wextra -Wpedantic -Werror -O1 -g -fno-omit-frame-pointer \
              -fsanitize=address,undefined -fno-sanitize-recover=undefined
 sanitize:
 	mkdir -p build

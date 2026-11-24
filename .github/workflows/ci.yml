@@ -66,7 +66,7 @@ jobs:
         shell: cmd
         run: |
           call "%VSDIR%\VC\Auxiliary\Build\vcvars64.bat"
-          set CFLAGS=/nologo /std:c11 /O2 /W3 /WX /I include
+          set CFLAGS=/nologo /std:c11 /O2 /W3 /WX /DRESHIELD_ALLOW_UNSEALED /I include
           set TFLAGS=%CFLAGS% /D_CRT_SECURE_NO_WARNINGS /D_CRT_NONSTDC_NO_WARNINGS
           cl %CFLAGS% /c /Fo:build\lib\ src\sha256.c src\integrity_common.c src\integrity_windows.c src\file_windows.c src\manifest.c src\attestation_windows.c src\reshield.c || exit /b 1
           lib /nologo /OUT:build\reshield.lib build\lib\sha256.obj build\lib\integrity_common.obj build\lib\integrity_windows.obj build\lib\file_windows.obj build\lib\manifest.obj build\lib\attestation_windows.obj build\lib\reshield.obj || exit /b 1
