@@ -63,6 +63,7 @@ const char *reshield_status_name(reshield_status_t status) {
         case RESHIELD_ERR_MANIFEST_MISMATCH: return "MANIFEST_MISMATCH";
         case RESHIELD_ERR_ASSET_TAMPERED:    return "ASSET_TAMPERED";
         case RESHIELD_ERR_INTERNAL:          return "INTERNAL_ERROR";
+        case RESHIELD_ERR_MANIFEST_IO:       return "MANIFEST_IO_ERROR";
         default:                             return "UNKNOWN";
     }
 }
@@ -149,6 +150,9 @@ reshield_status_t reshield_verify(const reshield_config_t *config,
                         break;
                     case RESHIELD_MANIFEST_ASSET_MISMATCH:
                         report.status = RESHIELD_ERR_ASSET_TAMPERED;
+                        break;
+                    case RESHIELD_MANIFEST_IO_ERROR:
+                        report.status = RESHIELD_ERR_MANIFEST_IO;
                         break;
                     default:
                         report.status = RESHIELD_ERR_INTERNAL;

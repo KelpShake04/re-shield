@@ -123,8 +123,9 @@ def test_status_mapping_and_records(tmpdir: str, repo_root: str, assets_dir: str
 
     # ROOT_MISMATCH / ASSET_TAMPERED / IO error map to distinct statuses (exit = 10 + status).
     r = run_cmd([game, os.path.join(tmpdir, "missing.manifest"), assets_dir, "STAGE-1-CLEAR-2026"])
-    assert r.returncode == 17 and "INTERNAL_ERROR" in r.stderr, f"IO error mapping failed: {r}"
-    print("PASS: unreadable manifest maps to INTERNAL_ERROR")
+    assert r.returncode == 18 and "MANIFEST_IO_ERROR" in r.stderr and "INTERNAL" not in r.stderr, \
+        f"IO error mapping failed: {r}"
+    print("PASS: unreadable manifest maps to MANIFEST_IO_ERROR (not INTERNAL_ERROR)")
 
     # Multiple failures: code status wins, both failed_checks bits are reported.
     demo = os.path.join(tmpdir, "s2_demo")

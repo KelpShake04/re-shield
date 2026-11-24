@@ -71,6 +71,7 @@ make release-demo
 
 - 매니페스트는 한 번만 읽어(최대 4 MiB, 일반 파일만) 같은 버퍼로 루트 해시를 계산하고 파싱한다. 해시 후 재오픈하지 않는다.
 - 1023자를 넘는 줄, CR(`\r`, CRLF 포함)·NUL이 있는 매니페스트, 잘못된 줄은 `IO_ERROR`다. 항목이 하나도 없는 매니페스트도 `IO_ERROR`다.
+- `reshield_verify()`는 이 `IO_ERROR`(경로 오류, 파일 없음, 형식 오류)를 `RESHIELD_ERR_MANIFEST_IO`(값 8, `MANIFEST_IO_ERROR`)로 보고한다. 이전에는 `RESHIELD_ERR_INTERNAL`이었다. 변조 판정이 아니므로 현장 텔레메트리에서 경로 문제와 진짜 내부 오류를 구분할 수 있다. 값은 열거형 끝에 추가했고 기존 값은 그대로다.
 - 경로 규칙은 모든 플랫폼에서 같다(C: `src/manifest.c`의 `is_safe_relative_path`, Python: `tools/manifest_path.py`). 구분자는 `/`만 허용하고 구성요소 단위로 검사한다. 다음은 거부한다.
   - 선행 `/`(절대경로)와 빈 구성요소
   - `\`, `:`, 제어문자(0x00–0x1F, CR/LF 포함), `< > " | ? *`
