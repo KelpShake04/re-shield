@@ -51,7 +51,7 @@ make release-demo
 
 ## 4. 개발 옵션과 경고
 
-- `cfg.allow_unsealed = 1`은 런타임 필드라서 릴리스 빌드에서도 켤 수 있다. **릴리스 빌드에서 켜면 레코드의 sealed 바이트를 0으로 바꾸는 변조만으로 코드·매니페스트 검사가 우회된다. 릴리스 금지.**
+- `cfg.allow_unsealed = 1`은 라이브러리를 `-DRESHIELD_ALLOW_UNSEALED`로 컴파일한 개발 빌드에서만 효과가 있다(이 저장소의 Makefile은 기본으로 켠다. 릴리스는 `make ALLOW_UNSEALED=0`). 그 매크로 없이 컴파일한 라이브러리에서 필드를 켜면 우회되지도, 조용히 무시되지도 않고 `reshield_verify()`가 `RESHIELD_ERR_INTERNAL`(설정 오류)을 반환한다. 매크로를 켠 빌드를 릴리스에 쓰면 레코드의 sealed 바이트를 0으로 바꾸는 변조만으로 코드·매니페스트 검사가 우회된다. 릴리스 금지.
 - UNSEALED 판정은 레코드가 유효(magic·version 일치, 플래그 0/1)하고 `sealed == 0`일 때만 내려진다. 유효하지 않은 레코드는 `CODE_TAMPERED`, 매니페스트 검사 경로에서 sealed이지만 매니페스트 루트가 없는 바이너리는 `MANIFEST_MISMATCH`로 처리되어 `allow_unsealed`로 통과하지 못한다.
 - `-DRESHIELD_DISABLE`에서도 `reshield_verify_buffer()`는 실제 해시 비교를 수행한다(앱 로직이며 무결성 검사가 아님).
 
