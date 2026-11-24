@@ -1,0 +1,91 @@
+name: re-shield seal
+description: >-
+  Seal a release executable with re-shield (strip, asset manifest, seal, optional sign, verify) in one step.
+  Run it right before the upload (e.g. steamcmd); nothing may rewrite the files after it.
+author: KelpShake04
+branding:
+  icon: lock
+  color: gray-dark
+
+inputs:
+  binary:
+    description: Final linked executable (not an .app bundle); sealed in place.
+    required: true
+  assets:
+    description: Asset directory to bind. A manifest is generated from it. Empty = seal the code only.
+    required: false
+    default: ""
+  exclude:
+    description: >-
+      Newline-separated globs (relative POSIX paths under assets) to leave out of the manifest.
+      Must match what you leave out of the upload (e.g. the depot FileExclusion list).
+    required: false
+    default: ""
+  build-id:
+    description: Build identifier, 0..4294967295. Default is the workflow run number.
+    required: false
+    default: ${{ github.run_number }}
+  strip:
+    description: Run strip before sealing (ELF and Mach-O). "true" or "false".
+    required: false
+    default: "false"
+  sign-cmd:
+    description: >-
+      Signing command run after sealing; {} is replaced by the binary path (e.g. signtool).
+      Split like a POSIX shell line (use forward slashes in Windows paths).
+    required: false
+    default: ""
+  sign:
+    description: macOS codesign identity after sealing. Empty = ad-hoc.
+    required: false
+    default: ""
+  python:
+    description: Python interpreter command (3.8+).
+    required: false
+    default: python3
+
+outputs:
+  manifest:
+    description: Path of the generated manifest (empty when no assets were given).
+    value: ${{ steps.seal.outputs.manifest }}
+  build-id:
+    description: The build id that was sealed into the binary.
+    value: ${{ steps.seal.outputs.build-id }}
+
+runs:
+  using: composite
+  steps:
+    - id: seal
+      # bash = Git Bash on Windows runners too. Inputs reach the script only through env (no injection).
+      shell: bash
+      env:
+        RS_ACTION_PATH: ${{ github.action_path }}
+        RS_BINARY: ${{ inputs.binary }}
+        RS_ASSETS: ${{ inputs.assets }}
+        RS_EXCLUDE: ${{ inputs.exclude }}
+        RS_BUILD_ID: ${{ inputs.build-id }}
+        RS_STRIP: ${{ inputs.strip }}
+        RS_SIGN_CMD: ${{ inputs.sign-cmd }}
+        RS_SIGN: ${{ inputs.sign }}
+        RS_PYTHON: ${{ inputs.python }}
+      run: |
+        set -euo pipefail
+        if [ -z "$RS_BINARY" ]; then echo "::error::input 'binary' is required"; exit 1; fi
+        read -ra py <<<"$RS_PYTHON"
+        args=("$RS_BINARY" --build-id "$RS_BUILD_ID")
+        manifest=""
+        if [ -n "$RS_ASSETS" ]; then
+          base=$(basename "$RS_BINARY")
+          manifest="$(dirname "$RS_BINARY")/${base%.*}.manifest"
+          args+=(--assets "$RS_ASSETS" --manifest-out "$manifest")
+        fi
+        while IFS= read -r pat; do
+          pat=${pat%$'\r'}
+          if [ -n "$pat" ]; then args+=(--exclude "$pat"); fi
+        done <<<"$RS_EXCLUDE"
+        if [ "$RS_STRIP" = "true" ]; then args+=(--strip); fi
+        if [ -n "$RS_SIGN" ]; then args+=(--sign "$RS_SIGN"); fi
+        if [ -n "$RS_SIGN_CMD" ]; then args+=(--sign-cmd "$RS_SIGN_CMD"); fi
+        "${py[@]}" "$RS_ACTION_PATH/tools/reshield_release.py" "${args[@]}"
+        echo "manifest=$manifest" >> "$GITHUB_OUTPUT"
+        echo "build-id=$RS_BUILD_ID" >> "$GITHUB_OUTPUT"
