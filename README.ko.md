@@ -89,6 +89,15 @@ if (reshield_verify(&cfg, &report) != RESHIELD_OK) {
 if (reshield_verify_app("game.manifest", "assets", NULL, NULL, &report) != RESHIELD_OK) { /* 처리 */ }
 ```
 
+다른 언어나 엔진 바인딩에서는 `reshield_check_json()`이 같은 검사를 평면 C 타입만으로 한다(`int` 상태값과 한 줄 JSON 리포트, 구조체를 미러링할 필요 없음).
+
+```c
+char json[512];
+int status = reshield_check_json("game.manifest", "assets", json, sizeof json);  /* 0 = RESHIELD_OK */
+```
+
+에셋 폴더 안의 바이너리나 빌드 부산물은 매니페스트에서 뺄 수 있다: `python3 tools/gen_manifest.py dist -o dist/game.manifest --exclude "*.pdb" --exclude "cache/*"`(상대 POSIX 경로에 대한 glob, 반복 가능). `reshield_release.py`도 같은 `--exclude`를 받고, 봉인하는 바이너리 자신은 항상 매니페스트에서 뺀다. 그래서 `reshield_release.py dist/game --assets dist`가 동작한다.
+
 매니페스트나 에셋 경로를 열 수 없으면 `INTERNAL_ERROR`가 아니라 `MANIFEST_IO_ERROR`(`RESHIELD_ERR_MANIFEST_IO`, 값 8)로 보고한다(경로 실수가 내부 오류로 오인되지 않도록. 이전에는 `INTERNAL_ERROR`였다).
 
 **3. 릴리스 파이프라인(CI).** 순서가 중요하다(링크, `strip`, 봉인, 서명, 검증). 최종 실행 파일에 한 명령으로 이 순서를 실행한다(제자리 수정).

@@ -105,6 +105,15 @@ To check assets at startup, call `reshield_verify_app()`. It checks code and man
 if (reshield_verify_app("game.manifest", "assets", NULL, NULL, &report) != RESHIELD_OK) { /* handle */ }
 ```
 
+From another language or an engine binding, `reshield_check_json()` does the same check with flat C types only (an `int` status, the report as one JSON line, no struct to mirror):
+
+```c
+char json[512];
+int status = reshield_check_json("game.manifest", "assets", json, sizeof json);  /* 0 = RESHIELD_OK */
+```
+
+Binaries inside the asset directory and build leftovers can be left out of the manifest: `python3 tools/gen_manifest.py dist -o dist/game.manifest --exclude "*.pdb" --exclude "cache/*"` (repeatable globs on the relative POSIX path). `reshield_release.py` takes the same `--exclude` and always leaves the binary it seals out of the manifest, so `reshield_release.py dist/game --assets dist` works.
+
 Or set it up yourself with `reshield_verify()` (paths then relative to the current directory):
 
 ```c
