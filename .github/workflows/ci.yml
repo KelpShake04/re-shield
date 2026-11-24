@@ -234,6 +234,56 @@ jobs:
           Pop-Location
           exit 0  # the last native call exited non-zero on purpose; every real failure above throws
 
+      # Strict (allowlist) manifest: the runtime walks the asset dir with FindFirstFileExW and
+      # reports files that are neither listed nor #allow'ed. Exit code = 10 + status: OK=0 ASSET_EXTRA=9.
+      - name: Strict manifest reports a dropped-in DLL (ASSET_EXTRA)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          New-Item -ItemType Directory -Force build\st, build\st_cwd | Out-Null
+          Copy-Item -Recurse examples\assets build\st\assets
+          python tools\gen_manifest.py build\st\assets -o build\st\sapp.manifest --strict --allow "saves/*"
+          if ($LASTEXITCODE -ne 0) { throw "gen_manifest --strict failed" }
+          Copy-Item build\test_verify_app.exe build\st\sapp.exe
+          python tools\seal_binary.py build\st\sapp.exe --manifest build\st\sapp.manifest --build-id 9
+          if ($LASTEXITCODE -ne 0) { throw "seal failed" }
+          python tools\verify_release.py build\st\sapp.exe --manifest build\st\sapp.manifest --assets build\st\assets
+          if ($LASTEXITCODE -ne 0) { throw "verify_release (strict) failed" }
+          $exe = Resolve-Path build\st\sapp.exe
+          $assets = Resolve-Path build\st\assets
+          Push-Location build\st_cwd
+          function Run([int]$want, [string]$what, [string]$needle = '') {
+            $out = & $exe sapp.manifest assets 2>&1 | Out-String
+            Write-Host $out
+            if ($LASTEXITCODE -ne $want) { throw "$what : expected exit $want, got $LASTEXITCODE" }
+            if ($needle -and -not $out.Contains($needle)) { throw "$what : output lacks '$needle'" }
+          }
+          Run 10 "clean strict directory"
+          New-Item -ItemType Directory -Force "$assets\saves" | Out-Null
+          Set-Content -Path "$assets\saves\slot1.sav" -Value "x" -NoNewline
+          Run 10 "file matched by #allow saves/*"
+          Set-Content -Path "$assets\evil.dll" -Value "MZ" -NoNewline
+          Run 19 "dropped-in evil.dll" "asset=evil.dll"
+          Remove-Item "$assets\evil.dll"
+          Run 10 "extra file removed"
+          New-Item -ItemType Directory -Force "$assets\sub\dir" | Out-Null
+          Set-Content -Path "$assets\sub\dir\proxy.dll" -Value "MZ" -NoNewline
+          Run 19 "extra file in a nested folder" "asset=sub/dir/proxy.dll"
+          Remove-Item -Recurse "$assets\sub"
+          Set-Content -Path "$assets\$([char]0xD55C)$([char]0xAE00).dll" -Value "MZ" -NoNewline
+          Run 19 "non-ASCII extra file name (UTF-16 to UTF-8)"
+          Remove-Item "$assets\$([char]0xD55C)$([char]0xAE00).dll"
+          Set-Content -Path "$assets\.hidden.dll" -Value "MZ" -NoNewline
+          Run 19 "dotfile is extra too" "asset=.hidden.dll"
+          Remove-Item "$assets\.hidden.dll"
+          # A junction is an item, never followed (its target holds only an allowed file).
+          New-Item -ItemType Junction -Path "$assets\jct" -Target "$assets\saves" | Out-Null
+          Run 19 "junction (reparse point) is an extra item" "asset=jct"
+          (Get-Item "$assets\jct").Delete()
+          Run 10 "junction removed"
+          Pop-Location
+          exit 0  # the last native call exited non-zero on purpose; every real failure above throws
+
   # Measured 2026-11-24: an MSVC-built EXE has 0 base relocations inside .text and seals fine.
   # Kept as a probe: it builds with cl, prints pe_probe/dumpbin output, and uploads them.
   # Not a gate (continue-on-error): it never asserts, so a failure only means the toolchain moved.
