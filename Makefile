@@ -62,6 +62,8 @@ SAMPLE_GAME             = $(BUILD_DIR)/sample_game$(EXE)
 SAMPLE_GAME_SEALED      = $(BUILD_DIR)/sample_game_sealed$(EXE)
 SAMPLE_GAME_DISABLED    = $(BUILD_DIR)/sample_game_disabled$(EXE)
 SAMPLE_MANIFEST         = $(BUILD_DIR)/sample_assets.manifest
+CRACKME                 = $(BUILD_DIR)/crackme$(EXE)
+CRACKME_SEALED          = $(BUILD_DIR)/crackme_sealed$(EXE)
 
 TEST_INTEGRITY          = $(BUILD_DIR)/test_integrity$(EXE)
 TEST_INTEGRITY_DISABLED = $(BUILD_DIR)/test_integrity_disabled$(EXE)
@@ -73,7 +75,7 @@ TEST_WX                 = $(BUILD_DIR)/test_wx$(EXE)
 TEST_VERIFY_APP         = $(BUILD_DIR)/test_verify_app$(EXE)
 TEST_NO_ALLOW           = $(BUILD_DIR)/test_no_allow_unsealed$(EXE)
 
-.PHONY: all lib clean test release-demo sanitize fuzz-build fuzz fuzz-pe
+.PHONY: all lib clean test crackme release-demo sanitize fuzz-build fuzz fuzz-pe
 
 all: $(LIB_TARGET) $(DEMO_INTEGRITY) $(SAMPLE_GAME) $(SAMPLE_GAME_SEALED) \
      $(TEST_INTEGRITY) $(TEST_MANIFEST) $(TEST_RUNTIME) $(TEST_WX) $(TEST_VERIFY_APP)
@@ -109,6 +111,14 @@ $(SAMPLE_GAME_SEALED): $(SAMPLE_GAME) $(SAMPLE_MANIFEST)
 	$(STRIP) $@
 	$(PYTHON3) tools/seal_binary.py $@ --manifest $(SAMPLE_MANIFEST) --build-id 1
 
+$(CRACKME): examples/crackme/crackme.c $(LIB_TARGET)
+	$(CC) $(CFLAGS) $(RS_CFLAGS) $< $(LIB_TARGET) $(LDFLAGS) -o $@
+
+# Not stripped: the lab finds the patch targets by symbol name.
+$(CRACKME_SEALED): $(CRACKME)
+	cp $(CRACKME) $@
+	$(PYTHON3) tools/seal_binary.py $@ --build-id 1
+
 $(TEST_INTEGRITY): tests/test_integrity.c $(LIB_TARGET)
 	$(CC) $(CFLAGS) $(RS_CFLAGS) $< $(LIB_TARGET) $(LDFLAGS) -o $@
 
@@ -140,7 +150,16 @@ release-demo: $(SAMPLE_GAME_SEALED) $(SAMPLE_MANIFEST)
 	$(PYTHON3) tools/verify_release.py $(SAMPLE_GAME_SEALED) --manifest $(SAMPLE_MANIFEST) --assets examples/assets
 	$(RUN) ./$(SAMPLE_GAME_SEALED) $(SAMPLE_MANIFEST) examples/assets STAGE-1-CLEAR-2026
 
-test: $(TEST_INTEGRITY) $(TEST_INTEGRITY_DISABLED) \
+# Crackme lab (docs/crackme-lab.md): needs nm and POSIX binaries, so not part of `make test` for mingw.
+crackme: $(CRACKME_SEALED)
+	$(PYTHON3) tests/test_crackme_lab.py $(CRACKME_SEALED)
+
+ifeq ($(findstring mingw,$(TARGET_TRIPLE)),)
+CRACKME_TEST = crackme
+endif
+
+test: $(CRACKME_TEST) \
+      $(TEST_INTEGRITY) $(TEST_INTEGRITY_DISABLED) \
       $(TEST_MANIFEST) $(TEST_MANIFEST_DISABLED) \
       $(TEST_RUNTIME) $(TEST_RUNTIME_DISABLED) $(TEST_WX) $(TEST_NO_ALLOW) $(TEST_VERIFY_APP) \
       $(DEMO_INTEGRITY) $(DEMO_INTEGRITY_DISABLED) \
