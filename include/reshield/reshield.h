@@ -20,7 +20,9 @@ typedef enum reshield_status {
     RESHIELD_ERR_CODESIGN_INVALID  = 4, /* OS code signature verification failed */
     RESHIELD_ERR_MANIFEST_MISMATCH = 5, /* Manifest file SHA-256 does not match sealed root */
     RESHIELD_ERR_ASSET_TAMPERED    = 6, /* Asset file missing, resized, or hash mismatch */
-    RESHIELD_ERR_INTERNAL          = 7  /* Internal section/file lookup error */
+    RESHIELD_ERR_INTERNAL          = 7, /* Internal section/file lookup error */
+    RESHIELD_ERR_MANIFEST_IO       = 8  /* Manifest or asset could not be opened/parsed (wrong path, missing
+                                         * file, malformed manifest); not a tamper verdict, not INTERNAL */
 } reshield_status_t;
 
 typedef enum reshield_check_flags {
@@ -93,6 +95,21 @@ reshield_config_t reshield_default_config(void);
  */
 reshield_status_t reshield_verify(const reshield_config_t *config,
                                   reshield_report_t *out_report);
+
+/**
+ * One-call startup check: RESHIELD_CHECK_DEFAULT, plus RESHIELD_CHECK_MANIFEST when manifest_rel
+ * is non-NULL. manifest_rel and assets_rel (NULL = ".") are resolved against the directory of the
+ * running executable, not the current working directory, so a launcher or shortcut that changes
+ * the CWD still works. Paths use fixed 4096-byte buffers; a path that does not fit, or an
+ * executable path that cannot be resolved, returns RESHIELD_ERR_INTERNAL (fail closed).
+ * Both arguments are relative paths (not validated; an absolute one just fails to open).
+ * In a library compiled with -DRESHIELD_ALLOW_UNSEALED (development library) unsealed binaries
+ * pass; a release library requires a sealed binary. on_violation, user_data and out_report as
+ * in reshield_verify(). Under -DRESHIELD_DISABLE it returns RESHIELD_OK.
+ */
+reshield_status_t reshield_verify_app(const char *manifest_rel, const char *assets_rel,
+                                      reshield_violation_cb_t on_violation, void *user_data,
+                                      reshield_report_t *out_report);
 
 /**
  * Returns a human-readable static string for a reshield_status_t value.

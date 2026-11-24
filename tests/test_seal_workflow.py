@@ -123,8 +123,9 @@ def test_status_mapping_and_records(tmpdir: str, repo_root: str, assets_dir: str
 
     # ROOT_MISMATCH / ASSET_TAMPERED / IO error map to distinct statuses (exit = 10 + status).
     r = run_cmd([game, os.path.join(tmpdir, "missing.manifest"), assets_dir, "STAGE-1-CLEAR-2026"])
-    assert r.returncode == 17 and "INTERNAL_ERROR" in r.stderr, f"IO error mapping failed: {r}"
-    print("PASS: unreadable manifest maps to INTERNAL_ERROR")
+    assert r.returncode == 18 and "MANIFEST_IO_ERROR" in r.stderr and "INTERNAL" not in r.stderr, \
+        f"IO error mapping failed: {r}"
+    print("PASS: unreadable manifest maps to MANIFEST_IO_ERROR (not INTERNAL_ERROR)")
 
     # Multiple failures: code status wins, both failed_checks bits are reported.
     demo = os.path.join(tmpdir, "s2_demo")
@@ -657,6 +658,133 @@ def test_pe_support(tmpdir: str, repo_root: str) -> None:
         print(f"PASS: real PE {os.path.basename(real)} refused as documented: {r.stderr.strip()}")
 
 
+# `codesign -dvv` output captured from real binaries (the Developer ID one is the documented format).
+CODESIGN_LINKER = """Identifier=sample_game
+Format=Mach-O thin (arm64)
+CodeDirectory v=20400 size=516 flags=0x20002(adhoc,linker-signed) hashes=13+0 location=embedded
+Signature=adhoc
+TeamIdentifier=not set
+"""
+CODESIGN_ADHOC_RUNTIME = CODESIGN_LINKER.replace("0x20002(adhoc,linker-signed)", "0x10002(adhoc,runtime)")
+CODESIGN_DEVID = """Identifier=com.example.game
+Format=Mach-O thin (arm64)
+CodeDirectory v=20500 size=300 flags=0x10000(runtime) hashes=2+7 location=embedded
+Signature size=9012
+Authority=Developer ID Application: Example (ABCDE12345)
+Authority=Developer ID Certification Authority
+Authority=Apple Root CA
+TeamIdentifier=ABCDE12345
+"""
+CODESIGN_UNSIGNED = "/x/game: code object is not signed at all\n"
+
+
+def test_macho_signature_policy(tmpdir: str, repo_root: str) -> None:
+    blocker = seal_binary.macho_signature_blocker
+    assert blocker(CODESIGN_LINKER) is None and blocker(CODESIGN_UNSIGNED) is None
+    assert blocker(CODESIGN_DEVID) and "non-ad-hoc" in blocker(CODESIGN_DEVID)
+    assert blocker(CODESIGN_ADHOC_RUNTIME) and "hardened runtime" in blocker(CODESIGN_ADHOC_RUNTIME)
+    assert blocker("something unexpected") is not None, "unrecognised output must fail closed"
+    print("PASS: Mach-O signature policy: linker-signed/unsigned ok, identity/runtime/unknown refused")
+    if sys.platform != "darwin":
+        return
+
+    seal_tool = os.path.join(repo_root, "tools", "seal_binary.py")
+    src = os.path.join(repo_root, "build", "sample_game")
+    # A throwaway self-signed identity would need a keychain import (and prompts), so the
+    # real-binary case uses ad-hoc + hardened runtime, which the re-sign would also destroy.
+    signed = os.path.join(tmpdir, "signed_runtime")
+    shutil.copy2(src, signed)
+    subprocess.run(["codesign", "-s", "-", "--force", "--options", "runtime", signed], check=True,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    before = open(signed, "rb").read()
+    r = run_cmd([sys.executable, seal_tool, signed, "--build-id", "3"])
+    assert r.returncode == 2 and "Seal first, then sign" in r.stderr, r
+    assert open(signed, "rb").read() == before, "refused seal must not modify the file"
+    r = run_cmd([sys.executable, seal_tool, signed, "--build-id", "3", "--no-codesign"])
+    assert r.returncode == 0, r
+    print("PASS: seal_binary refuses a signed Mach-O (unmodified) unless --no-codesign")
+
+
+def test_verify_app(tmpdir: str, repo_root: str) -> None:
+    """reshield_verify_app() resolves manifest and assets next to the executable, not the CWD."""
+    seal_tool = os.path.join(repo_root, "tools", "seal_binary.py")
+    gen_tool = os.path.join(repo_root, "tools", "gen_manifest.py")
+    app_dir = os.path.join(tmpdir, "va_app")
+    elsewhere = os.path.join(tmpdir, "va_cwd")
+    os.makedirs(elsewhere)
+    shutil.copytree(os.path.join(repo_root, "examples", "assets"), os.path.join(app_dir, "assets"))
+    exe = os.path.join(app_dir, "vapp")
+    shutil.copy2(os.path.join(repo_root, "build", "test_verify_app"), exe)
+    manifest = os.path.join(app_dir, "vapp.manifest")
+    subprocess.run([sys.executable, gen_tool, os.path.join(app_dir, "assets"), "-o", manifest],
+                   check=True, stdout=subprocess.DEVNULL)
+    subprocess.run([sys.executable, seal_tool, exe, "--manifest", manifest, "--build-id", "9"],
+                   check=True, stdout=subprocess.DEVNULL)
+
+    def run_app(path: str, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run([path, *args], capture_output=True, text=True, cwd=elsewhere)
+
+    r = run_app(exe, "vapp.manifest", "assets")
+    assert r.returncode == 10 and "status=OK" in r.stdout, r
+    link = os.path.join(elsewhere, "vapp_link")
+    os.symlink(exe, link)
+    r = run_app(link, "vapp.manifest", "assets")
+    assert r.returncode == 10, f"symlinked launch must resolve the real executable dir: {r}"
+    r = run_app(exe, "vapp.manifest", "x" * 5000)
+    assert r.returncode == 17 and "INTERNAL_ERROR" in r.stdout, f"oversized path must fail closed: {r}"
+    print("PASS: verify_app finds manifest/assets next to the exe from another CWD (also via symlink); "
+          "oversized path fails closed")
+
+    stage_cfg = os.path.join(app_dir, "assets", "stage1.cfg")
+    with open(stage_cfg, "ab") as f:
+        f.write(b"x")
+    r = run_app(exe, "vapp.manifest", "assets")
+    assert r.returncode == 16 and "asset=stage1.cfg" in r.stdout, r
+    os.unlink(manifest)
+    r = run_app(exe, "vapp.manifest", "assets")
+    assert r.returncode == 18 and "MANIFEST_IO_ERROR" in r.stdout, r
+    print("PASS: verify_app reports ASSET_TAMPERED, then MANIFEST_IO_ERROR for a missing manifest")
+
+
+def test_release_cli(tmpdir: str, repo_root: str) -> None:
+    """tools/reshield_release.py: fixed order strip -> manifest -> seal -> sign -> verify."""
+    tool = os.path.join(repo_root, "tools", "reshield_release.py")
+    seal_tool = os.path.join(repo_root, "tools", "seal_binary.py")
+    src = os.path.join(repo_root, "build", "sample_game")
+    out = os.path.join(tmpdir, "rel")
+    shutil.copytree(os.path.join(repo_root, "examples", "assets"), os.path.join(out, "assets"))
+
+    exe = os.path.join(out, "game")
+    shutil.copy2(src, exe)
+    r = run_cmd([sys.executable, tool, exe, "--assets", os.path.join(out, "assets"), "--strip", "--build-id", "5"])
+    assert r.returncode == 0 and "ship:" in r.stdout, r
+    manifest = os.path.join(out, "game.manifest")
+    assert os.path.isfile(manifest), "default manifest is <binary name>.manifest next to the binary"
+    r = run_cmd([exe, manifest, os.path.join(out, "assets"), "STAGE-1-CLEAR-2026"])
+    assert r.returncode == 0 and "build_id=5" in r.stdout, f"released binary must run: {r}"
+
+    # The sign command runs after sealing: --verify-only fails (rc 1) on an unsealed binary.
+    exe2 = os.path.join(out, "game2")
+    shutil.copy2(src, exe2)
+    r = run_cmd([sys.executable, tool, exe2, "--sign-cmd", f"{sys.executable} {seal_tool} {{}} --verify-only"])
+    assert r.returncode == 0 and "match=True" in r.stdout, f"sign step must see a sealed binary: {r}"
+    print("PASS: reshield_release strips, seals with manifest, runs the sign step after sealing, verifies")
+
+    r = run_cmd([sys.executable, tool, out])
+    assert r.returncode != 0 and "inside the bundle" in r.stderr, r
+    if sys.platform != "darwin":
+        return
+    signed = os.path.join(out, "signed")
+    shutil.copy2(src, signed)
+    subprocess.run(["codesign", "-s", "-", "--force", "--options", "runtime", signed], check=True,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    before = open(signed, "rb").read()
+    r = run_cmd([sys.executable, tool, signed])
+    assert r.returncode == 2 and "Seal first, then sign" in r.stderr, r
+    assert open(signed, "rb").read() == before, "refused release must not modify the file"
+    print("PASS: reshield_release refuses an already-signed Mach-O without touching it")
+
+
 def main() -> int:
     repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     integrity_demo = os.path.join(repo_root, "build", "integrity_demo")
@@ -758,6 +886,9 @@ def main() -> int:
         shutil.copytree(assets_src, a2)
         test_status_mapping_and_records(tmp2, repo_root, a2)
         test_seal_tool_and_release_cases(tmp2, repo_root, a2)
+        test_macho_signature_policy(tmp2, repo_root)
+        test_verify_app(tmp2, repo_root)
+        test_release_cli(tmp2, repo_root)
     with tempfile.TemporaryDirectory(prefix="reshield_pe_") as tmp3:
         test_pe_support(tmp3, repo_root)
 

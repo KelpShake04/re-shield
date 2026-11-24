@@ -68,14 +68,15 @@ jobs:
           call "%VSDIR%\VC\Auxiliary\Build\vcvars64.bat"
           set CFLAGS=/nologo /std:c11 /O2 /W3 /WX /DRESHIELD_ALLOW_UNSEALED /I include
           set TFLAGS=%CFLAGS% /D_CRT_SECURE_NO_WARNINGS /D_CRT_NONSTDC_NO_WARNINGS
-          cl %CFLAGS% /c /Fo:build\lib\ src\sha256.c src\integrity_common.c src\integrity_windows.c src\file_windows.c src\manifest.c src\attestation_windows.c src\reshield.c || exit /b 1
-          lib /nologo /OUT:build\reshield.lib build\lib\sha256.obj build\lib\integrity_common.obj build\lib\integrity_windows.obj build\lib\file_windows.obj build\lib\manifest.obj build\lib\attestation_windows.obj build\lib\reshield.obj || exit /b 1
+          cl %CFLAGS% /c /Fo:build\lib\ src\sha256.c src\integrity_common.c src\integrity_windows.c src\file_windows.c src\manifest.c src\attestation_windows.c src\reshield.c src\verify_app.c || exit /b 1
+          lib /nologo /OUT:build\reshield.lib build\lib\sha256.obj build\lib\integrity_common.obj build\lib\integrity_windows.obj build\lib\file_windows.obj build\lib\manifest.obj build\lib\attestation_windows.obj build\lib\reshield.obj build\lib\verify_app.obj || exit /b 1
           cl %CFLAGS% /Fo:build\ examples\integrity_demo.c build\reshield.lib /Fe:build\integrity_demo.exe /link /INCREMENTAL:NO || set FAIL=1
           cl %CFLAGS% /Fo:build\ examples\sample_game.c build\reshield.lib /Fe:build\sample_game.exe /link /INCREMENTAL:NO || set FAIL=1
           cl %TFLAGS% /Fo:build\ tests\test_integrity.c build\reshield.lib /Fe:build\test_integrity.exe /link /INCREMENTAL:NO || set FAIL=1
           cl %TFLAGS% /Fo:build\ tests\test_manifest.c build\reshield.lib /Fe:build\test_manifest.exe /link /INCREMENTAL:NO || set FAIL=1
           cl %TFLAGS% /Fo:build\ tests\test_runtime.c build\reshield.lib /Fe:build\test_runtime.exe /link /INCREMENTAL:NO || set FAIL=1
           cl %TFLAGS% /Fo:build\ tests\test_wx.c build\reshield.lib /Fe:build\test_wx.exe /link /INCREMENTAL:NO || set FAIL=1
+          cl %TFLAGS% /Fo:build\ tests\test_verify_app.c build\reshield.lib /Fe:build\test_verify_app.exe /link /INCREMENTAL:NO || set FAIL=1
           cl %TFLAGS% /Fo:build\ tests\test_codesign_toctou_windows.c build\reshield.lib /Fe:build\test_codesign_toctou_windows.exe /link /INCREMENTAL:NO || set FAIL=1
           if defined FAIL exit /b 1
 
@@ -204,6 +205,34 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "verify_release failed" }
           .\build\sample_game_sealed.exe build\sample_assets.manifest examples\assets STAGE-1-CLEAR-2026
           if ($LASTEXITCODE -ne 0) { throw "sealed sample_game exit=$LASTEXITCODE" }
+
+      # reshield_verify_app: manifest and assets are found next to the EXE even when the CWD is elsewhere.
+      # Exit code = 10 + status: OK=0 ASSET_TAMPERED=6 MANIFEST_IO=8.
+      - name: verify_app resolves paths next to the EXE (GetModuleFileNameW)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          New-Item -ItemType Directory -Force build\va, build\va_cwd | Out-Null
+          Copy-Item -Recurse examples\assets build\va\assets
+          python tools\gen_manifest.py build\va\assets -o build\va\vapp.manifest
+          if ($LASTEXITCODE -ne 0) { throw "gen_manifest failed" }
+          Copy-Item build\test_verify_app.exe build\va\vapp.exe
+          python tools\seal_binary.py build\va\vapp.exe --manifest build\va\vapp.manifest --build-id 9
+          if ($LASTEXITCODE -ne 0) { throw "seal failed" }
+          $exe = Resolve-Path build\va\vapp.exe
+          Push-Location build\va_cwd
+          function Run([int]$want, [string]$what) {
+            $out = & $exe vapp.manifest assets 2>&1 | Out-String
+            Write-Host $out
+            if ($LASTEXITCODE -ne $want) { throw "$what : expected exit $want, got $LASTEXITCODE" }
+          }
+          Run 10 "sealed EXE run from another CWD"
+          Add-Content -Path ..\va\assets\stage1.cfg -Value "x" -NoNewline
+          Run 16 "tampered asset"
+          Remove-Item ..\va\vapp.manifest
+          Run 18 "missing manifest"
+          Pop-Location
+          exit 0  # the last native call exited non-zero on purpose; every real failure above throws
 
   # Measured 2026-11-24: an MSVC-built EXE has 0 base relocations inside .text and seals fine.
   # Kept as a probe: it builds with cl, prints pe_probe/dumpbin output, and uploads them.

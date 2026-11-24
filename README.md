@@ -82,16 +82,30 @@ python3 tools/seal_binary.py app --build-id 1
 
 On macOS this prints `UNSEALED` first, then `OK` after sealing. On Linux drop the `-framework` flags.
 
-Release order matters. Every step after sealing must leave the code section unchanged:
+Release order matters: link, `strip`, seal, sign, verify. One command runs it in that order on the final executable (in place):
+
+```bash
+python3 tools/reshield_release.py dist/game --assets dist/assets --strip              # writes dist/game.manifest
+python3 tools/reshield_release.py dist/game --assets dist/assets --sign "Developer ID Application: Me (TEAMID)"   # macOS
+python3 tools/reshield_release.py dist/game.exe --assets dist/assets --sign-cmd "signtool sign /fd sha256 /a {}"  # any signer
+```
+
+It refuses a Mach-O that is already signed with a real identity, because sealing rewrites the binary and the signature would be lost. Seal first, sign last. `seal_binary.py` refuses it too (linker-signed and ad-hoc binaries are fine). The manual steps are:
 
 1. Link, then `strip`.
-2. `python3 tools/seal_binary.py app --build-id N` (add `--manifest game.manifest` when you ship assets; create it first with `python3 tools/gen_manifest.py assets -o game.manifest`).
+2. `python3 tools/gen_manifest.py assets -o game.manifest`, then `python3 tools/seal_binary.py app --manifest game.manifest --build-id N` (omit `--manifest` if you ship no assets).
 3. OS code signing (Developer ID, Authenticode). Signing does not change the sealed code hash. On macOS `seal_binary.py` applies an ad-hoc signature; sign again for distribution.
 4. In CI: `python3 tools/verify_release.py app --manifest game.manifest --assets assets`.
 
 Ship the manifest file with the binary. Its root hash is sealed in the binary, so changing the manifest gives `MANIFEST_MISMATCH`.
 
-To check assets at startup, add to the config before calling `reshield_verify()`:
+To check assets at startup, call `reshield_verify_app()`. It checks code and manifest, and resolves both paths against the directory of the running executable, so it still works when a launcher or shortcut changes the working directory:
+
+```c
+if (reshield_verify_app("game.manifest", "assets", NULL, NULL, &report) != RESHIELD_OK) { /* handle */ }
+```
+
+Or set it up yourself with `reshield_verify()` (paths then relative to the current directory):
 
 ```c
 cfg.enabled_checks |= RESHIELD_CHECK_MANIFEST;
@@ -99,12 +113,15 @@ cfg.manifest_path  = "game.manifest";
 cfg.asset_base_dir = "assets";
 ```
 
+A manifest or asset path that cannot be opened is reported as `MANIFEST_IO_ERROR` (`RESHIELD_ERR_MANIFEST_IO`, value 8), not `INTERNAL_ERROR`, so a wrong path is not mistaken for an internal fault. Before this change it was `INTERNAL_ERROR`.
+
 If you load an asset after verifying it by path, the file can change in between (TOCTOU). Read the file into memory, check it with `reshield_verify_buffer()`, then use that buffer. See `examples/sample_game.c` for a complete program.
 
 ## Development and release builds
 
-- `-DRESHIELD_DISABLE` turns `reshield_verify()` and the other runtime checks into no-ops. It must be set when the **library** is compiled (e.g. `make CFLAGS="-std=c11 -O2 -DRESHIELD_DISABLE"` after `make clean`); adding it only to your app's flags changes nothing. Use it while debugging, because a breakpoint patches `.text` and gives `CODE_TAMPERED`. `reshield_verify_buffer()` still compares hashes in this build, because it is app logic, not an integrity check.
-- `cfg.allow_unsealed = 1` lets a binary that was never sealed pass. It works only if the library was compiled with `-DRESHIELD_ALLOW_UNSEALED`. This repository's Makefile turns that on by default. For a release build use `make ALLOW_UNSEALED=0`.
+- Development and release libraries are built in separate directories: `make lib` gives `build/libreshield.a` (development), `make ALLOW_UNSEALED=0 lib` gives `build/release/libreshield.a`. Switching never reuses the other's objects. `-std=c11`, `-Iinclude` and the `ALLOW_UNSEALED` define are always applied, so `make CFLAGS=-O0` or a parent make cannot drop them.
+- `-DRESHIELD_DISABLE` turns `reshield_verify()` and the other runtime checks into no-ops. It must be set when the **library** is compiled (e.g. `make CFLAGS="-O2 -DRESHIELD_DISABLE"` after `make clean`); adding it only to your app's flags changes nothing. Use it while debugging, because a breakpoint patches `.text` and gives `CODE_TAMPERED`. `reshield_verify_buffer()` still compares hashes in this build, because it is app logic, not an integrity check.
+- `cfg.allow_unsealed = 1` lets a binary that was never sealed pass. It works only if the library was compiled with `-DRESHIELD_ALLOW_UNSEALED`. This repository's Makefile turns that on by default. For a release build use `make ALLOW_UNSEALED=0 lib` and link `build/release/libreshield.a`.
 - If the field is set on a library built without the macro, `reshield_verify()` returns `INTERNAL_ERROR`. It is neither ignored nor bypassed.
 - Never ship a build with `RESHIELD_ALLOW_UNSEALED`. An attacker could then skip the code and manifest checks by changing the sealed byte in the record.
 

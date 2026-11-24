@@ -13,6 +13,7 @@ import argparse
 import dataclasses
 import hashlib
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -356,6 +357,36 @@ def find_integrity_record_offset(data: bytes) -> int:
     return matches[0]
 
 
+def macho_signature_blocker(codesign_info: str) -> str | None:
+    """Why re-signing ad-hoc after sealing would destroy an existing signature, or None if it is safe.
+
+    `codesign -dvv` output. Safe: unsigned, or ad-hoc without hardened runtime (the linker signs
+    arm64 binaries ad-hoc by default). Anything not recognisably ad-hoc is treated as a real
+    signature (fail closed)."""
+    if "code object is not signed at all" in codesign_info:
+        return None
+    if "Signature=adhoc" not in codesign_info:
+        return "it carries a non-ad-hoc code signature (Developer ID or other identity)"
+    flags = re.search(r"flags=0x[0-9a-f]+\(([^)]*)\)", codesign_info)
+    if flags and "runtime" in flags.group(1).split(","):
+        return "it has the hardened runtime flag, which the ad-hoc re-sign would drop"
+    return None
+
+
+def check_macho_resignable(path: str) -> None:
+    proc = subprocess.run(["codesign", "-dvv", path], capture_output=True, text=True)
+    info = proc.stderr + proc.stdout
+    if proc.returncode != 0 and "code object is not signed at all" not in info:
+        raise ValueError(f"codesign -dvv failed for {path}: {info.strip()}")
+    why = macho_signature_blocker(info)
+    if why:
+        raise ValueError(
+            f"{path} is already signed and {why}. Sealing rewrites the binary and the ad-hoc "
+            "re-sign would replace that signature. Seal first, then sign: seal an unsigned (or "
+            "linker-signed) build, or pass --no-codesign and sign the sealed file yourself."
+        )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Seal a binary with code + optional manifest SHA-256")
     parser.add_argument("binary", help="Path to the compiled Mach-O, ELF or PE32+ executable")
@@ -402,6 +433,8 @@ def main() -> int:
 
     if fmt_name.startswith("pe64"):
         check_pe_sealable(bytes(buf), rec_off)
+    if sys.platform == "darwin" and not args.no_codesign and fmt_name.startswith("macho"):
+        check_macho_resignable(args.binary)
 
     packed = struct.pack(
         RECORD_FMT,
