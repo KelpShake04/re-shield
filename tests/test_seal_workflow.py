@@ -263,6 +263,16 @@ def test_gen_manifest_exclude(tmpdir: str) -> None:
     r = run_cmd([sys.executable, os.path.join(os.path.dirname(__file__), "..", "tools", "gen_manifest.py"),
                  root, "-o", os.path.join(tmpdir, "gx_cli.manifest"), "--exclude", "nul.txt", "--exclude", "*.pdb"])
     assert r.returncode == 0 and "2 excluded" in r.stdout and "3 asset(s)" in r.stdout, r
+    r = run_cmd([sys.executable, os.path.join(os.path.dirname(__file__), "..", "tools", "gen_manifest.py"),
+                 root, "-o", os.path.join(tmpdir, "gx_warn.manifest"), "--exclude", "nul.txt", "--exclude", "*.pdb", "--exclude", "./a.cfg",
+                 "--exclude", "sub\\c.cfg"])
+    assert r.returncode == 0, r  # a pattern that matches nothing never changes the exit code
+    assert "--exclude './a.cfg' matched no file" in r.stderr and "--exclude 'sub\\\\c.cfg' matched no file" in r.stderr, r
+    assert "'*.pdb' matched no file" not in r.stderr, r
+    r = run_cmd([sys.executable, os.path.join(os.path.dirname(__file__), "..", "tools", "gen_manifest.py"),
+                 root, "-o", os.path.join(tmpdir, "gx_warn2.manifest"), "--exclude", "nul.txt"])
+    assert r.returncode == 0 and "matched no file" not in r.stderr, r
+    print("PASS: gen_manifest warns on stderr about an --exclude pattern that matches no file (exit code unchanged)")
     print("PASS: gen_manifest --exclude (fnmatchcase on relative POSIX paths, repeatable, before the path checks)")
 
 
