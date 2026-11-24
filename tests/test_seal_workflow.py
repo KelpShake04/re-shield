@@ -28,6 +28,7 @@ import seal_binary  # noqa: E402
 import gen_manifest as gen_manifest_mod  # noqa: E402
 import verify_release as verify_release_mod  # noqa: E402
 import manifest_path as manifest_path_mod  # noqa: E402
+import manifest_policy as manifest_policy_mod  # noqa: E402
 
 
 def find_symbol_file_offset(binary_path: str, data: bytes, symbol: str) -> int:
@@ -785,6 +786,232 @@ def test_release_cli(tmpdir: str, repo_root: str) -> None:
     print("PASS: reshield_release refuses an already-signed Mach-O without touching it")
 
 
+def test_strict_manifest(tmpdir: str, repo_root: str) -> None:
+    """Manifest v2 / strict mode: gen_manifest, verify_release and the C runtime agree."""
+    seal_tool = os.path.join(repo_root, "tools", "seal_binary.py")
+    gen_tool = os.path.join(repo_root, "tools", "gen_manifest.py")
+    release_tool = os.path.join(repo_root, "tools", "reshield_release.py")
+    app = os.path.join(tmpdir, "st_app")
+    assets = os.path.join(app, "assets")
+    shutil.copytree(os.path.join(repo_root, "examples", "assets"), assets)
+    manifest = os.path.join(app, "vapp.manifest")
+    cwd = os.path.join(tmpdir, "st_cwd")
+    os.makedirs(cwd)
+
+    def gen(*extra: str, out: str = manifest) -> subprocess.CompletedProcess[str]:
+        return run_cmd([sys.executable, gen_tool, assets, "-o", out, *extra])
+
+    def c_run() -> subprocess.CompletedProcess[str]:
+        """Seals a fresh test_verify_app against `manifest` and runs it (exit = 10 + status)."""
+        exe = os.path.join(app, "vapp")
+        shutil.copy2(os.path.join(repo_root, "build", "test_verify_app"), exe)
+        subprocess.run([sys.executable, seal_tool, exe, "--manifest", manifest, "--build-id", "9"],
+                       check=True, stdout=subprocess.DEVNULL)
+        return subprocess.run([exe, "vapp.manifest", "assets"], capture_output=True, text=True, cwd=cwd)
+
+    def py_verify() -> tuple[bool, str]:
+        ok, _n, msg = verify_release_mod.verify_manifest_entries(manifest, assets)
+        return ok, msg
+
+    def put(rel: str, data: bytes = b"x") -> str:
+        p = os.path.join(assets, *rel.split("/"))
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "wb") as f:
+            f.write(data)
+        return p
+
+    # Header written by --strict: version line, default allow list, then the sorted entries.
+    r = gen("--strict")
+    assert r.returncode == 0, r
+    with open(manifest, encoding="utf-8") as f:
+        lines = f.read().split("\n")
+    assert lines[0] == "#reshield-manifest v2 strict", lines[:3]
+    for g in (".DS_Store", "*/.DS_Store", "Thumbs.db", "*/Thumbs.db", "desktop.ini", "*/desktop.ini"):
+        assert f"#allow {g}" in lines, g
+    policy, entries = manifest_policy_mod.parse_manifest(open(manifest, "rb").read())
+    assert policy.strict and len(entries) == 1 and entries[0][2] == "stage1.cfg", (policy, entries)
+    assert py_verify()[0] and c_run().returncode == 10, "clean strict directory must pass in both"
+
+    # An unlisted file: Python and C both reject, C reports ASSET_EXTRA (19) and names the file.
+    put("evil.dll")
+    ok, msg = py_verify()
+    assert not ok and "evil.dll" in msg, msg
+    r = c_run()
+    assert r.returncode == 19 and "ASSET_EXTRA" in r.stdout and "asset=evil.dll" in r.stdout, r
+    os.unlink(os.path.join(assets, "evil.dll"))
+    put("sub/dir/proxy.dll")
+    r = c_run()
+    assert r.returncode == 19 and "asset=sub/dir/proxy.dll" in r.stdout, r
+    shutil.rmtree(os.path.join(assets, "sub"))
+    print("PASS: strict manifest: unlisted file (also nested) is ASSET_EXTRA in the runtime and rejected by verify_release")
+
+    # Default allow list: OS litter passes at any depth; other dotfiles are extra and gen warns.
+    put(".DS_Store")
+    put("sub/Thumbs.db")
+    put("sub/deeper/desktop.ini")
+    r = gen("--strict")
+    assert r.returncode == 0 and "warning" not in r.stdout, r
+    assert py_verify()[0] and c_run().returncode == 10, ".DS_Store / Thumbs.db / desktop.ini are allowed by default"
+    _p, entries = manifest_policy_mod.parse_manifest(open(manifest, "rb").read())
+    assert [e[2] for e in entries] == ["stage1.cfg"], f"OS litter must not be listed: {entries}"
+    put(".x.dll")
+    r = gen("--strict")
+    assert r.returncode == 0 and "dotfile skipped but not allowed" in r.stdout and ".x.dll" in r.stdout, r
+    r = c_run()
+    assert r.returncode == 19 and "asset=.x.dll" in r.stdout, r
+    r = gen("--strict", "--allow", ".x.*")
+    assert "warning" not in r.stdout and py_verify()[0] and c_run().returncode == 10, r
+    shutil.rmtree(os.path.join(assets, "sub"))
+    for n in (".DS_Store", ".x.dll"):
+        os.unlink(os.path.join(assets, n))
+    print("PASS: strict manifest: default allow list for OS litter, dotfile warning, --allow")
+
+    # --allow: sealed with the manifest; user saves in the asset dir pass, anything else is extra.
+    put("saves/slot1.sav")
+    gen("--strict", "--allow", "saves/*")
+    assert py_verify()[0] and c_run().returncode == 10
+    put("evil.dll")
+    assert c_run().returncode == 19
+    os.unlink(os.path.join(assets, "evil.dll"))
+    shutil.rmtree(os.path.join(assets, "saves"))
+    r = gen("--allow", "saves/*")
+    assert r.returncode != 0, "--allow without --strict must be refused"
+    for bad in ("/abs", "../x", "a/../b", "a\\b", ""):
+        r = gen("--strict", "--allow", bad)
+        assert r.returncode != 0 and "Invalid --allow glob" in r.stderr, (bad, r)
+    r = gen("--strict", *sum((["--allow", f"g{i}"] for i in range(60)), []))
+    assert r.returncode != 0 and "Too many allow globs" in r.stderr, r
+    print("PASS: gen_manifest --allow needs --strict, rejects bad globs and more than 64 allow lines")
+
+    # Manifest inside the asset dir is allowed automatically in strict mode (and not listed).
+    inside = os.path.join(assets, "game.manifest")
+    r = gen("--strict", out=inside)
+    assert r.returncode == 0, r
+    text = open(inside, encoding="utf-8").read()
+    assert "#allow game.manifest\n" in text and " game.manifest\n" not in text.replace("#allow game.manifest\n", "")
+    ok, _n, msg = verify_release_mod.verify_manifest_entries(inside, assets)
+    assert ok, msg
+    os.unlink(inside)
+    print("PASS: strict manifest stored inside the asset dir allows itself and is not listed")
+
+    # Python and the C runtime must agree on every header (incl. the section 13 '#' rule).
+    h = "#reshield-manifest v2 strict\n"
+    digest = hashlib.sha256(open(os.path.join(assets, "stage1.cfg"), "rb").read()).hexdigest()
+    size = os.path.getsize(os.path.join(assets, "stage1.cfg"))
+    entry = f"{digest} {size} stage1.cfg\n"
+    header_cases = [
+        ("", True), ("# comment\n", True), ("#\n# c\n", True), ("\n", True),
+        (h, True), ("#reshield-manifest v2\n", True), (h + "#allow *.log\n", True),
+        ("# c\n" + h + "# c\n#allow a\n", True), (h + "#allow v1..2*\n", True),
+        ("#reshield-manifest v3\n", False), ("#reshield-manifest v2 loose\n", False),
+        ("#reshield-manifest v2 strict \n", False), ("#reshield-manifest\n", False),
+        (h + h, False), (h + "#frob\n", False), (h + "#Allow x\n", False), (h + "#allow\n", False),
+        (h + "#allow \n", False), (h + "#allow /abs\n", False), (h + "#allow ../x\n", False),
+        (h + "#allow a/../b\n", False), (h + "#allow a/..\n", False), (h + "#allow a\\b\n", False),
+        ("#allow x\n" + h, False), ("#allow x\n", False),
+        (h + "".join(f"#allow g{i}\n" for i in range(64)), True),
+        (h + "".join(f"#allow g{i}\n" for i in range(65)), False),
+        (h + "#allow " + "g" * 255 + "\n", True), (h + "#allow " + "g" * 256 + "\n", False),
+    ]
+    for header, want in header_cases:
+        with open(manifest, "w", encoding="utf-8", newline="") as f:
+            f.write(header + entry)
+        py_ok, py_msg = py_verify()
+        c_rc = c_run().returncode
+        assert py_ok == want and (c_rc == 10) == want and (want or c_rc == 18), \
+            f"header {header!r}: python={py_ok} ({py_msg}) C exit={c_rc}, want ok={want}"
+    for text in (entry + h, entry + "# late comment\n", entry + "\n#\n"):
+        with open(manifest, "w", encoding="utf-8", newline="") as f:
+            f.write(text)
+        c_rc = c_run().returncode
+        assert not py_verify()[0] and c_rc == 18, f"'#' after the first entry must be rejected: {text!r} ({c_rc})"
+    print(f"PASS: verify_release and the C runtime agree on {len(header_cases) + 3} manifest header cases")
+
+    # Glob semantics: Python matcher and C matcher give the same verdict.
+    glob_cases = [
+        ("*.log", "x.log", True), ("*.log", "a/b/x.log", True), ("*.LOG", "x.log", False),
+        ("a?c", "abc", True), ("a?c", "ac", False), ("a?c", "a/c", True), ("*/x", "x", False),
+        ("*/x", "d/x", True), ("a*b*c", "aXXbYYc", True), ("a*b*c", "aXXbYY", False),
+        ("*", "any/thing/deep", True), ("sav", "sav/x", False), ("sav*", "sav/x/y", True),
+        ("x*", "xx", True), ("**", "q", True), ("a*a*a*a*b", "aaaaaaaaaaaaaaaaaaaaaaaaaaaac", False),
+    ]
+    for glob, rel, want in glob_cases:
+        assert manifest_policy_mod.glob_match(glob, rel) == want, f"python glob {glob!r} vs {rel!r}"
+        shutil.rmtree(os.path.join(assets, "gl"), ignore_errors=True)
+        for stale in os.listdir(assets):
+            if stale != "stage1.cfg":
+                p = os.path.join(assets, stale)
+                shutil.rmtree(p) if os.path.isdir(p) else os.unlink(p)
+        put(rel)
+        with open(manifest, "w", encoding="utf-8", newline="") as f:
+            f.write(f"{h}#allow {glob}\n{entry}")
+        py_ok, _msg = py_verify()
+        c_rc = c_run().returncode
+        assert py_ok == want and c_rc == (10 if want else 19), \
+            f"glob {glob!r} vs {rel!r}: want match={want}, python={py_ok}, C exit={c_rc}"
+    for stale in os.listdir(assets):
+        if stale != "stage1.cfg":
+            p = os.path.join(assets, stale)
+            shutil.rmtree(p) if os.path.isdir(p) else os.unlink(p)
+    print(f"PASS: allow glob matcher agrees between Python and the C runtime ({len(glob_cases)} cases)")
+
+    # Symlinks are items (not followed) in both implementations.
+    os.symlink("stage1.cfg", os.path.join(assets, "link.cfg"))
+    os.symlink(".", os.path.join(assets, "selfdir"))
+    r = gen("--strict")
+    assert r.returncode == 0 and "symlinked directory not traversed" in r.stdout, r
+    ok, msg = py_verify()
+    assert not ok and "selfdir" in msg, msg
+    r = c_run()
+    assert r.returncode == 19 and "asset=" in r.stdout, r
+    os.unlink(os.path.join(assets, "selfdir"))
+    os.unlink(os.path.join(assets, "link.cfg"))
+    print("PASS: strict manifest: symlinks (also to directories) are extra items, never followed")
+
+    # reshield_release.py: the binary to seal may live inside --assets (excluded from the manifest,
+    # allowed automatically with --strict); --allow is passed through.
+    rel = os.path.join(tmpdir, "st_rel")
+    rel_assets = os.path.join(rel, "assets")
+    shutil.copytree(os.path.join(repo_root, "examples", "assets"), rel_assets)
+    sample = os.path.join(repo_root, "build", "sample_game")
+    exe = os.path.join(rel_assets, "game")
+    shutil.copy2(sample, exe)
+    r = run_cmd([sys.executable, release_tool, exe, "--assets", rel_assets, "--build-id", "6"])
+    assert r.returncode == 0, f"binary inside --assets must release (non-strict): {r}"
+    with open(os.path.join(rel_assets, "game.manifest"), encoding="utf-8") as f:
+        listed = [ln.split(" ", 2)[2] for ln in f.read().splitlines() if ln and not ln.startswith("#")]
+    assert listed == ["stage1.cfg"], f"binary and manifest must not be listed: {listed}"
+    r = run_cmd([exe, os.path.join(rel_assets, "game.manifest"), rel_assets, "STAGE-1-CLEAR-2026"])
+    assert r.returncode == 0 and "STAGE UNLOCKED" in r.stdout, r
+
+    rel2 = os.path.join(tmpdir, "st_rel2")
+    rel2_assets = os.path.join(rel2, "assets")
+    shutil.copytree(os.path.join(repo_root, "examples", "assets"), rel2_assets)
+    exe2 = os.path.join(rel2_assets, "game")
+    shutil.copy2(sample, exe2)
+    r = run_cmd([sys.executable, release_tool, exe2, "--assets", rel2_assets, "--strict", "--allow", "saves/*",
+                 "--build-id", "6"])
+    assert r.returncode == 0, f"strict release with binary inside --assets: {r}"
+    m2 = os.path.join(rel2_assets, "game.manifest")
+    text = open(m2, encoding="utf-8").read()
+    assert text.startswith("#reshield-manifest v2 strict\n") and "#allow game\n" in text \
+        and "#allow game.manifest\n" in text and "#allow saves/*\n" in text, text
+    r = run_cmd([exe2, m2, rel2_assets, "STAGE-1-CLEAR-2026"])
+    assert r.returncode == 0 and "STAGE UNLOCKED" in r.stdout, f"sealed strict release must run: {r}"
+    os.makedirs(os.path.join(rel2_assets, "saves"))
+    with open(os.path.join(rel2_assets, "saves", "slot1.sav"), "wb") as f:
+        f.write(b"s")
+    r = run_cmd([exe2, m2, rel2_assets, "STAGE-1-CLEAR-2026"])
+    assert r.returncode == 0, f"#allow saves/* must admit user saves: {r}"
+    with open(os.path.join(rel2_assets, "evil.dll"), "wb") as f:
+        f.write(b"MZ")
+    r = run_cmd([exe2, m2, rel2_assets, "STAGE-1-CLEAR-2026"])
+    assert r.returncode == 19 and "ASSET_EXTRA" in r.stderr and "asset=evil.dll" in r.stderr, r
+    r = run_cmd([sys.executable, release_tool, exe2, "--allow", "x"])
+    assert r.returncode != 0, "--allow without --strict must be refused by reshield_release"
+    print("PASS: reshield_release --strict/--allow: binary inside --assets is excluded and allowed, drop-in DLL is ASSET_EXTRA")
+
+
 def main() -> int:
     repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     integrity_demo = os.path.join(repo_root, "build", "integrity_demo")
@@ -888,6 +1115,7 @@ def main() -> int:
         test_seal_tool_and_release_cases(tmp2, repo_root, a2)
         test_macho_signature_policy(tmp2, repo_root)
         test_verify_app(tmp2, repo_root)
+        test_strict_manifest(tmp2, repo_root)
         test_release_cli(tmp2, repo_root)
     with tempfile.TemporaryDirectory(prefix="reshield_pe_") as tmp3:
         test_pe_support(tmp3, repo_root)

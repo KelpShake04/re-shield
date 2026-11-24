@@ -7,6 +7,7 @@ Run it on the final linked executable, in place:
     python3 tools/reshield_release.py dist/game --assets dist/assets --strip
     python3 tools/reshield_release.py dist/game --assets dist/assets --sign "Developer ID Application: Me (TEAMID)"
     python3 tools/reshield_release.py dist/game.exe --assets dist/assets --sign-cmd "signtool sign /fd sha256 /a {}"
+    python3 tools/reshield_release.py dist/game --assets dist/assets --strict --allow "saves/*"
 
 Sealing rewrites the binary, so signing must come after it (and strip before it). This tool only
 calls the existing tools (gen_manifest.py, seal_binary.py, verify_release.py) plus strip/codesign,
@@ -47,6 +48,11 @@ def main() -> int:
     p = argparse.ArgumentParser(description="strip -> manifest -> seal -> sign -> verify")
     p.add_argument("binary", help="Final linked executable (not an .app bundle); modified in place")
     p.add_argument("--assets", help="Asset directory to bind (a manifest is generated from it)")
+    p.add_argument("--strict", action="store_true",
+                   help="Strict manifest: the runtime reports ASSET_EXTRA for any file under --assets "
+                        "that is not listed or --allow'ed (see docs/integrity-verification.md)")
+    p.add_argument("--allow", action="append", default=[], metavar="GLOB",
+                   help="With --strict: path glob exempt from the scan, relative to --assets; repeatable")
     p.add_argument("--manifest-out",
                    help="Manifest output path (default: <binary dir>/<binary name without extension>.manifest)")
     p.add_argument("--build-id", type=int, default=int(os.environ.get("BUILD_NUMBER") or 1),
@@ -59,6 +65,8 @@ def main() -> int:
     p.add_argument("--sign-cmd", help="Signing command run after sealing instead of the macOS codesign; "
                                       "{} is replaced by the binary path (e.g. signtool)")
     args = p.parse_args()
+    if args.allow and not args.strict:
+        p.error("--allow needs --strict")
 
     binary = args.binary
     if os.path.isdir(binary):
@@ -79,7 +87,15 @@ def main() -> int:
         manifest = args.manifest_out or os.path.join(
             os.path.dirname(os.path.abspath(binary)),
             os.path.splitext(os.path.basename(binary))[0] + ".manifest")
-        run([sys.executable, os.path.join(TOOLS, "gen_manifest.py"), args.assets, "-o", manifest])
+        gen = [sys.executable, os.path.join(TOOLS, "gen_manifest.py"), args.assets, "-o", manifest,
+               # The binary is rewritten by sealing, so it must not be listed (its pre-seal hash
+               # would fail verification); with --strict gen_manifest allows it automatically.
+               "--exclude", binary]
+        if args.strict:
+            gen.append("--strict")
+        for g in args.allow:
+            gen += ["--allow", g]
+        run(gen)
 
     seal = [sys.executable, os.path.join(TOOLS, "seal_binary.py"), binary,
             "--build-id", str(args.build_id), "--no-codesign"]
