@@ -49,6 +49,57 @@ jobs:
       - run: make clean && make all test release-demo
       - run: for f in src/*.c; do c++ -x c++ -std=c++11 -fsyntax-only -Wall -Wextra -Wpedantic -Werror -Iinclude "$f" || exit 1; done
 
+  # The composite action (action.yml) used the way a game's workflow would: `uses: ./`, on a copy of
+  # the build output. Then run the sealed binary like a shipped host, tamper one asset byte, expect a refusal.
+  action-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: make all
+
+      - name: Stage a dist directory from the build output
+        run: |
+          mkdir -p dist
+          cp build/sample_game dist/game
+          cp -R examples/assets dist/assets
+          echo "debug symbols" > dist/assets/game.pdb
+
+      - name: Seal with the action
+        id: seal
+        uses: ./
+        with:
+          binary: dist/game
+          assets: dist/assets
+          exclude: |
+            *.pdb
+          strip: "true"
+
+      - name: Sealed binary runs, manifest honors exclude, build id output matches
+        env:
+          MANIFEST: ${{ steps.seal.outputs.manifest }}
+          BUILD_ID: ${{ steps.seal.outputs.build-id }}
+          RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          test "$BUILD_ID" = "$RUN_NUMBER"
+          test -f "$MANIFEST"
+          cat "$MANIFEST"
+          ! grep -q "game.pdb" "$MANIFEST"
+          ./dist/game "$MANIFEST" dist/assets STAGE-1-CLEAR-2026 | tee /tmp/run.out
+          grep -q "STAGE UNLOCKED (build_id=$RUN_NUMBER)" /tmp/run.out
+
+      - name: One tampered asset byte is refused
+        env:
+          MANIFEST: ${{ steps.seal.outputs.manifest }}
+        run: |
+          printf 'x' >> dist/assets/stage1.cfg
+          rc=0; ./dist/game "$MANIFEST" dist/assets STAGE-1-CLEAR-2026 || rc=$?
+          echo "rc=$rc"
+          test "$rc" -ne 0
+
   # Windows x64 (MSVC) runtime backend: builds with cl (no make on Windows), seals a copy of the
   # demo EXE, runs it, tampers .text and checks detection. Skipped on purpose: the POSIX-only
   # parts (tests/test_seal_workflow.py needs nm and POSIX paths, the RESHIELD_DISABLE variants
@@ -250,6 +301,36 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "verify_release failed" }
           .\build\sample_game_sealed.exe build\sample_assets.manifest examples\assets STAGE-1-CLEAR-2026
           if ($LASTEXITCODE -ne 0) { throw "sealed sample_game exit=$LASTEXITCODE" }
+
+      # The same action on the MSVC-built EXE (Git Bash step shell; python3 may not exist there).
+      - name: Stage a dist directory for the action
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force build\act | Out-Null
+          Copy-Item build\sample_game.exe build\act\game.exe
+          Copy-Item -Recurse examples\assets build\act\assets
+
+      - name: Seal with the action
+        id: seal
+        uses: ./
+        with:
+          binary: build/act/game.exe
+          assets: build/act/assets
+          python: python
+
+      - name: Action-sealed EXE runs, then a tampered asset is refused
+        shell: pwsh
+        env:
+          MANIFEST: ${{ steps.seal.outputs.manifest }}
+        run: |
+          $ErrorActionPreference = 'Continue'
+          Write-Host "manifest output: $env:MANIFEST"
+          .\build\act\game.exe $env:MANIFEST build\act\assets STAGE-1-CLEAR-2026
+          if ($LASTEXITCODE -ne 0) { throw "action-sealed EXE exit=$LASTEXITCODE" }
+          Add-Content -Path build\act\assets\stage1.cfg -Value "x" -NoNewline
+          .\build\act\game.exe $env:MANIFEST build\act\assets STAGE-1-CLEAR-2026
+          if ($LASTEXITCODE -eq 0) { throw "tampered asset was accepted" }
+          exit 0  # the last native call failed on purpose
 
       # reshield_verify_app: manifest and assets are found next to the EXE even when the CWD is elsewhere.
       # Exit code = 10 + status: OK=0 ASSET_TAMPERED=6 MANIFEST_IO=8.
