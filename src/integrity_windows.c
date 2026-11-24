@@ -5,7 +5,10 @@
 #include <string.h>
 #include <windows.h>
 
-/* Locates .text of the running EXE in its mapped image. Must select exactly what
+extern const void *reshield_internal_record_anchor(void);
+
+/* Locates .text, in its mapped image, of the module that holds the integrity record: the EXE for
+ * a statically linked program, the DLL itself when re-shield is linked into one. Must select exactly what
  * tools/seal_binary.py (parse_pe64/pe_find_text) hashes: the single section named
  * ".text", VirtualSize bytes, VirtualSize <= SizeOfRawData, not writable. In memory the
  * bytes equal the file bytes because the sealer refuses an image with base relocations
@@ -20,10 +23,14 @@ int reshield_platform_get_code_section(const uint8_t **out_ptr, uint64_t *out_si
         return -1;
     }
 
-    const uint8_t *base = (const uint8_t *)GetModuleHandleW(NULL);
-    if (base == NULL) {
+    HMODULE module = NULL;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            (LPCWSTR)reshield_internal_record_anchor(), &module) ||
+        module == NULL) {
         return -1;
     }
+    const uint8_t *base = (const uint8_t *)module;
 
     const IMAGE_DOS_HEADER *dos = (const IMAGE_DOS_HEADER *)base;
     if (dos->e_magic != IMAGE_DOS_SIGNATURE) {

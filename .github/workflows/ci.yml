@@ -91,6 +91,41 @@ jobs:
           }
           exit $bad
 
+      # Module mode: re-shield linked into a DLL (reshield.def exports) is verified by an unsealed host
+      # EXE that links no re-shield code. Release flavor (no RESHIELD_ALLOW_UNSEALED), like a shipped DLL.
+      - name: Build module-mode DLL and host EXE
+        shell: cmd
+        run: |
+          call "%VSDIR%\VC\Auxiliary\Build\vcvars64.bat"
+          mkdir build\dll
+          set RFLAGS=/nologo /std:c11 /O2 /W3 /WX /I include
+          cl %RFLAGS% /LD /Fo:build\dll\ src\sha256.c src\integrity_common.c src\integrity_windows.c src\file_windows.c src\manifest.c src\attestation_windows.c src\reshield.c src\verify_app.c /Fe:build\reshield.dll /link /DEF:reshield.def /INCREMENTAL:NO || exit /b 1
+          cl %RFLAGS% /D_CRT_SECURE_NO_WARNINGS /Fo:build\ tests\test_module_host.c /Fe:build\test_module_host.exe /link /INCREMENTAL:NO || exit /b 1
+
+      - name: Module mode checks (UNSEALED, OK, tampered)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          function Expect([int]$want, [string]$what, [string]$lib, [string]$text) {
+            $out = & .\build\test_module_host.exe (Resolve-Path $lib) 2>&1 | Out-String
+            Write-Host $out
+            if ($LASTEXITCODE -ne $want) { throw "$what : expected exit $want, got $LASTEXITCODE" }
+            if ($out -notmatch $text) { throw "$what : output does not contain '$text'" }
+          }
+          # reshield_integrity_status_t: OK=0 UNSEALED=1 TAMPERED=2
+          if ([System.Text.Encoding]::Latin1.GetString([System.IO.File]::ReadAllBytes("$PWD\build\test_module_host.exe")).Contains('RSHLDCHK')) { throw "host EXE must not contain an integrity record" }
+          Expect 1 "unsealed release DLL is UNSEALED" build\reshield.dll 'status=UNSEALED'
+          Copy-Item build\reshield.dll build\mod_sealed.dll
+          python tools\seal_binary.py build\mod_sealed.dll --build-id 11
+          if ($LASTEXITCODE -ne 0) { throw "seal_binary failed on the DLL" }
+          python tools\seal_binary.py build\mod_sealed.dll --verify-only
+          if ($LASTEXITCODE -ne 0) { throw "verify-only failed on the DLL" }
+          Expect 0 "sealed DLL verifies OK (host EXE is unsealed)" build\mod_sealed.dll 'status=OK wx=0'
+          python tests\tamper_pe_text.py build\mod_sealed.dll build\mod_tampered.dll
+          if ($LASTEXITCODE -ne 0) { throw "tamper helper failed on the DLL" }
+          Expect 2 "tampered DLL .text is TAMPERED" build\mod_tampered.dll 'status=TAMPERED'
+          exit 0  # the last native call exited 2 on purpose; every real failure above throws
+
       - name: Seal, run, tamper, verify_release (integrity_demo)
         shell: pwsh
         run: |
