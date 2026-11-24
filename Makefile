@@ -46,7 +46,8 @@ LIB_SRCS  = src/sha256.c \
             src/attestation_macos.c \
             src/attestation_linux.c \
             src/attestation_windows.c \
-            src/reshield.c
+            src/reshield.c \
+            src/verify_app.c
 LIB_OBJS  = $(patsubst src/%.c,$(BUILD_DIR)/%.o,$(LIB_SRCS))
 LIB_TARGET = $(BUILD_DIR)/libreshield.a
 
@@ -69,12 +70,13 @@ TEST_MANIFEST_DISABLED  = $(BUILD_DIR)/test_manifest_disabled$(EXE)
 TEST_RUNTIME            = $(BUILD_DIR)/test_runtime$(EXE)
 TEST_RUNTIME_DISABLED   = $(BUILD_DIR)/test_runtime_disabled$(EXE)
 TEST_WX                 = $(BUILD_DIR)/test_wx$(EXE)
+TEST_VERIFY_APP         = $(BUILD_DIR)/test_verify_app$(EXE)
 TEST_NO_ALLOW           = $(BUILD_DIR)/test_no_allow_unsealed$(EXE)
 
 .PHONY: all lib clean test release-demo sanitize fuzz-build fuzz fuzz-pe
 
 all: $(LIB_TARGET) $(DEMO_INTEGRITY) $(SAMPLE_GAME) $(SAMPLE_GAME_SEALED) \
-     $(TEST_INTEGRITY) $(TEST_MANIFEST) $(TEST_RUNTIME) $(TEST_WX)
+     $(TEST_INTEGRITY) $(TEST_MANIFEST) $(TEST_RUNTIME) $(TEST_WX) $(TEST_VERIFY_APP)
 
 lib: $(LIB_TARGET)
 
@@ -122,6 +124,9 @@ $(TEST_MANIFEST_DISABLED): tests/test_manifest.c $(LIB_SRCS) | $(BUILD_DIR)
 $(TEST_WX): tests/test_wx.c $(LIB_TARGET)
 	$(CC) $(CFLAGS) $(RS_CFLAGS) $< $(LIB_TARGET) $(LDFLAGS) -o $@
 
+$(TEST_VERIFY_APP): tests/test_verify_app.c $(LIB_TARGET)
+	$(CC) $(CFLAGS) $(RS_CFLAGS) $< $(LIB_TARGET) $(LDFLAGS) -o $@
+
 $(TEST_RUNTIME): tests/test_runtime.c $(LIB_TARGET)
 	$(CC) $(CFLAGS) $(RS_CFLAGS) $< $(LIB_TARGET) $(LDFLAGS) -o $@
 
@@ -137,7 +142,7 @@ release-demo: $(SAMPLE_GAME_SEALED) $(SAMPLE_MANIFEST)
 
 test: $(TEST_INTEGRITY) $(TEST_INTEGRITY_DISABLED) \
       $(TEST_MANIFEST) $(TEST_MANIFEST_DISABLED) \
-      $(TEST_RUNTIME) $(TEST_RUNTIME_DISABLED) $(TEST_WX) $(TEST_NO_ALLOW) \
+      $(TEST_RUNTIME) $(TEST_RUNTIME_DISABLED) $(TEST_WX) $(TEST_NO_ALLOW) $(TEST_VERIFY_APP) \
       $(DEMO_INTEGRITY) $(DEMO_INTEGRITY_DISABLED) \
       $(SAMPLE_GAME) $(SAMPLE_GAME_SEALED) $(SAMPLE_GAME_DISABLED) $(SAMPLE_MANIFEST)
 	$(RUN) ./$(TEST_INTEGRITY)

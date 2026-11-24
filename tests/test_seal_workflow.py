@@ -705,6 +705,47 @@ def test_macho_signature_policy(tmpdir: str, repo_root: str) -> None:
     print("PASS: seal_binary refuses a signed Mach-O (unmodified) unless --no-codesign")
 
 
+def test_verify_app(tmpdir: str, repo_root: str) -> None:
+    """reshield_verify_app() resolves manifest and assets next to the executable, not the CWD."""
+    seal_tool = os.path.join(repo_root, "tools", "seal_binary.py")
+    gen_tool = os.path.join(repo_root, "tools", "gen_manifest.py")
+    app_dir = os.path.join(tmpdir, "va_app")
+    elsewhere = os.path.join(tmpdir, "va_cwd")
+    os.makedirs(elsewhere)
+    shutil.copytree(os.path.join(repo_root, "examples", "assets"), os.path.join(app_dir, "assets"))
+    exe = os.path.join(app_dir, "vapp")
+    shutil.copy2(os.path.join(repo_root, "build", "test_verify_app"), exe)
+    manifest = os.path.join(app_dir, "vapp.manifest")
+    subprocess.run([sys.executable, gen_tool, os.path.join(app_dir, "assets"), "-o", manifest],
+                   check=True, stdout=subprocess.DEVNULL)
+    subprocess.run([sys.executable, seal_tool, exe, "--manifest", manifest, "--build-id", "9"],
+                   check=True, stdout=subprocess.DEVNULL)
+
+    def run_app(path: str, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run([path, *args], capture_output=True, text=True, cwd=elsewhere)
+
+    r = run_app(exe, "vapp.manifest", "assets")
+    assert r.returncode == 10 and "status=OK" in r.stdout, r
+    link = os.path.join(elsewhere, "vapp_link")
+    os.symlink(exe, link)
+    r = run_app(link, "vapp.manifest", "assets")
+    assert r.returncode == 10, f"symlinked launch must resolve the real executable dir: {r}"
+    r = run_app(exe, "vapp.manifest", "x" * 5000)
+    assert r.returncode == 17 and "INTERNAL_ERROR" in r.stdout, f"oversized path must fail closed: {r}"
+    print("PASS: verify_app finds manifest/assets next to the exe from another CWD (also via symlink); "
+          "oversized path fails closed")
+
+    stage_cfg = os.path.join(app_dir, "assets", "stage1.cfg")
+    with open(stage_cfg, "ab") as f:
+        f.write(b"x")
+    r = run_app(exe, "vapp.manifest", "assets")
+    assert r.returncode == 16 and "asset=stage1.cfg" in r.stdout, r
+    os.unlink(manifest)
+    r = run_app(exe, "vapp.manifest", "assets")
+    assert r.returncode == 18 and "MANIFEST_IO_ERROR" in r.stdout, r
+    print("PASS: verify_app reports ASSET_TAMPERED, then MANIFEST_IO_ERROR for a missing manifest")
+
+
 def main() -> int:
     repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     integrity_demo = os.path.join(repo_root, "build", "integrity_demo")
@@ -807,6 +848,7 @@ def main() -> int:
         test_status_mapping_and_records(tmp2, repo_root, a2)
         test_seal_tool_and_release_cases(tmp2, repo_root, a2)
         test_macho_signature_policy(tmp2, repo_root)
+        test_verify_app(tmp2, repo_root)
     with tempfile.TemporaryDirectory(prefix="reshield_pe_") as tmp3:
         test_pe_support(tmp3, repo_root)
 
