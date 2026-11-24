@@ -746,6 +746,45 @@ def test_verify_app(tmpdir: str, repo_root: str) -> None:
     print("PASS: verify_app reports ASSET_TAMPERED, then MANIFEST_IO_ERROR for a missing manifest")
 
 
+def test_release_cli(tmpdir: str, repo_root: str) -> None:
+    """tools/reshield_release.py: fixed order strip -> manifest -> seal -> sign -> verify."""
+    tool = os.path.join(repo_root, "tools", "reshield_release.py")
+    seal_tool = os.path.join(repo_root, "tools", "seal_binary.py")
+    src = os.path.join(repo_root, "build", "sample_game")
+    out = os.path.join(tmpdir, "rel")
+    shutil.copytree(os.path.join(repo_root, "examples", "assets"), os.path.join(out, "assets"))
+
+    exe = os.path.join(out, "game")
+    shutil.copy2(src, exe)
+    r = run_cmd([sys.executable, tool, exe, "--assets", os.path.join(out, "assets"), "--strip", "--build-id", "5"])
+    assert r.returncode == 0 and "ship:" in r.stdout, r
+    manifest = os.path.join(out, "game.manifest")
+    assert os.path.isfile(manifest), "default manifest is <binary name>.manifest next to the binary"
+    r = run_cmd([exe, manifest, os.path.join(out, "assets"), "STAGE-1-CLEAR-2026"])
+    assert r.returncode == 0 and "build_id=5" in r.stdout, f"released binary must run: {r}"
+
+    # The sign command runs after sealing: --verify-only fails (rc 1) on an unsealed binary.
+    exe2 = os.path.join(out, "game2")
+    shutil.copy2(src, exe2)
+    r = run_cmd([sys.executable, tool, exe2, "--sign-cmd", f"{sys.executable} {seal_tool} {{}} --verify-only"])
+    assert r.returncode == 0 and "match=True" in r.stdout, f"sign step must see a sealed binary: {r}"
+    print("PASS: reshield_release strips, seals with manifest, runs the sign step after sealing, verifies")
+
+    r = run_cmd([sys.executable, tool, out])
+    assert r.returncode != 0 and "inside the bundle" in r.stderr, r
+    if sys.platform != "darwin":
+        return
+    signed = os.path.join(out, "signed")
+    shutil.copy2(src, signed)
+    subprocess.run(["codesign", "-s", "-", "--force", "--options", "runtime", signed], check=True,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    before = open(signed, "rb").read()
+    r = run_cmd([sys.executable, tool, signed])
+    assert r.returncode == 2 and "Seal first, then sign" in r.stderr, r
+    assert open(signed, "rb").read() == before, "refused release must not modify the file"
+    print("PASS: reshield_release refuses an already-signed Mach-O without touching it")
+
+
 def main() -> int:
     repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     integrity_demo = os.path.join(repo_root, "build", "integrity_demo")
@@ -849,6 +888,7 @@ def main() -> int:
         test_seal_tool_and_release_cases(tmp2, repo_root, a2)
         test_macho_signature_policy(tmp2, repo_root)
         test_verify_app(tmp2, repo_root)
+        test_release_cli(tmp2, repo_root)
     with tempfile.TemporaryDirectory(prefix="reshield_pe_") as tmp3:
         test_pe_support(tmp3, repo_root)
 
