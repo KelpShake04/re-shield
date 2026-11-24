@@ -212,12 +212,13 @@ jobs:
           Expect 2 "tampered DLL .text is TAMPERED" build\mod_tampered.dll 'status=TAMPERED'
           exit 0  # the last native call exited 2 on purpose; every real failure above throws
 
-      # Dev-build guard on MSVC output: the marker is in the development lib/EXE (it survives /OPT:REF),
-      # absent from the release DLL, and the release tools refuse the former and accept the latter.
+      # Dev-build guard on MSVC output: the marker is in the development object and EXE (it survives
+      # /OPT:REF) and absent from the release object and DLL; the release tools refuse the former and
+      # accept the latter. (build\reshield.lib is the DLL's import library by now: check objects.)
       - name: Dev-build guard (marker present in dev, absent in release, tools refuse dev)
         shell: pwsh
         run: |
-          python tests\test_dev_build_guard.py --dev-artifact build\reshield.lib --dev-artifact build\integrity_demo.exe --dev-bin build\integrity_demo.exe --release-artifact build\reshield.dll --release-bin build\reshield.dll
+          python tests\test_dev_build_guard.py --dev-artifact build\lib\integrity_common.obj --dev-artifact build\integrity_demo.exe --dev-bin build\integrity_demo.exe --release-artifact build\dll\integrity_common.obj --release-artifact build\reshield.dll --release-bin build\reshield.dll
           if ($LASTEXITCODE -ne 0) { throw "dev-build guard test failed" }
 
       - name: Seal, run, tamper, verify_release (integrity_demo)
