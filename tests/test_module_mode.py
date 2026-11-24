@@ -10,6 +10,13 @@ build of the library this checks:
 2. library sealed by tools/seal_binary.py -> OK (exit 0), W^X check OK, sizes match
 3. one byte of the library's .text changed -> TAMPERED (exit 2)
 4. (Linux) library opened by a relative path -> ERROR (exit 3, fails closed)
+5. (ELF) a host that links re-shield too and exports its symbols (-rdynamic) does not capture the
+   library's calls: a sealed library is OK although the host is unsealed, and an unsealed library is
+   UNSEALED although the host is sealed (-Wl,-Bsymbolic: each module uses its own record)
+6. library sealed with --manifest, host EXE in ANOTHER directory calls
+   reshield_check_json(manifest_rel, assets_rel): OK; one changed asset byte -> ASSET_TAMPERED (6);
+   missing manifest -> MANIFEST_IO_ERROR (8). The paths are relative to the host EXE directory,
+   not the library's: a valid copy next to the library is never consulted.
 
 Run through `make test` (module-test target). POSIX only: Windows is exercised by the
 windows-msvc CI job.
@@ -36,8 +43,8 @@ OK, UNSEALED, TAMPERED, ERROR = 0, 1, 2, 3
 UNCALLED_SYMBOL = "reshield_verify_buffer"
 
 
-def run_host(host: str, lib: str, cwd: str | None = None) -> subprocess.CompletedProcess[str]:
-    return subprocess.run([host, lib], capture_output=True, text=True, cwd=cwd)
+def run_host(host: str, lib: str, cwd: str | None = None, *extra: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run([host, lib, *extra], capture_output=True, text=True, cwd=cwd)
 
 
 def expect(r: subprocess.CompletedProcess[str], rc: int, status: str, what: str,
@@ -49,6 +56,89 @@ def expect(r: subprocess.CompletedProcess[str], rc: int, status: str, what: str,
             f"{what}: reshield_check_json: {r}"
     print(f"PASS: {what}")
     return r.stdout
+
+
+def manifest_check(r: subprocess.CompletedProcess[str], status: int, name: str, what: str) -> None:
+    """The manifest-bound reshield_check_json line of the host (exit code is the code-section status)."""
+    assert r.returncode == OK and f"check_json_manifest: status={status} json=" in r.stdout \
+        and f'"status":"{name}"' in r.stdout, f"{what}: {r}"
+    print(f"PASS: {what}")
+
+
+def test_manifest_binding(host: str, lib: str, label: str, tmpdir: str) -> None:
+    """Module mode + manifest + assets: the host EXE's directory, not the library's, is the base."""
+    ext = os.path.splitext(lib)[1]
+    root = os.path.join(tmpdir, f"{label}_mb")
+    lib_dir = os.path.join(root, "lib")
+    host_dir = os.path.join(root, "host")
+    assets_src = os.path.join(HERE, "..", "examples", "assets")
+    shutil.copytree(assets_src, os.path.join(lib_dir, "assets"))
+    shutil.copytree(assets_src, os.path.join(host_dir, "assets"))
+    manifest = os.path.join(host_dir, "app.manifest")
+    subprocess.run([sys.executable, os.path.join(HERE, "..", "tools", "gen_manifest.py"),
+                    os.path.join(host_dir, "assets"), "-o", manifest], check=True, stdout=subprocess.DEVNULL)
+    shutil.copy2(manifest, os.path.join(lib_dir, "app.manifest"))  # a valid decoy next to the library
+    sealed = os.path.join(lib_dir, f"sealed{ext}")
+    shutil.copy2(lib, sealed)
+    subprocess.run([sys.executable, os.path.join(HERE, "..", "tools", "seal_binary.py"), sealed,
+                    "--manifest", manifest, "--build-id", "12"], check=True, stdout=subprocess.DEVNULL)
+    host_copy = os.path.join(host_dir, "host")
+    shutil.copy2(host, host_copy)
+
+    def run() -> subprocess.CompletedProcess[str]:
+        # cwd is neither directory: only the host EXE directory can make the relative paths resolve
+        return run_host(host_copy, sealed, root, "app.manifest", "assets")
+
+    manifest_check(run(), 0, "OK", f"{label}: sealed library + manifest, host in another directory: OK")
+
+    decoy = os.path.join(lib_dir, "assets", "stage1.cfg")
+    with open(decoy, "ab") as f:
+        f.write(b"x")
+    manifest_check(run(), 0, "OK", f"{label}: a changed asset next to the library is not consulted (EXE-relative paths)")
+
+    stage_cfg = os.path.join(host_dir, "assets", "stage1.cfg")
+    with open(stage_cfg, "rb") as f:
+        orig = f.read()
+    with open(stage_cfg, "wb") as f:
+        f.write(bytes([orig[0] ^ 0x01]) + orig[1:])
+    r = run()
+    manifest_check(r, 6, "ASSET_TAMPERED", f"{label}: one changed asset byte is ASSET_TAMPERED")
+    assert '"failed_asset_path":"stage1.cfg"' in r.stdout, r
+    with open(stage_cfg, "wb") as f:
+        f.write(orig)
+
+    os.unlink(manifest)
+    manifest_check(run(), 8, "MANIFEST_IO_ERROR",
+                   f"{label}: missing manifest is MANIFEST_IO_ERROR even with a valid copy next to the library")
+
+
+def test_dual_record(dual_host: str, lib: str, label: str, tmpdir: str) -> None:
+    ext = os.path.splitext(lib)[1]
+    with open(dual_host, "rb") as f:
+        assert seal_binary.MAGIC in f.read(), "dual host must contain its own integrity record"
+    syms = subprocess.check_output(["nm", "-D", "--defined-only", dual_host], text=True)
+    assert "reshield_verify_code_section" in syms, "dual host must export re-shield symbols (-rdynamic)"
+
+    plain = os.path.join(tmpdir, f"{label}_dual_plain{ext}")
+    sealed = os.path.join(tmpdir, f"{label}_dual_sealed{ext}")
+    shutil.copy2(lib, plain)
+    shutil.copy2(lib, sealed)
+    subprocess.run([sys.executable, os.path.join(HERE, "..", "tools", "seal_binary.py"), sealed,
+                    "--build-id", "13"], check=True, stdout=subprocess.DEVNULL)
+
+    # Host unsealed (its record says UNSEALED), library sealed: the library must report OK.
+    out = expect(run_host(dual_host, sealed), OK, "OK",
+                 f"{label}: sealed library is OK although the exporting host is unsealed (own record)")
+    m = re.search(r"actual_size=(\d+) expected_size=(\d+)", out)
+    assert m and m.group(1) == m.group(2) and int(m.group(1)) > 0, out
+
+    # Host sealed, library unsealed: the library must not borrow the host's sealed record.
+    sealed_host = os.path.join(tmpdir, f"{label}_dual_host_sealed")
+    shutil.copy2(dual_host, sealed_host)
+    subprocess.run([sys.executable, os.path.join(HERE, "..", "tools", "seal_binary.py"), sealed_host,
+                    "--build-id", "14"], check=True, stdout=subprocess.DEVNULL)
+    expect(run_host(sealed_host, plain), UNSEALED, "UNSEALED",
+           f"{label}: unsealed library stays UNSEALED although the exporting host is sealed")
 
 
 def test_library(host: str, lib: str, label: str, tmpdir: str, plain_cj: tuple[int, str]) -> None:
@@ -82,12 +172,15 @@ def test_library(host: str, lib: str, label: str, tmpdir: str, plain_cj: tuple[i
         r = run_host(host, "./" + os.path.basename(sealed), cwd=tmpdir)
         expect(r, ERROR, "ERROR", f"{label}: relative dlopen path fails closed (ERROR, not OK)")
 
+    test_manifest_binding(host, lib, label, tmpdir)
+
 
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", required=True)
     ap.add_argument("--lib", required=True, help="development shared library")
     ap.add_argument("--release-lib", help="release (ALLOW_UNSEALED=0) shared library")
+    ap.add_argument("--dual-host", help="host that links re-shield and exports its symbols (ELF only)")
     args = ap.parse_args()
 
     host = os.path.abspath(args.host)
@@ -100,6 +193,11 @@ def main() -> int:
         test_library(host, os.path.abspath(args.lib), "dev", tmpdir, (0, "OK"))
         if args.release_lib:
             test_library(host, os.path.abspath(args.release_lib), "release", tmpdir, (1, "UNSEALED"))
+        if args.dual_host:
+            dual = os.path.abspath(args.dual_host)
+            test_dual_record(dual, os.path.abspath(args.lib), "dev", tmpdir)
+            if args.release_lib:
+                test_dual_record(dual, os.path.abspath(args.release_lib), "release", tmpdir)
     print("ALL PASS: module mode")
     return 0
 

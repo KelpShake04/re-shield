@@ -762,6 +762,7 @@ def test_verify_app(tmpdir: str, repo_root: str) -> None:
 
     r = run_app(exe, "vapp.manifest", "assets")
     assert r.returncode == 10 and "status=OK" in r.stdout and "check_json=same" in r.stdout, r
+    assert "check_json_bounds=ok" in r.stdout, f"reshield_check_json boundary values (cap 0, 1, NULL json): {r}"
     link = os.path.join(elsewhere, "vapp_link")
     os.symlink(exe, link)
     r = run_app(link, "vapp.manifest", "assets")
@@ -780,6 +781,27 @@ def test_verify_app(tmpdir: str, repo_root: str) -> None:
     r = run_app(exe, "vapp.manifest", "assets")
     assert r.returncode == 18 and "MANIFEST_IO_ERROR" in r.stdout and "check_json=same" in r.stdout, r
     print("PASS: verify_app reports ASSET_TAMPERED, then MANIFEST_IO_ERROR for a missing manifest")
+
+    # assets_rel == NULL means "." (the exe directory): the entries resolve next to the binary.
+    flat_dir = os.path.join(tmpdir, "va_flat")
+    flat_src = os.path.join(tmpdir, "va_flat_src")
+    os.makedirs(flat_dir)
+    os.makedirs(flat_src)
+    shutil.copy2(os.path.join(repo_root, "examples", "assets", "stage1.cfg"), flat_src)
+    shutil.copy2(os.path.join(repo_root, "examples", "assets", "stage1.cfg"), flat_dir)
+    flat_manifest = os.path.join(flat_dir, "flat.manifest")
+    subprocess.run([sys.executable, gen_tool, flat_src, "-o", flat_manifest], check=True,
+                   stdout=subprocess.DEVNULL)
+    flat_exe = os.path.join(flat_dir, "vflat")
+    shutil.copy2(os.path.join(repo_root, "build", "test_verify_app"), flat_exe)
+    subprocess.run([sys.executable, seal_tool, flat_exe, "--manifest", flat_manifest, "--build-id", "9"],
+                   check=True, stdout=subprocess.DEVNULL)
+    r = run_app(flat_exe, "flat.manifest")
+    assert r.returncode == 10 and "status=OK" in r.stdout and "check_json=same" in r.stdout and \
+        "check_json_bounds=ok" in r.stdout, f"assets_rel NULL must default to the exe directory: {r}"
+    r = run_app(flat_exe, "flat.manifest", "nope")
+    assert r.returncode == 16 and "ASSET_TAMPERED" in r.stdout, f"an explicit assets_rel overrides the default: {r}"
+    print("PASS: verify_app with assets_rel NULL resolves entries in the exe directory")
 
 
 def test_release_cli_binary_in_assets(tmpdir: str, repo_root: str) -> None:
@@ -802,6 +824,78 @@ def test_release_cli_binary_in_assets(tmpdir: str, repo_root: str) -> None:
     assert r.returncode == 0 and "code_seal:       OK" in r.stdout, r
     print("PASS: reshield_release excludes a binary that sits inside --assets (and --exclude patterns); "
           "verify_release passes")
+
+
+def test_release_cli_edges(tmpdir: str, repo_root: str) -> None:
+    """reshield_release.py: build id sources and the auto-exclude of the sealed binary at its edges."""
+    tool = os.path.join(repo_root, "tools", "reshield_release.py")
+    verify_tool = os.path.join(repo_root, "tools", "verify_release.py")
+    src = os.path.join(repo_root, "build", "sample_game")
+    assets_src = os.path.join(repo_root, "examples", "assets")
+
+    def release(exe: str, assets: str, *extra: str, build_number: str | None = None) -> subprocess.CompletedProcess[str]:
+        env = {k: v for k, v in os.environ.items() if k != "BUILD_NUMBER"}
+        if build_number is not None:
+            env["BUILD_NUMBER"] = build_number
+        return subprocess.run([sys.executable, tool, exe, "--assets", assets, *extra],
+                              capture_output=True, text=True, env=env)
+
+    def listed(manifest: str) -> list[str]:
+        with open(manifest) as f:
+            return [line.split(" ", 2)[2].strip() for line in f if line.strip()]
+
+    def build_id_of(exe: str, manifest: str, assets: str) -> str:
+        r = run_cmd([exe, manifest, assets, "STAGE-1-CLEAR-2026"])
+        m = re.search(r"build_id=(\d+)", r.stdout)
+        assert r.returncode == 0 and m, f"released binary must run: {r}"
+        return m.group(1)
+
+    # Build id: -1 is refused (nothing modified); BUILD_NUMBER="" falls back to 1; BUILD_NUMBER=42 is used.
+    ids = os.path.join(tmpdir, "ids")
+    shutil.copytree(assets_src, os.path.join(ids, "assets"))
+    neg = os.path.join(ids, "neg")
+    shutil.copy2(src, neg)
+    before = open(neg, "rb").read()
+    r = release(neg, os.path.join(ids, "assets"), "--build-id", "-1")
+    assert r.returncode != 0 and "outside 0..4294967295" in r.stderr, r
+    assert open(neg, "rb").read() == before, "a refused build id must not modify the file"
+    for label, value, want in (("empty", "", "1"), ("42", "42", "42")):
+        exe = os.path.join(ids, f"bn_{label}")
+        shutil.copy2(src, exe)
+        r = release(exe, os.path.join(ids, "assets"), build_number=value)
+        assert r.returncode == 0, r
+        got = build_id_of(exe, os.path.join(ids, f"bn_{label}.manifest"), os.path.join(ids, "assets"))
+        assert got == want, f"BUILD_NUMBER={value!r}: build_id {got}, want {want}"
+    print("PASS: reshield_release: --build-id -1 refused, BUILD_NUMBER='' -> 1, BUILD_NUMBER=42 -> 42")
+
+    # Binary in a subdirectory of --assets, and a name with glob metacharacters, are excluded exactly.
+    for rel in ("sub/game", "game[1]"):
+        dist = os.path.join(tmpdir, "ex_" + rel.replace("/", "_").replace("[", "").replace("]", ""))
+        shutil.copytree(assets_src, os.path.join(dist, "data"))
+        exe = os.path.join(dist, *rel.split("/"))
+        os.makedirs(os.path.dirname(exe), exist_ok=True)
+        shutil.copy2(src, exe)
+        r = release(exe, dist, "--build-id", "6")
+        assert r.returncode == 0 and f"excluding the sealed binary from the manifest: {rel}" in r.stdout, r
+        manifest = os.path.join(os.path.dirname(exe), os.path.basename(exe).split(".")[0] + ".manifest")
+        assert listed(manifest) == ["data/stage1.cfg"], f"{rel}: {listed(manifest)}"
+        r = run_cmd([sys.executable, verify_tool, exe, "--manifest", manifest, "--assets", dist])
+        assert r.returncode == 0 and "code_seal:       OK" in r.stdout, r
+    print("PASS: reshield_release auto-excludes a binary in a subdirectory and one named with glob metacharacters")
+
+    # Sibling directory with a shared name prefix is outside --assets: nothing is excluded.
+    root = os.path.join(tmpdir, "sib")
+    shutil.copytree(assets_src, os.path.join(root, "dist", "data"))
+    os.makedirs(os.path.join(root, "dist2"))
+    exe = os.path.join(root, "dist2", "game")
+    shutil.copy2(src, exe)
+    r = release(exe, os.path.join(root, "dist"), "--build-id", "6")
+    assert r.returncode == 0 and "excluding the sealed binary" not in r.stdout, r
+    manifest = os.path.join(root, "dist2", "game.manifest")
+    assert listed(manifest) == ["data/stage1.cfg"], listed(manifest)
+    r = run_cmd([sys.executable, verify_tool, exe, "--manifest", manifest, "--assets", os.path.join(root, "dist")])
+    assert r.returncode == 0, r
+    print("PASS: reshield_release does not treat dist2/game as inside --assets dist")
 
 
 def test_release_cli(tmpdir: str, repo_root: str) -> None:
@@ -965,6 +1059,7 @@ def main() -> int:
         test_verify_app(tmp2, repo_root)
         test_release_cli(tmp2, repo_root)
         test_release_cli_binary_in_assets(tmp2, repo_root)
+        test_release_cli_edges(tmp2, repo_root)
     with tempfile.TemporaryDirectory(prefix="reshield_pe_") as tmp3:
         test_pe_support(tmp3, repo_root)
 

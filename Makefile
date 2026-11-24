@@ -177,12 +177,22 @@ $(TEST_NO_ALLOW): tests/test_no_allow_unsealed.c $(LIB_SRCS) | $(BUILD_DIR)
 # Module mode: re-shield linked into a shared library that an unsealed host dlopen()s. The host
 # links no re-shield code. `make sanitize` skips it (an ASan library needs an ASan host runtime).
 MODULE_TEST ?= $(PYTHON3) tests/test_module_mode.py --host $(TEST_MODULE_HOST) \
-               --lib $(SHARED_TARGET) --release-lib build/release/libreshield.$(SHARED_EXT)
+               --lib $(SHARED_TARGET) --release-lib build/release/libreshield.$(SHARED_EXT) \
+               $(MODULE_DUAL_ARG)
 
 $(TEST_MODULE_HOST): tests/test_module_host.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) $(RS_CFLAGS) $< $(DL_LIBS) -o $@
 
-module-test: $(TEST_MODULE_HOST) $(SHARED_TARGET) release-shared
+# ELF only (macOS has a two-level namespace, no interposition): a host that links re-shield too and
+# exports its symbols, to check that -Wl,-Bsymbolic keeps the library on its own record.
+ifeq ($(SHARED_EXT),so)
+TEST_MODULE_DUAL = $(BUILD_DIR)/test_module_host_dual$(EXE)
+MODULE_DUAL_ARG  = --dual-host $(TEST_MODULE_DUAL)
+$(TEST_MODULE_DUAL): tests/test_module_host.c $(LIB_TARGET)
+	$(CC) $(CFLAGS) $(RS_CFLAGS) $< -Wl,--whole-archive $(LIB_TARGET) -Wl,--no-whole-archive -rdynamic $(DL_LIBS) -o $@
+endif
+
+module-test: $(TEST_MODULE_HOST) $(TEST_MODULE_DUAL) $(SHARED_TARGET) release-shared
 	$(MODULE_TEST)
 
 release-demo: $(SAMPLE_GAME_SEALED) $(SAMPLE_MANIFEST)
