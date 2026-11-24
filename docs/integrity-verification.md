@@ -114,3 +114,31 @@ make release-demo
 - 기본 링크 옵션: `.text`(VirtualSize 35064/37752 바이트, 플래그 `0x60000060`) 안에 base relocation이 1개 있다(`.ctors`/`__CTOR_LIST__`의 포인터, DIR64). 전체 relocation은 53개다. 그래서 `seal_binary.py`가 봉인을 거부한다.
 - `-Wl,--disable-dynamicbase -Wl,--disable-reloc-section`으로 링크하면 relocation 디렉터리가 없어 봉인과 `--verify-only`가 통과한다. 이 경우 이미지는 재배치할 수 없으므로 고정 ImageBase(`0x140000000`)에 로드되어야 한다(ASLR 없음). 따라서 이 옵션은 크로스 테스트 용도로만 쓰고 배포용으로는 권장하지 않는다. `-Wl,--disable-dynamicbase`만으로는 relocation이 남아 거부된다.
 - 이에 따라 mingw로 `make all`을 하면 `sample_game_sealed` 봉인 단계가 기본 옵션에서는 실패한다. `make CC=x86_64-w64-mingw32-gcc ... LDFLAGS="-Wl,--disable-dynamicbase -Wl,--disable-reloc-section" all`처럼 링크 옵션을 지정해야 한다. mingw 기본 링크 옵션은 바꾸지 않는다(mingw는 정식 지원 대상이 아니다).
+
+## 8. SHA-256 하드웨어 가속
+
+코드 섹션(수십 MB)과 에셋 해시는 시작 지연의 대부분이다. `src/sha256_accel.c`가 블록 압축을 CPU 명령으로 처리하고, `src/sha256.c`의 `sha256_update`가 입력의 온전한 64바이트 블록을 한 번에 넘긴다. 외부 의존성 없이 컴파일러 intrinsics만 쓰고, 공개 API·ABI는 그대로다. 결과는 이식성 C 구현과 비트 단위로 같다(`tests/test_sha256_accel.c`).
+
+| backend | 조건 | 판정 |
+|---|---|---|
+| `armv8` | AArch64, gcc/clang, macOS 또는 Linux | macOS는 항상, Linux는 `getauxval(AT_HWCAP) & HWCAP_SHA2` |
+| `shani` | x86-64, gcc/clang(Windows 제외) 또는 MSVC `cl` | `cpuid` leaf 7 EBX bit 29(SHA) + leaf 1 ECX의 SSSE3·SSE4.1 |
+| `portable` | 위 밖의 모든 조합 | 기존 C 코드 |
+
+- 가속은 함수 단위 `target` 속성으로만 켠다(전역 `-march` 변경 없음). 선택은 첫 사용 때 한 번 정하고 이후 읽기만 한다.
+- 폴백: CPU가 명령을 지원하지 않거나, 확인하지 않은 조합(Windows ARM64, mingw, clang-cl, 32비트 x86, 그 밖의 OS)이면 이식성 C 구현을 쓴다. 이 조합들도 경고 없이 컴파일된다.
+- 끄는 법: `-DRESHIELD_NO_HW_SHA`로 컴파일(예: `make CFLAGS="-Wall -Wextra -Wpedantic -Werror -O2 -DRESHIELD_NO_HW_SHA"`). 어느 backend가 쓰이는지는 `make test`의 `sha256 backend: ...` 줄과 `make bench`로 본다.
+- 처리량은 `make bench`(256 MiB 버퍼 한 번에 해시, 3회 중 최고값, 1 MB = 10^6 바이트)로 쟀다.
+
+| 환경 | 컴파일러 | 이식성 C | 가속 |
+|---|---|---|---|
+| 가속 도입 전(origin/main), Apple M1 Pro, macOS 27.2.1 | Apple clang 21, `-O2` | 161 MB/s | - |
+| 같은 기계, 이 변경 | 같음 | 220 MB/s | 2223 MB/s (`armv8`) |
+| Linux aarch64 컨테이너(Docker, 같은 M1 Pro) | gcc 14.4, `-O2` | 151 MB/s | 2200 MB/s (`armv8`) |
+| GitHub Actions `macos-latest`, Apple M1 (Virtual) | Apple clang, `-O2` | 133 MB/s | 1441 MB/s (`armv8`) |
+| GitHub Actions `ubuntu-latest`, AMD EPYC 9V74 | gcc, `-O2` | 320 MB/s | 1813 MB/s (`shani`) |
+| GitHub Actions `windows-latest`, AMD EPYC 7763 | MSVC `cl /O2` | 237 MB/s | 1582 MB/s (`shani`) |
+
+공유 CI 러너 수치는 실행마다 달라진다. Docker amd64 에뮬레이션에서는 SHA 명령이 없어 `portable`로 폴백하며, 그 수치는 근거로 쓰지 않았다. 1 GiB 해시 시간은 위 수치로 계산하면 M1 Pro에서 약 6.7초(이전 161 MB/s)에서 약 0.5초(2223 MB/s)다.
+
+검증하지 못한 것: Linux에서 `HWCAP_SHA2`가 없는 aarch64 CPU(폴백 경로를 그 CPU에서 돌려보지 못함), Linux aarch64 + clang, SHA-NI가 있는 Intel CPU(CI 러너는 AMD였다), macOS x86-64, FreeBSD 등 다른 OS.
