@@ -88,7 +88,7 @@ TEST_VERIFY_APP         = $(BUILD_DIR)/test_verify_app$(EXE)
 TEST_NO_ALLOW           = $(BUILD_DIR)/test_no_allow_unsealed$(EXE)
 TEST_MODULE_HOST        = $(BUILD_DIR)/test_module_host$(EXE)
 
-.PHONY: all lib shared release-shared module-test clean test crackme release-demo sanitize fuzz-build fuzz fuzz-pe
+.PHONY: all lib shared release-shared module-test csharp-test clean test crackme release-demo sanitize fuzz-build fuzz fuzz-pe
 
 all: $(LIB_TARGET) $(DEMO_INTEGRITY) $(SAMPLE_GAME) $(SAMPLE_GAME_SEALED) \
      $(TEST_INTEGRITY) $(TEST_MANIFEST) $(TEST_RUNTIME) $(TEST_WX) $(TEST_VERIFY_APP)
@@ -184,6 +184,14 @@ $(TEST_MODULE_HOST): tests/test_module_host.c | $(BUILD_DIR)
 
 module-test: $(TEST_MODULE_HOST) $(SHARED_TARGET) release-shared
 	$(MODULE_TEST)
+
+# C# binding (bindings/csharp): loads the shared libraries from a dotnet console test. Not part of
+# `make test`; skips (successfully) when there is no dotnet SDK.
+csharp-test:
+	cmp bindings/csharp/Reshield.cs bindings/unity/com.reshield.guard/Runtime/Reshield.cs
+	@if command -v dotnet >/dev/null 2>&1; then \
+	  $(MAKE) shared release-shared && $(PYTHON3) bindings/csharp/tests/run.py; \
+	else echo "SKIP: csharp-test (dotnet SDK not found)"; fi
 
 release-demo: $(SAMPLE_GAME_SEALED) $(SAMPLE_MANIFEST)
 	$(PYTHON3) tools/verify_release.py $(SAMPLE_GAME_SEALED) --manifest $(SAMPLE_MANIFEST) --assets examples/assets
