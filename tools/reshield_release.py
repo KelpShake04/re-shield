@@ -2,7 +2,7 @@
 """
 One-call release step for re-shield: strip -> manifest -> seal -> sign -> verify, in that order.
 
-Run it on the final linked executable, in place:
+Run it on the final linked executable or shared library, in place:
 
     python3 tools/reshield_release.py dist/game --assets dist/assets --strip
     python3 tools/reshield_release.py dist/game --assets dist --exclude "*.pdb"
@@ -47,7 +47,7 @@ def file_kind(path: str) -> str:
 
 def main() -> int:
     p = argparse.ArgumentParser(description="strip -> manifest -> seal -> sign -> verify")
-    p.add_argument("binary", help="Final linked executable (not an .app bundle); modified in place")
+    p.add_argument("binary", help="Final linked executable or shared library (not an .app bundle); modified in place")
     p.add_argument("--assets", help="Asset directory to bind (a manifest is generated from it)")
     p.add_argument("--exclude", action="append", default=[], metavar="GLOB",
                    help="Leave files matching GLOB (relative POSIX path under --assets) out of the "
@@ -80,7 +80,7 @@ def main() -> int:
                          "(MyGame.app/Contents/MacOS/MyGame), then sign the bundle yourself with --sign-cmd")
     kind = file_kind(binary)
     if kind == "unknown":
-        raise SystemExit(f"[reshield_release] {binary}: not a Mach-O, ELF or PE executable")
+        raise SystemExit(f"[reshield_release] {binary}: not a Mach-O, ELF or PE executable or shared library")
     macos = kind == "macho" and sys.platform == "darwin"
     if not macos and not args.sign_cmd and (args.sign != "-" or args.entitlements):
         print("[reshield_release] warning: --sign/--entitlements only apply to a Mach-O on macOS; "

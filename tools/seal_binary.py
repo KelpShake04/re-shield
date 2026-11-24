@@ -2,7 +2,7 @@
 """
 Build-time binary sealing tool for re-shield v2 integrity records.
 
-Computes SHA-256 of the executable's code section (__TEXT,__text on 64-bit Mach-O;
+Computes SHA-256 of the executable's (or shared library's) code section (__TEXT,__text on 64-bit Mach-O;
 .text on 64-bit ELF; .text on PE32+ x64, VirtualSize bytes) and embeds build_id, section size, code digest, and optional
 asset manifest root digest into the unique RSHLDCHK v2 record.
 """
@@ -389,7 +389,7 @@ def check_macho_resignable(path: str) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Seal a binary with code + optional manifest SHA-256")
-    parser.add_argument("binary", help="Path to the compiled Mach-O, ELF or PE32+ executable")
+    parser.add_argument("binary", help="Path to the compiled Mach-O, ELF or PE32+ executable or shared library")
     parser.add_argument("--manifest", help="Optional asset manifest file to bind into the binary")
     parser.add_argument("--build-id", type=int, default=1, help="Numeric build identifier (default: 1)")
     parser.add_argument("--verify-only", action="store_true", help="Check seal without modifying file")
