@@ -61,7 +61,7 @@ make release-demo
 **1. 링크.** `libreshield.a`를 링크하고 `-Iinclude`를 추가한다. macOS는 `-framework Security -framework CoreFoundation`도 필요하다. `RSHLDCHK` 레코드는 `libreshield.a` 안에 있으며, 앱이 `reshield_verify()`를 호출하면 바이너리에 함께 링크된다.
 
 ```bash
-make build/libreshield.a
+make lib                      # 개발용: build/libreshield.a (릴리스용은 아래 5번)
 cc game.c build/libreshield.a -Iinclude -o game -framework Security -framework CoreFoundation  # 프레임워크는 macOS만
 ```
 
@@ -82,7 +82,23 @@ if (reshield_verify(&cfg, &report) != RESHIELD_OK) {
 }
 ```
 
-**3. 릴리스 파이프라인(CI).** 순서가 중요하다.
+에셋까지 검사한다면 `reshield_verify_app()` 한 줄이 더 간단하다. 코드와 매니페스트를 검사하고, 두 경로를 현재 디렉터리가 아니라 **실행 파일이 있는 디렉터리** 기준으로 해석하므로 런처·바로가기가 작업 디렉터리를 바꿔도 동작한다.
+
+```c
+if (reshield_verify_app("game.manifest", "assets", NULL, NULL, &report) != RESHIELD_OK) { /* 처리 */ }
+```
+
+매니페스트나 에셋 경로를 열 수 없으면 `INTERNAL_ERROR`가 아니라 `MANIFEST_IO_ERROR`(`RESHIELD_ERR_MANIFEST_IO`, 값 8)로 보고한다(경로 실수가 내부 오류로 오인되지 않도록. 이전에는 `INTERNAL_ERROR`였다).
+
+**3. 릴리스 파이프라인(CI).** 순서가 중요하다(링크, `strip`, 봉인, 서명, 검증). 최종 실행 파일에 한 명령으로 이 순서를 실행한다(제자리 수정).
+
+```bash
+python3 tools/reshield_release.py dist/game --assets dist/assets --strip             # dist/game.manifest 생성
+python3 tools/reshield_release.py dist/game --assets dist/assets --sign "Developer ID Application: Me (TEAMID)"   # macOS
+python3 tools/reshield_release.py dist/game.exe --assets dist/assets --sign-cmd "signtool sign /fd sha256 /a {}"  # 임의 서명 도구
+```
+
+이미 실제 서명(Developer ID 등)이 있는 Mach-O는 거부한다. 봉인이 바이너리를 다시 쓰므로 서명이 사라지기 때문이다. 봉인 먼저, 서명은 마지막이다(`seal_binary.py`도 같은 경우를 거부하며, linker-signed·ad-hoc 바이너리는 괜찮다). 수동으로 하려면 다음과 같다.
 
 ```bash
 python3 tools/gen_manifest.py assets -o build/game.manifest
@@ -97,11 +113,11 @@ python3 tools/verify_release.py build/game --manifest build/game.manifest --asse
 
 **4. 에셋 로딩.** 검증한 뒤 같은 경로를 다시 열면 그 사이 파일이 바뀔 수 있다(TOCTOU). 파일을 메모리로 읽고 `reshield_verify_buffer()`로 검증한 뒤 그 버퍼를 사용한다. `reshield_verify_single_asset()`도 경로 기반이라 같은 한계가 있다.
 
-**5. 개발 중.** `-DRESHIELD_DISABLE`로 검사를 끈다. 이 매크로는 **라이브러리를 컴파일할 때** 줘야 한다(`make clean` 후 `make CFLAGS="-std=c11 -O2 -DRESHIELD_DISABLE"` 등). 앱 컴파일 플래그에만 넣으면 아무 효과가 없다. 디버거 중단점이 `.text`를 바꾸면 `CODE_TAMPERED`가 나므로 디버깅 중에는 꺼 둔다.
+**5. 개발 중, 릴리스 빌드.** 개발용과 릴리스용 라이브러리는 디렉터리가 다르다: `make lib`은 `build/libreshield.a`(개발용), `make ALLOW_UNSEALED=0 lib`은 `build/release/libreshield.a`(릴리스용)를 만든다. 서로의 오브젝트를 재사용하지 않는다. `-std=c11`, `-Iinclude`, `ALLOW_UNSEALED` 정의는 항상 적용되어 `make CFLAGS=-O0`이나 상위 make가 지울 수 없다. `-DRESHIELD_DISABLE`로 검사를 끈다. 이 매크로는 **라이브러리를 컴파일할 때** 줘야 한다(`make clean` 후 `make CFLAGS="-O2 -DRESHIELD_DISABLE"` 등). 앱 컴파일 플래그에만 넣으면 아무 효과가 없다. 디버거 중단점이 `.text`를 바꾸면 `CODE_TAMPERED`가 나므로 디버깅 중에는 꺼 둔다.
 
 **기대치.** 설치 손상, 실수로 인한 변조, 단순한 바이너리·에셋 패치를 감지하는 용도다. 바이너리와 매니페스트를 함께 재봉인하는 공격이나 런타임 API 교체는 막지 못한다. 안티치트나 DRM 대용으로 쓰지 않는다. 중요한 판정은 서버에서 하고 클라이언트 검사 결과는 신호로만 쓴다.
 
 ## 개발·테스트 빌드 옵션
 
 - `-DRESHIELD_DISABLE`: `reshield_verify()` 등 모든 런타임 무결성 검증을 no-op으로 비활성화. 단 `reshield_verify_buffer()`는 앱 로직(예: 키 커밋먼트 비교)이므로 이 빌드에서도 실제 SHA-256 비교를 수행한다.
-- `cfg.allow_unsealed = 1`: `tools/seal_binary.py`를 거치지 않은 로컬 개발 빌드 허용. 라이브러리를 `-DRESHIELD_ALLOW_UNSEALED`로 컴파일했을 때만 동작한다(저장소 Makefile 기본값, 릴리스는 `make ALLOW_UNSEALED=0`). 매크로 없이 컴파일한 라이브러리에서 필드를 켜면 `INTERNAL_ERROR`(설정 오류)다. **경고: 매크로를 켠 빌드를 릴리스에 쓰면 sealed 바이트 변조만으로 코드·매니페스트 검사가 우회된다. 릴리스 금지.** (레코드 magic/version 불일치나 매니페스트 없이 봉인된 바이너리는 unsealed로 취급하지 않고 실패 처리한다.)
+- `cfg.allow_unsealed = 1`: `tools/seal_binary.py`를 거치지 않은 로컬 개발 빌드 허용. 라이브러리를 `-DRESHIELD_ALLOW_UNSEALED`로 컴파일했을 때만 동작한다(저장소 Makefile 기본값, 릴리스는 `make ALLOW_UNSEALED=0 lib`로 `build/release/libreshield.a`). 매크로 없이 컴파일한 라이브러리에서 필드를 켜면 `INTERNAL_ERROR`(설정 오류)다. **경고: 매크로를 켠 빌드를 릴리스에 쓰면 sealed 바이트 변조만으로 코드·매니페스트 검사가 우회된다. 릴리스 금지.** (레코드 magic/version 불일치나 매니페스트 없이 봉인된 바이너리는 unsealed로 취급하지 않고 실패 처리한다.)
