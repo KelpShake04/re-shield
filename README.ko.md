@@ -27,7 +27,7 @@
 
 ## 알려진 한계
 
-자세한 목록은 [docs/integrity-verification.md](docs/integrity-verification.md#5-한계)를 따른다. 요약: 해시 대상은 `__TEXT,__text`/`.text`뿐이고(`__stubs`, `.plt`, `__const`, 레코드가 있는 `__DATA`는 제외), 레코드의 평문 `RSHLDCHK` 매직이 수정 지점을 노출하며, 매니페스트에 없는 추가 파일은 감지하지 않고, fat/universal Mach-O는 `seal_binary.py`가 지원하지 않는다.
+자세한 목록은 [docs/integrity-verification.md](docs/integrity-verification.md#5-한계)를 따른다. 요약: 해시 대상은 `__TEXT,__text`/`.text`뿐이고(`__stubs`, `.plt`, `__const`, 레코드가 있는 `__DATA`는 제외), 레코드의 평문 `RSHLDCHK` 매직이 수정 지점을 노출하며, 매니페스트에 없는 추가 파일은 기본으로는 감지하지 않고(v2 strict 모드를 켜면 감지), fat/universal Mach-O는 `seal_binary.py`가 지원하지 않는다.
 
 ## 언제 쓰고, 언제 쓰지 말아야 하나
 
@@ -90,6 +90,8 @@ if (reshield_verify_app("game.manifest", "assets", NULL, NULL, &report) != RESHI
 ```
 
 매니페스트나 에셋 경로를 열 수 없으면 `INTERNAL_ERROR`가 아니라 `MANIFEST_IO_ERROR`(`RESHIELD_ERR_MANIFEST_IO`, 값 8)로 보고한다(경로 실수가 내부 오류로 오인되지 않도록. 이전에는 `INTERNAL_ERROR`였다).
+
+**strict(allowlist) 모드.** 에셋 폴더에 끼워 넣은 파일(프록시 DLL, 크랙, 모드)을 잡으려면 매니페스트를 `python3 tools/gen_manifest.py assets -o game.manifest --strict --allow "saves/*"`로 만든다(`tools/reshield_release.py`에는 `--strict --allow`를 준다). 매니페스트 맨 앞에 `#reshield-manifest v2 strict`와 `#allow` 줄이 들어가고 루트 해시와 함께 봉인된다. 런타임은 목록의 에셋을 모두 검증한 뒤 에셋 폴더를 열거해 목록에도 `#allow`에도 없는 파일·심볼릭 링크·특수 파일이 있으면 `ASSET_EXTRA`(`RESHIELD_ERR_ASSET_EXTRA`, 값 9)로 보고한다. 이름은 바이트로 비교하므로 APFS의 NFD 이름은 오탐이 될 수 있고, 에셋 폴더에 세이브를 쓰는 게임은 `#allow`가 필요하다. 바이너리와 매니페스트를 함께 재봉인하는 공격은 막지 못한다. 자세한 내용과 한계: [docs/integrity-verification.md](docs/integrity-verification.md#8-매니페스트-v2와-strict-모드). 이제 `#` 줄은 매니페스트 맨 앞(첫 항목 앞)에서만 허용된다(이전에는 어디서든 건너뛰었다).
 
 **3. 릴리스 파이프라인(CI).** 순서가 중요하다(링크, `strip`, 봉인, 서명, 검증). 최종 실행 파일에 한 명령으로 이 순서를 실행한다(제자리 수정).
 

@@ -115,6 +115,8 @@ cfg.asset_base_dir = "assets";
 
 A manifest or asset path that cannot be opened is reported as `MANIFEST_IO_ERROR` (`RESHIELD_ERR_MANIFEST_IO`, value 8), not `INTERNAL_ERROR`, so a wrong path is not mistaken for an internal fault. Before this change it was `INTERNAL_ERROR`.
 
+Strict mode catches files that were added next to your assets (a proxy DLL, a crack, a mod). Generate the manifest with `python3 tools/gen_manifest.py assets -o game.manifest --strict --allow "saves/*"` (or pass `--strict --allow` to `tools/reshield_release.py`). The manifest then starts with `#reshield-manifest v2 strict` and `#allow` lines, which are sealed with the root hash. At runtime any file, symlink or special file under the asset directory that is neither listed nor allowed gives `ASSET_EXTRA` (`RESHIELD_ERR_ASSET_EXTRA`, value 9), after the listed assets verified. Names are compared as bytes, so an NFD name on APFS can be a false positive, and a game that writes saves into the asset directory needs an `#allow`. It does not stop an attacker who re-seals the binary and manifest together. Details and limits: [docs/integrity-verification.md](docs/integrity-verification.md#8-매니페스트-v2와-strict-모드). A `#` line is now only accepted at the top of a manifest (before the first entry); it used to be skipped anywhere.
+
 If you load an asset after verifying it by path, the file can change in between (TOCTOU). Read the file into memory, check it with `reshield_verify_buffer()`, then use that buffer. See `examples/sample_game.c` for a complete program.
 
 ## Development and release builds
@@ -129,7 +131,7 @@ If you load an asset after verifying it by path, the file can change in between 
 
 - Only `__TEXT,__text` / `.text` is hashed. `__stubs`, `.plt`, `__const` and the `__DATA` that holds the record are not.
 - The record starts with a plain `RSHLDCHK` magic, so the place to edit is easy to find.
-- Files that are not in the manifest are not detected.
+- Files that are not in the manifest are not detected, unless the manifest is generated with `--strict` (see above).
 - A binary and its manifest can be re-sealed together. Runtime API replacement is not prevented.
 - A software breakpoint patches code bytes and is reported as `CODE_TAMPERED`.
 - On Linux, `.text` is located from the section headers on disk. An attacker who can edit the file can change them, and copying the original bytes into a code cave in the same segment is not caught.
