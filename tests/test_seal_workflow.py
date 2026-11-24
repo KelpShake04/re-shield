@@ -772,6 +772,21 @@ def test_release_cli(tmpdir: str, repo_root: str) -> None:
 
     r = run_cmd([sys.executable, tool, out])
     assert r.returncode != 0 and "inside the bundle" in r.stderr, r
+
+    exe3 = os.path.join(out, "game3")
+    shutil.copy2(src, exe3)
+    before3 = open(exe3, "rb").read()
+    r = run_cmd([sys.executable, tool, exe3, "--build-id", "4294967296"])
+    assert r.returncode != 0 and "outside 0..4294967295" in r.stderr, r
+    r = subprocess.run([sys.executable, tool, exe3], capture_output=True, text=True,
+                       env={**os.environ, "BUILD_NUMBER": "12a"})
+    assert r.returncode != 0 and "BUILD_NUMBER" in r.stderr, r
+    assert open(exe3, "rb").read() == before3, "rejected arguments must not modify the file"
+    if sys.platform != "darwin":  # a non-macOS host cannot honour --sign: it must say so
+        r = run_cmd([sys.executable, tool, exe3, "--sign", "Some Identity"])
+        assert r.returncode == 0 and "will NOT be signed" in r.stderr, r
+    print("PASS: reshield_release rejects bad build ids and warns when --sign cannot apply")
+
     if sys.platform != "darwin":
         return
     signed = os.path.join(out, "signed")
