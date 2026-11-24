@@ -16,7 +16,9 @@ jobs:
       - run: make sanitize
       # Prints the backend (shani on a runner with SHA-NI) and MB/s; then the same test with the
       # hardware path compiled out (-DRESHIELD_NO_HW_SHA), which must also pass.
-      - run: make bench
+      - run: |
+          grep -m1 "model name" /proc/cpuinfo
+          make bench
       - run: |
           make BUILD_DIR=build/nohw CFLAGS="-Wall -Wextra -Wpedantic -Werror -O2 -DRESHIELD_NO_HW_SHA" build/nohw/test_sha256_accel
           ./build/nohw/test_sha256_accel
@@ -51,7 +53,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: make clean && make all test release-demo
-      - run: make bench
+      - run: |
+          sysctl -n machdep.cpu.brand_string
+          make bench
 
   # Windows x64 (MSVC) runtime backend: builds with cl (no make on Windows), seals a copy of the
   # demo EXE, runs it, tampers .text and checks detection. Skipped on purpose: the POSIX-only
@@ -103,7 +107,9 @@ jobs:
       # Prints the backend (shani if the runner CPU has SHA-NI) and MB/s; not a gate.
       - name: SHA-256 throughput
         shell: pwsh
-        run: .\build\bench_sha256.exe
+        run: |
+          (Get-CimInstance Win32_Processor).Name
+          .\build\bench_sha256.exe
 
       - name: Seal, run, tamper, verify_release (integrity_demo)
         shell: pwsh
