@@ -47,14 +47,16 @@ LIB_SRCS  = src/sha256.c \
             src/attestation_linux.c \
             src/attestation_windows.c \
             src/reshield.c \
-            src/verify_app.c
+            src/verify_app.c \
+            src/save_seal.c
 LIB_OBJS  = $(patsubst src/%.c,$(BUILD_DIR)/%.o,$(LIB_SRCS))
 LIB_TARGET = $(BUILD_DIR)/libreshield.a
 
 HEADERS = include/reshield/integrity.h \
           include/reshield/manifest.h \
           include/reshield/attestation.h \
-          include/reshield/reshield.h
+          include/reshield/reshield.h \
+          include/reshield/save_seal.h
 
 DEMO_INTEGRITY          = $(BUILD_DIR)/integrity_demo$(EXE)
 DEMO_INTEGRITY_DISABLED = $(BUILD_DIR)/integrity_demo_disabled$(EXE)
@@ -74,11 +76,12 @@ TEST_RUNTIME_DISABLED   = $(BUILD_DIR)/test_runtime_disabled$(EXE)
 TEST_WX                 = $(BUILD_DIR)/test_wx$(EXE)
 TEST_VERIFY_APP         = $(BUILD_DIR)/test_verify_app$(EXE)
 TEST_NO_ALLOW           = $(BUILD_DIR)/test_no_allow_unsealed$(EXE)
+TEST_SAVE_SEAL          = $(BUILD_DIR)/test_save_seal$(EXE)
 
 .PHONY: all lib clean test crackme release-demo sanitize fuzz-build fuzz fuzz-pe
 
 all: $(LIB_TARGET) $(DEMO_INTEGRITY) $(SAMPLE_GAME) $(SAMPLE_GAME_SEALED) \
-     $(TEST_INTEGRITY) $(TEST_MANIFEST) $(TEST_RUNTIME) $(TEST_WX) $(TEST_VERIFY_APP)
+     $(TEST_INTEGRITY) $(TEST_MANIFEST) $(TEST_RUNTIME) $(TEST_WX) $(TEST_VERIFY_APP) $(TEST_SAVE_SEAL)
 
 lib: $(LIB_TARGET)
 
@@ -137,6 +140,9 @@ $(TEST_WX): tests/test_wx.c $(LIB_TARGET)
 $(TEST_VERIFY_APP): tests/test_verify_app.c $(LIB_TARGET)
 	$(CC) $(CFLAGS) $(RS_CFLAGS) $< $(LIB_TARGET) $(LDFLAGS) -o $@
 
+$(TEST_SAVE_SEAL): tests/test_save_seal.c $(LIB_TARGET)
+	$(CC) $(CFLAGS) $(RS_CFLAGS) $< $(LIB_TARGET) $(LDFLAGS) -o $@
+
 $(TEST_RUNTIME): tests/test_runtime.c $(LIB_TARGET)
 	$(CC) $(CFLAGS) $(RS_CFLAGS) $< $(LIB_TARGET) $(LDFLAGS) -o $@
 
@@ -161,7 +167,7 @@ endif
 test: $(CRACKME_TEST) \
       $(TEST_INTEGRITY) $(TEST_INTEGRITY_DISABLED) \
       $(TEST_MANIFEST) $(TEST_MANIFEST_DISABLED) \
-      $(TEST_RUNTIME) $(TEST_RUNTIME_DISABLED) $(TEST_WX) $(TEST_NO_ALLOW) $(TEST_VERIFY_APP) \
+      $(TEST_RUNTIME) $(TEST_RUNTIME_DISABLED) $(TEST_WX) $(TEST_NO_ALLOW) $(TEST_VERIFY_APP) $(TEST_SAVE_SEAL) \
       $(DEMO_INTEGRITY) $(DEMO_INTEGRITY_DISABLED) \
       $(SAMPLE_GAME) $(SAMPLE_GAME_SEALED) $(SAMPLE_GAME_DISABLED) $(SAMPLE_MANIFEST)
 	$(RUN) ./$(TEST_INTEGRITY)
@@ -172,6 +178,7 @@ test: $(CRACKME_TEST) \
 	$(RUN) ./$(TEST_RUNTIME_DISABLED)
 	$(RUN) ./$(TEST_NO_ALLOW)
 	$(RUN) ./$(TEST_WX)
+	$(RUN) ./$(TEST_SAVE_SEAL)
 	$(SEAL_WORKFLOW_TEST)
 	$(PYTHON3) tools/verify_release.py $(SAMPLE_GAME_SEALED) --manifest $(SAMPLE_MANIFEST) --assets examples/assets
 
