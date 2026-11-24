@@ -5,6 +5,7 @@ One-call release step for re-shield: strip -> manifest -> seal -> sign -> verify
 Run it on the final linked executable, in place:
 
     python3 tools/reshield_release.py dist/game --assets dist/assets --strip
+    python3 tools/reshield_release.py dist/game --assets dist --exclude "*.pdb"
     python3 tools/reshield_release.py dist/game --assets dist/assets --sign "Developer ID Application: Me (TEAMID)"
     python3 tools/reshield_release.py dist/game.exe --assets dist/assets --sign-cmd "signtool sign /fd sha256 /a {}"
 
@@ -16,6 +17,7 @@ so the seal format stays defined in one place. A Mach-O that already has a real 
 from __future__ import annotations
 
 import argparse
+import glob
 import os
 import shlex
 import subprocess
@@ -47,6 +49,9 @@ def main() -> int:
     p = argparse.ArgumentParser(description="strip -> manifest -> seal -> sign -> verify")
     p.add_argument("binary", help="Final linked executable (not an .app bundle); modified in place")
     p.add_argument("--assets", help="Asset directory to bind (a manifest is generated from it)")
+    p.add_argument("--exclude", action="append", default=[], metavar="GLOB",
+                   help="Leave files matching GLOB (relative POSIX path under --assets) out of the "
+                        "manifest; repeatable. The binary itself is excluded automatically.")
     p.add_argument("--manifest-out",
                    help="Manifest output path (default: <binary dir>/<binary name without extension>.manifest)")
     p.add_argument("--build-id", type=int,
@@ -91,7 +96,19 @@ def main() -> int:
         manifest = args.manifest_out or os.path.join(
             os.path.dirname(os.path.abspath(binary)),
             os.path.splitext(os.path.basename(binary))[0] + ".manifest")
-        run([sys.executable, os.path.join(TOOLS, "gen_manifest.py"), args.assets, "-o", manifest])
+        exclude = list(args.exclude)
+        try:  # abspath, like gen_manifest's own output check: the same names os.walk will produce
+            rel = os.path.relpath(os.path.abspath(binary), os.path.abspath(args.assets)).replace(os.sep, "/")
+        except ValueError:  # Windows: binary and assets on different drives
+            rel = ".."
+        if not (rel == ".." or rel.startswith("../")):
+            # Sealing rewrites the binary, so a manifest entry for it would fail verification.
+            print(f"[reshield_release] excluding the sealed binary from the manifest: {rel}")
+            exclude.append(glob.escape(rel))
+        gen = [sys.executable, os.path.join(TOOLS, "gen_manifest.py"), args.assets, "-o", manifest]
+        for pattern in exclude:
+            gen += ["--exclude", pattern]
+        run(gen)
 
     seal = [sys.executable, os.path.join(TOOLS, "seal_binary.py"), binary,
             "--build-id", str(build_id), "--no-codesign"]
