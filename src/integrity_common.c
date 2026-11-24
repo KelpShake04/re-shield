@@ -35,15 +35,16 @@ typedef struct reshield_integrity_record {
 #define RESHIELD_USED
 #endif
 
+/* Positional, in struct order: designated initializers are not C++ before C++20. */
 static volatile reshield_integrity_record_t RESHIELD_USED g_reshield_integrity_record = {
-    .magic = { 'R', 'S', 'H', 'L', 'D', 'C', 'H', 'K' },
-    .version = RESHIELD_INTEGRITY_RECORD_VERSION,
-    .sealed = 0u,
-    .build_id = 0u,
-    .has_manifest = 0u,
-    .expected_size = 0u,
-    .expected_sha256 = { 0 },
-    .manifest_root_sha256 = { 0 }
+    { 'R', 'S', 'H', 'L', 'D', 'C', 'H', 'K' }, /* magic */
+    RESHIELD_INTEGRITY_RECORD_VERSION,          /* version */
+    0u,                                         /* sealed */
+    0u,                                         /* build_id */
+    0u,                                         /* has_manifest */
+    0u,                                         /* expected_size */
+    { 0 },                                      /* expected_sha256 */
+    { 0 }                                       /* manifest_root_sha256 */
 };
 
 /* Address inside this module's image (the record lives in the module that linked re-shield).

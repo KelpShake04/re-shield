@@ -41,14 +41,15 @@ reshield_attestation_status_t reshield_verify_os_codesign(void) {
 }
 
 reshield_config_t reshield_default_config(void) {
+    /* Positional, in struct order: designated initializers are not C++ before C++20. */
     reshield_config_t cfg = {
-        .enabled_checks = RESHIELD_CHECK_DEFAULT,
-        .allow_unsealed = 0,
-        .manifest_path = NULL,
-        .asset_base_dir = NULL,
-        .on_violation = NULL,
-        .user_data = NULL,
-        .codesign_requirement = NULL
+        RESHIELD_CHECK_DEFAULT, /* enabled_checks */
+        0,                      /* allow_unsealed */
+        NULL,                   /* manifest_path */
+        NULL,                   /* asset_base_dir */
+        NULL,                   /* on_violation */
+        NULL,                   /* user_data */
+        NULL                    /* codesign_requirement */
     };
     return cfg;
 }
