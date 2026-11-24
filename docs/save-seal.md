@@ -22,11 +22,12 @@ English summary: an HMAC-SHA256 tag you append to a save or settings file so the
 uint8_t tag[RESHIELD_SAVE_TAG_SIZE];
 reshield_save_tag(KEY, sizeof KEY, buf, len, tag);
 /* 읽기: 파일 끝 32바이트를 태그로, 나머지를 데이터로 나눠 검증한다 */
-int ok = reshield_save_verify(KEY, sizeof KEY, buf, len, tag); /* 1 정상, 0 편집/손상, -1 인자 오류 */
+if (file_len < RESHIELD_SAVE_TAG_SIZE) return LOAD_FAIL; /* 태그가 잘린 파일은 verify 호출 전에 거부 */
+int ok = reshield_save_verify(KEY, sizeof KEY, buf, len, tag); /* 1 정상, 0 편집/손상, -1 호출 오류 */
 ```
 
-- `-1`은 "검사하지 못함"이다(NULL, 키 길이 0 등). 편집으로 취급하지 않는다.
-- 태그는 `HMAC-SHA256(key, "reshield-save-v1\0" || data)`다. 접두사는 같은 키로 만든 다른 HMAC과 섞이지 않게 한다. 순수 HMAC이 필요하면 `reshield_hmac_sha256`을 쓴다(RFC 4231 벡터로 테스트).
+- 반환값 `1`만 정상이다. `0`은 편집/손상이다. `-1`은 호출 오류(NULL, 키 길이 0, 길이 오버플로 등)이므로 정상으로 취급하지 말고 로드 실패와 같이 처리한다(세이브를 신뢰하지 않거나 백업으로 대체). 태그가 파일 끝 32바이트이므로 파일이 32바이트보다 짧으면 `reshield_save_verify`를 부르기 전에 앱이 먼저 거부해야 한다. 그대로 `len - 32`를 계산하면 `size_t` 언더플로로 -1이 나온다.
+- 태그는 `HMAC-SHA256(key, "reshield-save-v1\0" || data)`다. 접두사는 같은 키를 쓰는 다른 HMAC 용도와 우연히 충돌할 가능성만 줄인다. 도메인 분리는 아니다: `reshield_hmac_sha256(key, "reshield-save-v1\0" || X)`는 X의 세이브 태그와 같다. **같은 키를 다른 용도에 재사용하지 않는 것**이 정답이다. 순수 HMAC이 필요하면 `reshield_hmac_sha256`을 쓴다(RFC 4231 벡터로 테스트).
 - 빈 키(`key_len == 0`)는 거부한다. 거의 항상 버그이기 때문이다.
 - 비교는 상수 시간이다. 키 사본 같은 스택 임시값은 쓰고 나서 지운다(최선의 노력이며, SHA-256 내부 스크래치나 레지스터까지 완벽히 지운다는 보장은 아니다).
 

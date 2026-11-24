@@ -38,9 +38,11 @@ int reshield_hmac_sha256(const uint8_t *key, size_t key_len,
                          uint8_t out[32]);
 
 /**
- * Tag for a save blob: HMAC-SHA256(key, "reshield-save-v1\0" || data). The prefix separates
- * these tags from any other HMAC you compute with the same key. `data` may be NULL only when
- * len is 0 (an empty save is valid). Same return values as reshield_hmac_sha256().
+ * Tag for a save blob: HMAC-SHA256(key, "reshield-save-v1\0" || data). The prefix only makes an
+ * accidental collision with other HMAC uses of the same key less likely. It is not domain
+ * separation: reshield_hmac_sha256(key, "reshield-save-v1\0" || X) equals the tag of X. Do not
+ * reuse a save key for any other purpose. `data` may be NULL only when len is 0 (an empty save
+ * is valid). Same return values as reshield_hmac_sha256().
  */
 int reshield_save_tag(const uint8_t *key, size_t key_len,
                       const void *data, size_t len,
@@ -49,7 +51,9 @@ int reshield_save_tag(const uint8_t *key, size_t key_len,
 /**
  * Recomputes the tag and compares it with `tag` in constant time.
  * Returns 1 if they match, 0 if not, -1 on invalid arguments (same rules as
- * reshield_save_tag(), plus a NULL `tag`). Treat -1 as "could not check", not as "edited".
+ * reshield_save_tag(), plus a NULL `tag`). Only 1 means the save is intact. Treat -1 like a load
+ * failure (do not trust the save), never as OK. The tag is the last 32 bytes of the file, so
+ * reject a file shorter than 32 bytes before calling this.
  */
 int reshield_save_verify(const uint8_t *key, size_t key_len,
                          const void *data, size_t len,
