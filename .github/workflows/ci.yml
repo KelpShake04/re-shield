@@ -26,6 +26,13 @@ jobs:
           echo "ld.so rc=$rc"
           test "$rc" -ne 0 && test "$rc" -lt 128
 
+  # C# binding: dotnet console test loads the real shared libraries (the ubuntu runner ships the SDK).
+  csharp:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: dotnet --version && make csharp-test
+
   # musl names the main program in dl_iterate_phdr (glibc leaves it empty); build and test there too.
   linux-musl:
     runs-on: ubuntu-latest
