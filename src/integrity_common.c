@@ -51,9 +51,10 @@ static volatile reshield_integrity_record_t RESHIELD_USED g_reshield_integrity_r
 /* Development-build marker. Only a build compiled with RESHIELD_ALLOW_UNSEALED carries it, so
  * tools/reshield_release.py and tools/verify_release.py can refuse to ship such a binary. It is
  * a guard against shipping the wrong build by mistake, not a defense: an attacker can erase it.
- * RESHIELD_USED keeps the compiler from dropping it; the anchor function below reads it once so
- * that --gc-sections / -dead_strip / /OPT:REF cannot drop it either (the value is never used). */
-static const char RESHIELD_USED g_reshield_dev_build_marker[] = "RESHIELD-DEV-BUILD-v1";
+ * RESHIELD_USED keeps the compiler from dropping it; it is volatile so no compiler folds the read
+ * away, and the anchor function below reads it once so that --gc-sections / -dead_strip / /OPT:REF
+ * cannot drop it either (the value is never used). */
+static const volatile char RESHIELD_USED g_reshield_dev_build_marker[] = "RESHIELD-DEV-BUILD-v1";
 #endif
 
 /* Address inside this module's image (the record lives in the module that linked re-shield).
@@ -61,7 +62,7 @@ static const char RESHIELD_USED g_reshield_dev_build_marker[] = "RESHIELD-DEV-BU
  * re-shield verifies itself, not the host process. Internal: not in any public header. */
 const void *reshield_internal_record_anchor(void) {
 #ifdef RESHIELD_ALLOW_UNSEALED
-    (void)*(const volatile char *)g_reshield_dev_build_marker;
+    (void)g_reshield_dev_build_marker[0];
 #endif
     return (const void *)&g_reshield_integrity_record;
 }
