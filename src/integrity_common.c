@@ -35,16 +35,43 @@ typedef struct reshield_integrity_record {
 #define RESHIELD_USED
 #endif
 
+/* Positional, in struct order: designated initializers are not C++ before C++20. */
 static volatile reshield_integrity_record_t RESHIELD_USED g_reshield_integrity_record = {
-    .magic = { 'R', 'S', 'H', 'L', 'D', 'C', 'H', 'K' },
-    .version = RESHIELD_INTEGRITY_RECORD_VERSION,
-    .sealed = 0u,
-    .build_id = 0u,
-    .has_manifest = 0u,
-    .expected_size = 0u,
-    .expected_sha256 = { 0 },
-    .manifest_root_sha256 = { 0 }
+    { 'R', 'S', 'H', 'L', 'D', 'C', 'H', 'K' }, /* magic */
+    RESHIELD_INTEGRITY_RECORD_VERSION,          /* version */
+    0u,                                         /* sealed */
+    0u,                                         /* build_id */
+    0u,                                         /* has_manifest */
+    0u,                                         /* expected_size */
+    { 0 },                                      /* expected_sha256 */
+    { 0 }                                       /* manifest_root_sha256 */
 };
+
+#ifdef RESHIELD_ALLOW_UNSEALED
+/* Development-build marker. Only a build compiled with RESHIELD_ALLOW_UNSEALED carries it, so
+ * tools/reshield_release.py and tools/verify_release.py can refuse to ship such a binary. It is
+ * a guard against shipping the wrong build by mistake, not a defense: an attacker can erase it.
+ * It has external linkage (a static one that nothing really uses is never emitted by MSVC) but
+ * hidden visibility, so it is not part of any library's exported interface. RESHIELD_USED and the
+ * volatile read in the anchor function below keep it through the compiler and through
+ * --gc-sections / -dead_strip; the value is never used. */
+#if defined(__GNUC__) || defined(__clang__)
+extern __attribute__((visibility("hidden"))) const volatile char reshield_internal_dev_build_marker[];
+#else
+extern const volatile char reshield_internal_dev_build_marker[];
+#endif
+RESHIELD_USED const volatile char reshield_internal_dev_build_marker[] = "RESHIELD-DEV-BUILD-v1";
+#endif
+
+/* Address inside this module's image (the record lives in the module that linked re-shield).
+ * The platform hooks find "the image that holds the record" from it, so a library that links
+ * re-shield verifies itself, not the host process. Internal: not in any public header. */
+const void *reshield_internal_record_anchor(void) {
+#ifdef RESHIELD_ALLOW_UNSEALED
+    (void)reshield_internal_dev_build_marker[0];
+#endif
+    return (const void *)&g_reshield_integrity_record;
+}
 
 static void read_record(reshield_integrity_record_t *dst) {
     const volatile uint8_t *src = (const volatile uint8_t *)&g_reshield_integrity_record;

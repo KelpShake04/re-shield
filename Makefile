@@ -9,8 +9,10 @@ INCLUDES = -Iinclude
 RS_BASE  = -std=c11 $(INCLUDES)
 
 # This repo's own build is a development build: tests and demos use cfg.allow_unsealed.
-# A release build must pass ALLOW_UNSEALED=0 (or compile without -DRESHIELD_ALLOW_UNSEALED);
-# the library then reports INTERNAL_ERROR if a caller sets the field.
+# `make lib` and `make shared` therefore give a DEVELOPMENT library, which carries the marker
+# RESHIELD-DEV-BUILD-v1 so tools/reshield_release.py and verify_release.py refuse to ship it.
+# A release build must pass ALLOW_UNSEALED=0 (or compile without -DRESHIELD_ALLOW_UNSEALED), or use
+# `make release-shared`; the library then reports INTERNAL_ERROR if a caller sets the field.
 ALLOW_UNSEALED ?= 1
 ifeq ($(ALLOW_UNSEALED),1)
 RS_CFLAGS = $(RS_BASE) -DRESHIELD_ALLOW_UNSEALED
@@ -23,11 +25,21 @@ endif
 
 # Target platform comes from the compiler (so cross builds work), not from the host uname.
 TARGET_TRIPLE := $(shell $(CC) -dumpmachine)
+# Shared library (module mode): `make shared`. Not offered for mingw, where DLLs are built with cl
+# and reshield.def (see the windows-msvc CI job).
 ifneq ($(findstring mingw,$(TARGET_TRIPLE)),)
 EXE ?= .exe
 LDFLAGS += -lwintrust -lpsapi
 else ifneq ($(findstring darwin,$(TARGET_TRIPLE)),)
 LDFLAGS += -framework Security -framework CoreFoundation
+SHARED_EXT = dylib
+SHARED_LDFLAGS = -dynamiclib
+else
+SHARED_EXT = so
+# -Bsymbolic: calls inside the library bind to its own copy, never to a same-named symbol that
+# the host executable exports, so the library always finds its own integrity record.
+SHARED_LDFLAGS = -shared -Wl,-Bsymbolic
+DL_LIBS = -ldl
 endif
 EXE ?=
 # Overridden by `make sanitize`: that script drives the hardcoded build/ binaries, not build/san/.
@@ -51,6 +63,8 @@ LIB_SRCS  = src/sha256.c \
             src/save_seal.c
 LIB_OBJS  = $(patsubst src/%.c,$(BUILD_DIR)/%.o,$(LIB_SRCS))
 LIB_TARGET = $(BUILD_DIR)/libreshield.a
+PIC_OBJS  = $(patsubst src/%.c,$(BUILD_DIR)/pic/%.o,$(LIB_SRCS))
+SHARED_TARGET = $(BUILD_DIR)/libreshield.$(SHARED_EXT)
 
 HEADERS = include/reshield/integrity.h \
           include/reshield/manifest.h \
@@ -77,8 +91,9 @@ TEST_WX                 = $(BUILD_DIR)/test_wx$(EXE)
 TEST_VERIFY_APP         = $(BUILD_DIR)/test_verify_app$(EXE)
 TEST_NO_ALLOW           = $(BUILD_DIR)/test_no_allow_unsealed$(EXE)
 TEST_SAVE_SEAL          = $(BUILD_DIR)/test_save_seal$(EXE)
+TEST_MODULE_HOST        = $(BUILD_DIR)/test_module_host$(EXE)
 
-.PHONY: all lib clean test crackme release-demo sanitize fuzz-build fuzz fuzz-pe
+.PHONY: all lib shared release-shared module-test csharp-test guard-test release-sample clean test crackme release-demo sanitize fuzz-build fuzz fuzz-pe
 
 all: $(LIB_TARGET) $(DEMO_INTEGRITY) $(SAMPLE_GAME) $(SAMPLE_GAME_SEALED) \
      $(TEST_INTEGRITY) $(TEST_MANIFEST) $(TEST_RUNTIME) $(TEST_WX) $(TEST_VERIFY_APP) $(TEST_SAVE_SEAL)
@@ -93,6 +108,21 @@ $(BUILD_DIR)/%.o: src/%.c $(HEADERS) | $(BUILD_DIR)
 
 $(LIB_TARGET): $(LIB_OBJS)
 	$(AR) rcs $@ $(LIB_OBJS)
+
+shared: $(SHARED_TARGET)
+
+$(BUILD_DIR)/pic:
+	mkdir -p $@
+
+$(BUILD_DIR)/pic/%.o: src/%.c $(HEADERS) | $(BUILD_DIR)/pic
+	$(CC) $(CFLAGS) $(RS_CFLAGS) -fPIC -c $< -o $@
+
+$(SHARED_TARGET): $(PIC_OBJS)
+	$(CC) $(SHARED_LDFLAGS) $(PIC_OBJS) $(LDFLAGS) -o $@
+
+# The release (ALLOW_UNSEALED=0) library has its own directory; build it from a sub-make.
+release-shared:
+	$(MAKE) ALLOW_UNSEALED=0 BUILD_DIR=build/release shared
 
 $(DEMO_INTEGRITY): examples/integrity_demo.c $(LIB_TARGET)
 	$(CC) $(CFLAGS) $(RS_CFLAGS) $< $(LIB_TARGET) $(LDFLAGS) -o $@
@@ -152,8 +182,51 @@ $(TEST_RUNTIME_DISABLED): tests/test_runtime.c $(LIB_SRCS) | $(BUILD_DIR)
 $(TEST_NO_ALLOW): tests/test_no_allow_unsealed.c $(LIB_SRCS) | $(BUILD_DIR)
 	$(CC) $(filter-out -DRESHIELD_ALLOW_UNSEALED,$(CFLAGS)) $(RS_BASE) $^ $(LDFLAGS) -o $@
 
+# Module mode: re-shield linked into a shared library that an unsealed host dlopen()s. The host
+# links no re-shield code. `make sanitize` skips it (an ASan library needs an ASan host runtime).
+MODULE_TEST ?= $(PYTHON3) tests/test_module_mode.py --host $(TEST_MODULE_HOST) \
+               --lib $(SHARED_TARGET) --release-lib build/release/libreshield.$(SHARED_EXT) \
+               $(MODULE_DUAL_ARG)
+
+$(TEST_MODULE_HOST): tests/test_module_host.c | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(RS_CFLAGS) $< $(DL_LIBS) -o $@
+
+# ELF only (macOS has a two-level namespace, no interposition): a host that links re-shield too and
+# exports its symbols, to check that -Wl,-Bsymbolic keeps the library on its own record.
+ifeq ($(SHARED_EXT),so)
+TEST_MODULE_DUAL = $(BUILD_DIR)/test_module_host_dual$(EXE)
+MODULE_DUAL_ARG  = --dual-host $(TEST_MODULE_DUAL)
+$(TEST_MODULE_DUAL): tests/test_module_host.c $(LIB_TARGET)
+	$(CC) $(CFLAGS) $(RS_CFLAGS) $< -Wl,--whole-archive $(LIB_TARGET) -Wl,--no-whole-archive -rdynamic $(DL_LIBS) -o $@
+endif
+
+module-test: $(TEST_MODULE_HOST) $(TEST_MODULE_DUAL) $(SHARED_TARGET) release-shared
+	$(MODULE_TEST)
+
+# C# binding (bindings/csharp): loads the shared libraries from a dotnet console test. Not part of
+# `make test`; skips (successfully) when there is no dotnet SDK.
+csharp-test:
+	cmp bindings/csharp/Reshield.cs bindings/unity/com.reshield.guard/Runtime/Reshield.cs
+	@if command -v dotnet >/dev/null 2>&1; then \
+	  $(MAKE) shared release-shared && $(PYTHON3) bindings/csharp/tests/run.py; \
+	else echo "SKIP: csharp-test (dotnet SDK not found)"; fi
+
+# Dev-build guard (docs/steam-pipeline.md): the development marker is in dev artifacts only, and
+# reshield_release.py / verify_release.py refuse it. release-sample links a sample with the release library.
+RELEASE_SAMPLE = build/release/sample_game$(EXE)
+
+release-sample:
+	$(MAKE) ALLOW_UNSEALED=0 BUILD_DIR=build/release $(RELEASE_SAMPLE)
+
+guard-test: $(LIB_TARGET) $(SAMPLE_GAME) $(SHARED_TARGET) release-shared release-sample
+	$(PYTHON3) tests/test_dev_build_guard.py \
+	    --dev-artifact $(LIB_TARGET) --dev-artifact $(SHARED_TARGET) --dev-bin $(SAMPLE_GAME) \
+	    --release-artifact build/release/libreshield.a --release-artifact build/release/libreshield.$(SHARED_EXT) \
+	    --release-bin $(RELEASE_SAMPLE)
+
+# The demo seals a development build on purpose, hence --allow-dev-build.
 release-demo: $(SAMPLE_GAME_SEALED) $(SAMPLE_MANIFEST)
-	$(PYTHON3) tools/verify_release.py $(SAMPLE_GAME_SEALED) --manifest $(SAMPLE_MANIFEST) --assets examples/assets
+	$(PYTHON3) tools/verify_release.py $(SAMPLE_GAME_SEALED) --allow-dev-build --manifest $(SAMPLE_MANIFEST) --assets examples/assets
 	$(RUN) ./$(SAMPLE_GAME_SEALED) $(SAMPLE_MANIFEST) examples/assets STAGE-1-CLEAR-2026
 
 # Crackme lab (docs/crackme-lab.md): needs nm and POSIX binaries, so not part of `make test` for mingw.
@@ -162,9 +235,11 @@ crackme: $(CRACKME_SEALED)
 
 ifeq ($(findstring mingw,$(TARGET_TRIPLE)),)
 CRACKME_TEST = crackme
+MODULE_TEST_TARGET ?= module-test
+GUARD_TEST_TARGET ?= guard-test
 endif
 
-test: $(CRACKME_TEST) \
+test: $(CRACKME_TEST) $(MODULE_TEST_TARGET) $(GUARD_TEST_TARGET) \
       $(TEST_INTEGRITY) $(TEST_INTEGRITY_DISABLED) \
       $(TEST_MANIFEST) $(TEST_MANIFEST_DISABLED) \
       $(TEST_RUNTIME) $(TEST_RUNTIME_DISABLED) $(TEST_WX) $(TEST_NO_ALLOW) $(TEST_VERIFY_APP) $(TEST_SAVE_SEAL) \
@@ -180,18 +255,20 @@ test: $(CRACKME_TEST) \
 	$(RUN) ./$(TEST_WX)
 	$(RUN) ./$(TEST_SAVE_SEAL)
 	$(SEAL_WORKFLOW_TEST)
-	$(PYTHON3) tools/verify_release.py $(SAMPLE_GAME_SEALED) --manifest $(SAMPLE_MANIFEST) --assets examples/assets
+	$(PYTHON3) tools/verify_release.py $(SAMPLE_GAME_SEALED) --allow-dev-build --manifest $(SAMPLE_MANIFEST) --assets examples/assets
 
 clean:
 	rm -rf $(BUILD_DIR)
 
 # ASan+UBSan run of the C test flow in build/san/ (tests still write scratch files under build/).
-# Skipped on purpose: tests/test_seal_workflow.py (drives build/ binaries and unsanitized Python).
+# Skipped on purpose: tests/test_seal_workflow.py (drives build/ binaries and unsanitized Python)
+# and module-test (an ASan shared library needs an ASan host runtime), and guard-test (it checks
+# the plain build/ and build/release/ artifacts).
 SAN_CFLAGS = -Wall -Wextra -Wpedantic -Werror -O1 -g -fno-omit-frame-pointer \
              -fsanitize=address,undefined -fno-sanitize-recover=undefined
 sanitize:
 	mkdir -p build
-	$(MAKE) test BUILD_DIR=build/san CFLAGS="$(SAN_CFLAGS)" SEAL_WORKFLOW_TEST=true
+	$(MAKE) test BUILD_DIR=build/san CFLAGS="$(SAN_CFLAGS)" SEAL_WORKFLOW_TEST=true MODULE_TEST_TARGET= GUARD_TEST_TARGET=
 
 # libFuzzer harnesses (tests/fuzz/). Needs a clang with libFuzzer (not Apple clang): run inside
 # a container, see docs/fuzzing.md. Corpora live outside the repo (FUZZ_CORPUS).
