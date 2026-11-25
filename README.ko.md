@@ -57,6 +57,7 @@ make release-demo
 - 무엇을 막고 무엇을 못 막는지 직접 실험하는 crackme 랩(자기 바이너리만 대상): [docs/crackme-lab.md](docs/crackme-lab.md)
 - Unity(C# P/Invoke 바인딩, Unity 미검증 패키지 골격): [docs/engines-unity.md](docs/engines-unity.md)
 - GitHub Actions로 봉인한 뒤 steamcmd로 올리기(검증하지 못한 부분 포함): [docs/steam-pipeline.md](docs/steam-pipeline.md)
+- 세이브·설정 파일의 캐주얼 편집·손상 탐지(HMAC-SHA256, 전문 공격자는 못 막음): [docs/save-seal.md](docs/save-seal.md)
 
 ## 내 프로젝트에 적용하기
 

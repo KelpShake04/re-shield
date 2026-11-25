@@ -154,8 +154,8 @@ jobs:
           call "%VSDIR%\VC\Auxiliary\Build\vcvars64.bat"
           set CFLAGS=/nologo /std:c11 /O2 /W3 /WX /DRESHIELD_ALLOW_UNSEALED /I include
           set TFLAGS=%CFLAGS% /D_CRT_SECURE_NO_WARNINGS /D_CRT_NONSTDC_NO_WARNINGS
-          cl %CFLAGS% /c /Fo:build\lib\ src\sha256.c src\integrity_common.c src\integrity_windows.c src\file_windows.c src\manifest.c src\attestation_windows.c src\reshield.c src\verify_app.c || exit /b 1
-          lib /nologo /OUT:build\reshield.lib build\lib\sha256.obj build\lib\integrity_common.obj build\lib\integrity_windows.obj build\lib\file_windows.obj build\lib\manifest.obj build\lib\attestation_windows.obj build\lib\reshield.obj build\lib\verify_app.obj || exit /b 1
+          cl %CFLAGS% /c /Fo:build\lib\ src\sha256.c src\integrity_common.c src\integrity_windows.c src\file_windows.c src\manifest.c src\attestation_windows.c src\reshield.c src\verify_app.c src\save_seal.c || exit /b 1
+          lib /nologo /OUT:build\reshield.lib build\lib\sha256.obj build\lib\integrity_common.obj build\lib\integrity_windows.obj build\lib\file_windows.obj build\lib\manifest.obj build\lib\attestation_windows.obj build\lib\reshield.obj build\lib\verify_app.obj build\lib\save_seal.obj || exit /b 1
           cl %CFLAGS% /Fo:build\ examples\integrity_demo.c build\reshield.lib /Fe:build\integrity_demo.exe /link /INCREMENTAL:NO || set FAIL=1
           cl %CFLAGS% /Fo:build\ examples\sample_game.c build\reshield.lib /Fe:build\sample_game.exe /link /INCREMENTAL:NO || set FAIL=1
           cl %TFLAGS% /Fo:build\ tests\test_integrity.c build\reshield.lib /Fe:build\test_integrity.exe /link /INCREMENTAL:NO || set FAIL=1
@@ -163,6 +163,7 @@ jobs:
           cl %TFLAGS% /Fo:build\ tests\test_runtime.c build\reshield.lib /Fe:build\test_runtime.exe /link /INCREMENTAL:NO || set FAIL=1
           cl %TFLAGS% /Fo:build\ tests\test_wx.c build\reshield.lib /Fe:build\test_wx.exe /link /INCREMENTAL:NO || set FAIL=1
           cl %TFLAGS% /Fo:build\ tests\test_verify_app.c build\reshield.lib /Fe:build\test_verify_app.exe /link /INCREMENTAL:NO || set FAIL=1
+          cl %TFLAGS% /Fo:build\ tests\test_save_seal.c build\reshield.lib /Fe:build\test_save_seal.exe /link /INCREMENTAL:NO || set FAIL=1
           cl %TFLAGS% /Fo:build\ tests\test_codesign_toctou_windows.c build\reshield.lib /Fe:build\test_codesign_toctou_windows.exe /link /INCREMENTAL:NO || set FAIL=1
           if defined FAIL exit /b 1
 
@@ -170,7 +171,7 @@ jobs:
         shell: pwsh
         run: |
           $bad = 0
-          foreach ($t in 'test_integrity', 'test_manifest', 'test_runtime', 'test_wx') {
+          foreach ($t in 'test_integrity', 'test_manifest', 'test_runtime', 'test_wx', 'test_save_seal') {
             "=== $t ==="
             & ".\build\$t.exe"
             if ($LASTEXITCODE -ne 0) { "FAILED: $t exit=$LASTEXITCODE"; $bad = 1 }
