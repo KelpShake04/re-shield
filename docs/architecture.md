@@ -18,7 +18,8 @@
 | `file` (내부) | `src/file_platform.h`, `src/file_posix.c`, `src/file_windows.c` | 일반 파일만 여는 플랫폼별 파일 I/O(POSIX `open`/`fstat`, Windows `CreateFileW`). `sha256.c`와 `manifest.c`가 사용 |
 | `attestation` | `include/reshield/attestation.h`, `src/attestation_*.c` | 코드 섹션 전 범위의 W^X(쓰기 금지) 권한 검증 및 macOS `SecCodeCheckValidity`·Windows `WinVerifyTrust` 유효성 검증 |
 | `runtime` | `include/reshield/reshield.h`, `src/reshield.c` | 통합 `reshield_verify()` 파이프라인, `reshield_secure_zero()` |
-| `tools` | `tools/gen_manifest.py`, `tools/manifest_path.py`, `tools/seal_binary.py`, `tools/verify_release.py` | 에셋 매니페스트 생성(경로 규칙은 `manifest_path.py`), 바이너리 봉인(Mach-O·ELF·PE32+ x64), 릴리스 아티팩트 CI 검증 |
+| `verify_app` | `src/verify_app.c` | `reshield_verify_app()`(프로세스 EXE 디렉터리 기준 경로로 코드+매니페스트 검사)와 엔진 바인딩용 `reshield_check_json()`(평면 C 타입) |
+| `tools` | `tools/gen_manifest.py`, `tools/manifest_path.py`, `tools/seal_binary.py`, `tools/verify_release.py`, `tools/reshield_release.py` | 에셋 매니페스트 생성(경로 규칙은 `manifest_path.py`), 바이너리 봉인(Mach-O·ELF·PE32+ x64), 릴리스 아티팩트 CI 검증, 한 번에 실행하는 릴리스 단계(`reshield_release.py`: strip, 매니페스트, 봉인, 서명, 검증) |
 
 ## `RSHLDCHK` v2 레코드 구조 (96 bytes)
 

@@ -32,5 +32,20 @@ int main(int argc, char **argv) {
     if (!same) {
         return 99;
     }
+
+    /* Boundaries: cap 0 leaves the buffer untouched, cap 1 writes only the NUL, and a NULL json
+     * with a non-zero cap is safe. The status is unaffected in every case. */
+    char z[4], one[4];
+    memset(z, 'X', sizeof(z));
+    memset(one, 'X', sizeof(one));
+    int st_c0 = reshield_check_json(argv[1], assets, z, 0);
+    int st_c1 = reshield_check_json(argv[1], assets, one, 1);
+    int st_np = reshield_check_json(argv[1], assets, NULL, 64);
+    int bounds = st_c0 == (int)st && st_c1 == (int)st && st_np == (int)st &&
+                 memcmp(z, "XXXX", sizeof(z)) == 0 && memcmp(one, "\0XXX", sizeof(one)) == 0;
+    printf("check_json_bounds=%s\n", bounds ? "ok" : "BAD");
+    if (!bounds) {
+        return 98;
+    }
     return 10 + (int)st;
 }

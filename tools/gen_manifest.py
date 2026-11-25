@@ -16,6 +16,8 @@ Policy:
 - --exclude GLOB (repeatable) drops files whose relative POSIX path matches, using
   fnmatch.fnmatchcase (case-sensitive; "*" also matches "/", so "*.pdb" and "dir/*" cover
   subdirectories). Excluded files are skipped before the path checks above.
+  A pattern that matches no file at all (a typo, "./x", a backslash path) is reported on stderr:
+  the exit code is unchanged, but the protected set is then larger than intended.
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ import argparse
 import fnmatch
 import hashlib
 import os
+import sys
 import unicodedata
 
 from manifest_path import is_safe_relative_path
@@ -45,6 +48,7 @@ def sha256_file(path: str) -> tuple[str, int]:
 def generate_manifest(asset_dir: str, output_path: str, exclude: tuple[str, ...] = ()) -> str:
     entries: list[tuple[str, int, str]] = []
     excluded = 0
+    matched = dict.fromkeys(exclude, 0)
     for root, _dirs, files in os.walk(asset_dir):
         for name in files:
             if name.startswith("."):
@@ -53,7 +57,10 @@ def generate_manifest(asset_dir: str, output_path: str, exclude: tuple[str, ...]
             if os.path.abspath(full) == os.path.abspath(output_path):
                 continue
             rel = os.path.relpath(full, asset_dir).replace(os.sep, "/")
-            if any(fnmatch.fnmatchcase(rel, pattern) for pattern in exclude):
+            hits = [pattern for pattern in exclude if fnmatch.fnmatchcase(rel, pattern)]
+            if hits:
+                for pattern in hits:
+                    matched[pattern] += 1
                 excluded += 1
                 continue
             if not is_safe_relative_path(rel):
@@ -62,6 +69,11 @@ def generate_manifest(asset_dir: str, output_path: str, exclude: tuple[str, ...]
                 raise ValueError(f"Asset path is not NFC-normalized: {rel!r}")
             digest_hex, size = sha256_file(full)
             entries.append((rel, size, digest_hex))
+
+    for pattern, count in matched.items():
+        if count == 0:
+            print(f"[gen_manifest] warning: --exclude {pattern!r} matched no file under {asset_dir}",
+                  file=sys.stderr)
 
     entries.sort(key=lambda item: item[0])
     seen: dict[str, str] = {}

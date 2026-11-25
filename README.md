@@ -13,6 +13,7 @@ English | [한국어](README.ko.md)
 - **Asset manifest root.** `tools/gen_manifest.py` writes a SHA-256 manifest of an asset directory. Its root hash is sealed into the binary, so the executable and its asset bundle are checked as a pair.
 - **W^X check.** The code segment must be readable and executable, never writable (`mach_vm_region` on macOS, `/proc/self/maps` on Linux, `VirtualQuery` on Windows).
 - **OS code-signature check.** `SecCodeCheckValidity` on macOS, `WinVerifyTrust` on Windows. By default any valid signer passes. Set `cfg.codesign_requirement` to pin the signer: a code requirement string on macOS, `leaf-sha256:<64 hex>` (SHA-256 of the signing certificate) on Windows.
+- **Module mode.** Link re-shield into a shared library (`.so` / `.dylib` / `.dll`) instead of the executable and the library is the sealed, checked image; the host executable (an engine, say) needs no re-shield code and is not sealed. See [Known limitations](#known-limitations).
 - **Report only.** The library never kills the process. `reshield_verify()` returns a status and fills a `reshield_report_t`. Your app decides what to do. `reshield_report_to_json()` writes the report as one line of JSON (`"v":1`) for logs or telemetry.
 
 ## When to use it, and when not to
@@ -38,8 +39,8 @@ It is not anti-cheat, DRM or a kernel-level defense. It does not block debuggers
 | Platform | Supported | What CI checks |
 |---|---|---|
 | macOS, Mach-O 64 | yes | `make clean && make all test release-demo` on `macos-latest` |
-| Linux, ELF64 (glibc and musl) | yes | glibc on `ubuntu-latest`, including `make sanitize`; musl on Alpine for dynamic, `-no-pie`, static and static-pie; `ld.so ./prog` must exit with an error, not crash |
-| Windows x64, PE32+ (MSVC) | yes | `windows-latest` with `cl`: build, seal, run, flip one `.text` byte and expect `CODE_TAMPERED`, sealed-then-signed EXE with a throwaway self-signed certificate (valid signature and `leaf-sha256:` pin match, mismatch, bad format) |
+| Linux, ELF64 (glibc and musl) | yes | glibc on `ubuntu-latest`, including `make sanitize`; musl on Alpine for dynamic, `-no-pie`, static and static-pie; `ld.so ./prog` must exit with an error, not crash; module mode (`make module-test`, development and release shared library) and a C++11 syntax check of `src/*.c` |
+| Windows x64, PE32+ (MSVC) | yes | `windows-latest` with `cl`: build, seal, run, flip one `.text` byte and expect `CODE_TAMPERED`, sealed-then-signed EXE with a throwaway self-signed certificate (valid signature and `leaf-sha256:` pin match, mismatch, bad format), module mode (a release `reshield.dll` built with `reshield.def`, checked by an unsealed host EXE: unsealed, sealed OK, tampered, including the `reshield_check_json` output) and a C++ compile gate (`cl /TP`) |
 | Windows with mingw-w64 | cross-compile and tool tests only | Not run in CI. The default link leaves one relocation inside `.text`, so sealing is refused. Linking with `-Wl,--disable-dynamicbase -Wl,--disable-reloc-section` allows sealing but turns ASLR off, so it is not recommended for shipping. |
 | Windows ARM64, 32-bit, fat/universal Mach-O | no | Sealing is refused or fails closed |
 
@@ -112,7 +113,9 @@ char json[512];
 int status = reshield_check_json("game.manifest", "assets", json, sizeof json);  /* 0 = RESHIELD_OK */
 ```
 
-Binaries inside the asset directory and build leftovers can be left out of the manifest: `python3 tools/gen_manifest.py dist -o dist/game.manifest --exclude "*.pdb" --exclude "cache/*"` (repeatable globs on the relative POSIX path). `reshield_release.py` takes the same `--exclude` and always leaves the binary it seals out of the manifest, so `reshield_release.py dist/game --assets dist` works.
+Both calls resolve the two paths against the directory of the **process executable**, not the library: when re-shield is linked into a shared library (module mode), the manifest and assets are looked up next to the host EXE. In a development library (`make lib` / `make shared`, compiled with `-DRESHIELD_ALLOW_UNSEALED`) an unsealed binary reports `OK`; a release library (`ALLOW_UNSEALED=0`) requires a sealed one.
+
+Binaries inside the asset directory and build leftovers can be left out of the manifest: `python3 tools/gen_manifest.py dist -o dist/game.manifest --exclude "*.pdb" --exclude "cache/*"` (repeatable globs on the relative POSIX path). `reshield_release.py` takes the same `--exclude` and always leaves the binary it seals out of the manifest, Binaries inside the asset directory and build leftovers can be left out of the manifest: `python3 tools/gen_manifest.py dist -o dist/game.manifest --exclude "*.pdb" --exclude "cache/*"` (repeatable globs on the relative POSIX path). `reshield_release.py` takes the same `--exclude` and always leaves the binary it seals out of the manifest, so `reshield_release.py dist/game --assets dist` works. A pattern that matches no file (a typo, `./x`, a backslash path) is reported on stderr by `gen_manifest.py`; the exit code does not change.
 
 Or set it up yourself with `reshield_verify()` (paths then relative to the current directory):
 
@@ -122,7 +125,7 @@ cfg.manifest_path  = "game.manifest";
 cfg.asset_base_dir = "assets";
 ```
 
-A manifest or asset path that cannot be opened is reported as `MANIFEST_IO_ERROR` (`RESHIELD_ERR_MANIFEST_IO`, value 8), not `INTERNAL_ERROR`, so a wrong path is not mistaken for an internal fault. Before this change it was `INTERNAL_ERROR`.
+A manifest file that cannot be opened or parsed (wrong path, missing file, malformed or empty manifest, an unsafe asset path inside it) is reported as `MANIFEST_IO_ERROR` (`RESHIELD_ERR_MANIFEST_IO`, value 8), not `INTERNAL_ERROR`, so a wrong path is not mistaken for an internal fault. Before this change it was `INTERNAL_ERROR`. An asset that is missing, resized or altered is `ASSET_TAMPERED` (6), a tamper verdict.
 
 If you load an asset after verifying it by path, the file can change in between (TOCTOU). Read the file into memory, check it with `reshield_verify_buffer()`, then use that buffer. See `examples/sample_game.c` for a complete program.
 
@@ -133,10 +136,18 @@ If you load an asset after verifying it by path, the file can change in between 
 - `cfg.allow_unsealed = 1` lets a binary that was never sealed pass. It works only if the library was compiled with `-DRESHIELD_ALLOW_UNSEALED`. This repository's Makefile turns that on by default. For a release build use `make ALLOW_UNSEALED=0 lib` and link `build/release/libreshield.a`.
 - If the field is set on a library built without the macro, `reshield_verify()` returns `INTERNAL_ERROR`. It is neither ignored nor bypassed.
 - Never ship a build with `RESHIELD_ALLOW_UNSEALED`. An attacker could then skip the code and manifest checks by changing the sealed byte in the record.
+- **`make lib` and `make shared` build the development library by default.** To ship, use `make release-shared` (shared library) or `make ALLOW_UNSEALED=0 lib`, or compile your own copy without `-DRESHIELD_ALLOW_UNSEALED`.
+- A development build contains the marker `RESHIELD-DEV-BUILD-v1`; a release build never does. `tools/reshield_release.py` and `tools/verify_release.py` refuse a binary that contains it (exit code 2, before anything is modified). `--allow-dev-build` (action input `allow-dev-build`) overrides this for demos and CI only. `tools/seal_binary.py` does not check it, because the tests and demos seal development builds directly.
+- Limit: the marker is a guard against shipping the wrong build by mistake, not a defense. An attacker who holds a shipped development build can erase the marker (and flip the sealed byte); only a release build protects against that.
+
+## Shared library and C++
+
+- `make shared` builds `build/libreshield.so` (`build/libreshield.dylib` on macOS) for module mode; `make release-shared` builds the release flavor (`ALLOW_UNSEALED=0`) in `build/release/`. On Windows the DLL is built with `cl /LD ... /link /DEF:reshield.def`, which exports only the subset an engine binding needs (`reshield_verify_code_section`, `reshield_verify_code_page_wx`, `reshield_verify_app`, `reshield_check_json`, `reshield_report_to_json`, `reshield_status_name`); a POSIX shared library exports the whole public API. Seal the library with `tools/seal_binary.py`.
+- `src/*.c` and the public headers also compile as C++ (checked in CI as a syntax-only gate: `c++ -std=c++11 -fsyntax-only` on Linux and macOS, `cl /TP` on Windows). The gate does not link or run C++ objects.
 
 ## Known limitations
 
-- The code check covers the image that holds the sealed record: the main executable when re-shield is linked statically, or the shared library (`.so` / `.dylib` / `.dll`) when re-shield is linked into one. Seal that file; the host executable is neither checked nor required to be sealed. Other modules (an engine binary, other plugins) are not checked. The code-signature check always looks at the process executable. On Linux, open the library by an absolute path, otherwise the check fails closed.
+- The code check covers the image that holds the sealed record: the main executable when re-shield is linked statically, or the shared library (`.so` / `.dylib` / `.dll`) when re-shield is linked into one. Seal that file; the host executable is neither checked nor required to be sealed. Other modules (an engine binary, other plugins) are not checked. The code-signature check always looks at the process executable. On Linux, a library opened by a relative path works too (its absolute path comes from `/proc/self/maps`); the check fails closed if `/proc` is unavailable or the library file was deleted or replaced after loading.
 - Only `__TEXT,__text` / `.text` is hashed. `__stubs`, `.plt`, `__const` and the `__DATA` that holds the record are not.
 - The record starts with a plain `RSHLDCHK` magic, so the place to edit is easy to find.
 - Files that are not in the manifest are not detected.
@@ -153,6 +164,7 @@ The design and verification guides are written in Korean.
 
 - [docs/architecture.md](docs/architecture.md): design, the 96-byte `RSHLDCHK` v2 record, limits.
 - [docs/integrity-verification.md](docs/integrity-verification.md): sealing pipeline, runtime integration, manifest format rules, Windows details.
+- [docs/steam-pipeline.md](docs/steam-pipeline.md): sealing in GitHub Actions (`action.yml`) before a `steamcmd` upload; what was not tested (Korean).
 - [docs/fuzzing.md](docs/fuzzing.md): sanitizers and fuzzing, in English.
 - [docs/crackme-lab.md](docs/crackme-lab.md): crackme lab, patch your own sealed binary to see what re-shield stops and what it cannot (Korean).
 - [docs/engines-unity.md](docs/engines-unity.md): C# binding and an untested Unity package skeleton (Korean).
