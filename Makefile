@@ -96,7 +96,7 @@ BENCH_SHA256            = $(BUILD_DIR)/bench_sha256$(EXE)
 TEST_SAVE_SEAL          = $(BUILD_DIR)/test_save_seal$(EXE)
 TEST_MODULE_HOST        = $(BUILD_DIR)/test_module_host$(EXE)
 
-.PHONY: all lib shared release-shared module-test csharp-test guard-test release-sample clean test bench crackme release-demo sanitize fuzz-build fuzz fuzz-pe
+.PHONY: all lib shared release-shared module-test corrupt-elf-test csharp-test guard-test release-sample clean test bench crackme release-demo sanitize fuzz-build fuzz fuzz-pe
 
 all: $(LIB_TARGET) $(DEMO_INTEGRITY) $(SAMPLE_GAME) $(SAMPLE_GAME_SEALED) \
      $(TEST_INTEGRITY) $(TEST_MANIFEST) $(TEST_RUNTIME) $(TEST_WX) $(TEST_VERIFY_APP) $(TEST_SAVE_SEAL)
@@ -210,12 +210,17 @@ $(TEST_MODULE_HOST): tests/test_module_host.c | $(BUILD_DIR)
 ifeq ($(SHARED_EXT),so)
 TEST_MODULE_DUAL = $(BUILD_DIR)/test_module_host_dual$(EXE)
 MODULE_DUAL_ARG  = --dual-host $(TEST_MODULE_DUAL)
+CORRUPT_ELF_TEST_TARGET ?= corrupt-elf-test
 $(TEST_MODULE_DUAL): tests/test_module_host.c $(LIB_TARGET)
 	$(CC) $(CFLAGS) $(RS_CFLAGS) $< -Wl,--whole-archive $(LIB_TARGET) -Wl,--no-whole-archive -rdynamic $(DL_LIBS) -o $@
 endif
 
 module-test: $(TEST_MODULE_HOST) $(TEST_MODULE_DUAL) $(SHARED_TARGET) release-shared
 	$(MODULE_TEST)
+
+# Linux only: a sealed library copy with damaged section headers must fail closed (no signal, never OK).
+corrupt-elf-test: $(TEST_MODULE_HOST) $(SHARED_TARGET)
+	$(PYTHON3) tests/test_corrupt_elf.py --host $(TEST_MODULE_HOST) --lib $(SHARED_TARGET)
 
 # C# binding (bindings/csharp): loads the shared libraries from a dotnet console test. Not part of
 # `make test`; skips (successfully) when there is no dotnet SDK.
@@ -253,7 +258,7 @@ MODULE_TEST_TARGET ?= module-test
 GUARD_TEST_TARGET ?= guard-test
 endif
 
-test: $(CRACKME_TEST) $(MODULE_TEST_TARGET) $(GUARD_TEST_TARGET) \
+test: $(CRACKME_TEST) $(MODULE_TEST_TARGET) $(CORRUPT_ELF_TEST_TARGET) $(GUARD_TEST_TARGET) \
       $(TEST_INTEGRITY) $(TEST_INTEGRITY_DISABLED) \
       $(TEST_MANIFEST) $(TEST_MANIFEST_DISABLED) \
       $(TEST_RUNTIME) $(TEST_RUNTIME_DISABLED) $(TEST_WX) $(TEST_NO_ALLOW) $(TEST_VERIFY_APP) $(TEST_SHA256_ACCEL) $(TEST_SAVE_SEAL) \
@@ -277,13 +282,13 @@ clean:
 
 # ASan+UBSan run of the C test flow in build/san/ (tests still write scratch files under build/).
 # Skipped on purpose: tests/test_seal_workflow.py (drives build/ binaries and unsanitized Python)
-# and module-test (an ASan shared library needs an ASan host runtime), and guard-test (it checks
+# and module-test and corrupt-elf-test (an ASan shared library needs an ASan host runtime), and guard-test (it checks
 # the plain build/ and build/release/ artifacts).
 SAN_CFLAGS = -Wall -Wextra -Wpedantic -Werror -O1 -g -fno-omit-frame-pointer \
              -fsanitize=address,undefined -fno-sanitize-recover=undefined
 sanitize:
 	mkdir -p build
-	$(MAKE) test BUILD_DIR=build/san CFLAGS="$(SAN_CFLAGS)" SEAL_WORKFLOW_TEST=true MODULE_TEST_TARGET= GUARD_TEST_TARGET=
+	$(MAKE) test BUILD_DIR=build/san CFLAGS="$(SAN_CFLAGS)" SEAL_WORKFLOW_TEST=true MODULE_TEST_TARGET= CORRUPT_ELF_TEST_TARGET= GUARD_TEST_TARGET=
 
 # libFuzzer harnesses (tests/fuzz/). Needs a clang with libFuzzer (not Apple clang): run inside
 # a container, see docs/fuzzing.md. Corpora live outside the repo (FUZZ_CORPUS).
