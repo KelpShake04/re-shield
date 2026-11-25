@@ -167,6 +167,7 @@ The design and verification guides are written in Korean.
 - [docs/steam-pipeline.md](docs/steam-pipeline.md): sealing in GitHub Actions (`action.yml`) before a `steamcmd` upload; what was not tested (Korean).
 - [docs/fuzzing.md](docs/fuzzing.md): sanitizers and fuzzing, in English.
 - [docs/crackme-lab.md](docs/crackme-lab.md): crackme lab, patch your own sealed binary to see what re-shield stops and what it cannot (Korean).
+- [docs/engines-unity.md](docs/engines-unity.md): C# binding and an untested Unity package skeleton (Korean).
 - Public API: `include/reshield/reshield.h`, `integrity.h`, `manifest.h`, `attestation.h`.
 
 ## Testing

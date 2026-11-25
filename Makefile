@@ -90,7 +90,7 @@ TEST_VERIFY_APP         = $(BUILD_DIR)/test_verify_app$(EXE)
 TEST_NO_ALLOW           = $(BUILD_DIR)/test_no_allow_unsealed$(EXE)
 TEST_MODULE_HOST        = $(BUILD_DIR)/test_module_host$(EXE)
 
-.PHONY: all lib shared release-shared module-test guard-test release-sample clean test crackme release-demo sanitize fuzz-build fuzz fuzz-pe
+.PHONY: all lib shared release-shared module-test csharp-test guard-test release-sample clean test crackme release-demo sanitize fuzz-build fuzz fuzz-pe
 
 all: $(LIB_TARGET) $(DEMO_INTEGRITY) $(SAMPLE_GAME) $(SAMPLE_GAME_SEALED) \
      $(TEST_INTEGRITY) $(TEST_MANIFEST) $(TEST_RUNTIME) $(TEST_WX) $(TEST_VERIFY_APP)
@@ -196,6 +196,14 @@ endif
 
 module-test: $(TEST_MODULE_HOST) $(TEST_MODULE_DUAL) $(SHARED_TARGET) release-shared
 	$(MODULE_TEST)
+
+# C# binding (bindings/csharp): loads the shared libraries from a dotnet console test. Not part of
+# `make test`; skips (successfully) when there is no dotnet SDK.
+csharp-test:
+	cmp bindings/csharp/Reshield.cs bindings/unity/com.reshield.guard/Runtime/Reshield.cs
+	@if command -v dotnet >/dev/null 2>&1; then \
+	  $(MAKE) shared release-shared && $(PYTHON3) bindings/csharp/tests/run.py; \
+	else echo "SKIP: csharp-test (dotnet SDK not found)"; fi
 
 # Dev-build guard (docs/steam-pipeline.md): the development marker is in dev artifacts only, and
 # reshield_release.py / verify_release.py refuse it. release-sample links a sample with the release library.

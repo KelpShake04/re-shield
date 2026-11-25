@@ -55,6 +55,7 @@ make release-demo
 - 아키텍처 설계 및 한계: [docs/architecture.md](docs/architecture.md)
 - 코드 섹션·에셋 매니페스트 봉인 및 검증 가이드: [docs/integrity-verification.md](docs/integrity-verification.md)
 - 무엇을 막고 무엇을 못 막는지 직접 실험하는 crackme 랩(자기 바이너리만 대상): [docs/crackme-lab.md](docs/crackme-lab.md)
+- Unity(C# P/Invoke 바인딩, Unity 미검증 패키지 골격): [docs/engines-unity.md](docs/engines-unity.md)
 - GitHub Actions로 봉인한 뒤 steamcmd로 올리기(검증하지 못한 부분 포함): [docs/steam-pipeline.md](docs/steam-pipeline.md)
 
 ## 내 프로젝트에 적용하기

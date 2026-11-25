@@ -1,0 +1,9 @@
+{
+  "name": "com.reshield.guard",
+  "version": "0.1.0-preview.1",
+  "displayName": "re-shield Guard",
+  "description": "Startup integrity check for Unity players (re-shield C binding + MonoBehaviour). Report-only by default. UNTESTED in Unity: skeleton, see README.",
+  "unity": "2021.3",
+  "keywords": ["integrity", "tamper", "security"],
+  "license": "MIT"
+}
