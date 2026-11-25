@@ -71,8 +71,10 @@ int reshield_verify_buffer(const void *data, size_t len,
  * The record lives in the module that linked re-shield: the main executable for a statically
  * linked program, or a shared library (.so/.dylib/.dll) when re-shield is linked into one.
  * Seal that same file with tools/seal_binary.py. The host process need not be sealed.
- * On Linux the image's file must be reachable by an absolute path (dlopen with a relative name
- * fails closed with RESHIELD_INTEGRITY_ERROR). out_result may be NULL.
+ * On Linux a library opened by a relative path (dlopen("./x.so")) works too: its absolute path
+ * is taken from /proc/self/maps (the mapping that holds the record). If /proc is unavailable or
+ * the file was deleted or replaced after loading, it fails closed with RESHIELD_INTEGRITY_ERROR.
+ * out_result may be NULL.
  */
 reshield_integrity_status_t reshield_verify_code_section(reshield_integrity_result_t *out_result);
 
