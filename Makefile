@@ -100,7 +100,7 @@ BENCH_SHA256            = $(BUILD_DIR)/bench_sha256$(EXE)
 TEST_SAVE_SEAL          = $(BUILD_DIR)/test_save_seal$(EXE)
 TEST_MODULE_HOST        = $(BUILD_DIR)/test_module_host$(EXE)
 
-.PHONY: all lib shared release-shared module-test corrupt-elf-test csharp-test guard-test release-sample clean test bench crackme release-demo sanitize fuzz-build fuzz fuzz-pe
+.PHONY: all lib shared release-shared module-test corrupt-elf-test csharp-test guard-test release-sample clean test bench crackme release-demo sanitize tsan-test fuzz-build fuzz fuzz-pe
 
 all: $(LIB_TARGET) $(DEMO_INTEGRITY) $(SAMPLE_GAME) $(SAMPLE_GAME_SEALED) \
      $(TEST_INTEGRITY) $(TEST_MANIFEST) $(TEST_RUNTIME) $(TEST_WX) $(TEST_VERIFY_APP) $(TEST_SAVE_SEAL)
@@ -200,6 +200,9 @@ $(TEST_RUNTIME_DISABLED): tests/test_runtime.c $(LIB_SRCS) | $(BUILD_DIR)
 
 # Includes src/sha256.c itself (streaming update), so it links only the library's other objects.
 $(TEST_SHA256_ACCEL): tests/test_sha256_accel.c src/sha256.c src/sha256_accel.h $(LIB_TARGET)
+	$(CC) $(CFLAGS) $(RS_CFLAGS) $< $(LIB_TARGET) $(LDFLAGS) -o $@
+
+$(BUILD_DIR)/test_sha256_race$(EXE): tests/test_sha256_race.c $(LIB_TARGET)
 	$(CC) $(CFLAGS) $(RS_CFLAGS) $< $(LIB_TARGET) $(LDFLAGS) -o $@
 
 $(BENCH_SHA256): tests/bench_sha256.c src/sha256_accel.h $(LIB_TARGET)
@@ -310,6 +313,14 @@ SAN_CFLAGS = -Wall -Wextra -Wpedantic -Werror -O1 -g -fno-omit-frame-pointer \
 sanitize:
 	mkdir -p build
 	$(MAKE) test BUILD_DIR=build/san CFLAGS="$(SAN_CFLAGS)" SEAL_WORKFLOW_TEST=true MODULE_TEST_TARGET= CORRUPT_ELF_TEST_TARGET= GUARD_TEST_TARGET=
+
+# ThreadSanitizer run of the concurrent first-use test (tests/test_sha256_race.c) in build/tsan/.
+# Not part of `make test` or `make sanitize`: TSan is missing or unusable on some hosts (macOS
+# arm64 CI images, QEMU, Windows). POSIX threads only.
+TSAN_CFLAGS = -Wall -Wextra -Wpedantic -Werror -O1 -g -fno-omit-frame-pointer -fsanitize=thread -pthread
+tsan-test:
+	$(MAKE) BUILD_DIR=build/tsan CFLAGS="$(TSAN_CFLAGS)" build/tsan/test_sha256_race$(EXE)
+	$(RUN) ./build/tsan/test_sha256_race$(EXE)
 
 # libFuzzer harnesses (tests/fuzz/). Needs a clang with libFuzzer (not Apple clang): run inside
 # a container, see docs/fuzzing.md. Corpora live outside the repo (FUZZ_CORPUS).

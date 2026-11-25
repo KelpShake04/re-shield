@@ -215,8 +215,26 @@ static void shani_compress(uint32_t state[8], const uint8_t *p, size_t nblocks) 
 /* ------------------------------------------------------------------ dispatch */
 
 /* -1 = not decided yet. The value is deterministic, so two threads racing here store the same
- * thing; volatile keeps the read/write from being cached or torn into something odd. */
+ * thing. Plain volatile is still a C11 data race (ThreadSanitizer reports it), so access goes
+ * through relaxed atomics: <stdatomic.h> is not available to the C++11 / cl /TP builds of these
+ * sources, hence the compiler's own intrinsics. No ordering is needed: the value only picks a code
+ * path, and the compress functions read nothing but constants and their arguments.
+ * shortcut: any other compiler falls back to volatile (atomic for an aligned int on every target
+ * we build, but formally a race); add its intrinsic here when one is supported. */
+#if defined(__clang__) || (defined(__GNUC__) && __GNUC__ >= 5)
+static int g_backend = -1;
+#define RS_BACKEND_LOAD() __atomic_load_n(&g_backend, __ATOMIC_RELAXED)
+#define RS_BACKEND_STORE(v) __atomic_store_n(&g_backend, (v), __ATOMIC_RELAXED)
+#elif defined(_MSC_VER)
+#include <intrin.h>
+static volatile __int32 g_backend = -1;
+#define RS_BACKEND_LOAD() ((int)__iso_volatile_load32(&g_backend))
+#define RS_BACKEND_STORE(v) ((void)_InterlockedExchange((volatile long *)&g_backend, (long)(v)))
+#else
 static volatile int g_backend = -1;
+#define RS_BACKEND_LOAD() (g_backend)
+#define RS_BACKEND_STORE(v) (g_backend = (v))
+#endif
 
 static int detect_backend(void) {
 #if defined(RS_HW_ARMV8)
@@ -232,16 +250,16 @@ static int detect_backend(void) {
 }
 
 int reshield_sha256_backend(void) {
-    int b = g_backend;
+    int b = RS_BACKEND_LOAD();
     if (b < 0) {
         b = detect_backend();
-        g_backend = b;
+        RS_BACKEND_STORE(b);
     }
     return b;
 }
 
 void reshield_sha256_force_portable(int on) {
-    g_backend = on ? 0 : detect_backend();
+    RS_BACKEND_STORE(on ? 0 : detect_backend());
 }
 
 void reshield_sha256_hw_compress(uint32_t state[8], const uint8_t *blocks, size_t nblocks) {
