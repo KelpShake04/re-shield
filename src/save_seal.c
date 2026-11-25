@@ -38,17 +38,21 @@ static int hmac_parts(const uint8_t *key, size_t key_len,
     for (size_t i = 0; i < HMAC_BLOCK; i++) {
         pad[i] = (uint8_t)(k0[i] ^ 0x36u);
     }
-    reshield_sha256_part_t in_parts[3] = {{pad, HMAC_BLOCK}, {a, a_len}, {b, b_len}};
-    if (reshield_sha256_parts(in_parts, 3, inner) != 0) {
-        goto done;
+    { /* own scope: C++ refuses a goto that jumps past an initialized variable */
+        reshield_sha256_part_t in_parts[3] = {{pad, HMAC_BLOCK}, {a, a_len}, {b, b_len}};
+        if (reshield_sha256_parts(in_parts, 3, inner) != 0) {
+            goto done;
+        }
     }
 
     for (size_t i = 0; i < HMAC_BLOCK; i++) {
         pad[i] = (uint8_t)(k0[i] ^ 0x5cu);
     }
-    reshield_sha256_part_t out_parts[2] = {{pad, HMAC_BLOCK}, {inner, sizeof(inner)}};
-    if (reshield_sha256_parts(out_parts, 2, result) != 0) {
-        goto done;
+    {
+        reshield_sha256_part_t out_parts[2] = {{pad, HMAC_BLOCK}, {inner, sizeof(inner)}};
+        if (reshield_sha256_parts(out_parts, 2, result) != 0) {
+            goto done;
+        }
     }
 
     for (size_t i = 0; i < sizeof(result); i++) {
