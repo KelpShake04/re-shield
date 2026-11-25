@@ -131,3 +131,31 @@ make release-demo
 - Windows DLL의 export는 `reshield.def`에 나열한 부분집합(엔진 바인딩에 필요한 `reshield_verify_code_section`, `reshield_verify_code_page_wx`, `reshield_verify_app`, `reshield_check_json`, `reshield_report_to_json`, `reshield_status_name` 6개)뿐이다. 나머지 공개 함수(`reshield_verify` 등)는 DLL 밖에서 부를 수 없다. POSIX 공유 라이브러리는 기본 가시성이라 공개 API 전체가 보인다.
 - 확인한 것: `make test`의 `module-test`(`tests/test_module_host.c` + `tests/test_module_mode.py`)가 호스트(미봉인, re-shield 코드 없음)에서 라이브러리를 `dlopen`해 미봉인 라이브러리 `UNSEALED`, 봉인 후 `OK`(W^X 포함), `.text` 1바이트 변조 `TAMPERED`를 개발·릴리스 두 빌드로 확인한다(macOS, Linux glibc·musl). 매니페스트를 함께 봉인한 라이브러리와 다른 디렉터리의 호스트 EXE가 `reshield_check_json(manifest_rel, assets_rel, ...)`을 부르는 시나리오(정상 `OK`, 에셋 1바이트 변조 `ASSET_TAMPERED`, 매니페스트 삭제 `MANIFEST_IO_ERROR`, 라이브러리 옆의 유효한 사본은 쓰이지 않음)와, ELF에서 re-shield를 링크하고 심볼을 export한 호스트(`-rdynamic`)가 라이브러리를 `dlopen`해도 라이브러리가 자기 레코드로 검증하는지(`-Wl,-Bsymbolic` 이중 레코드)도 확인한다. Windows는 CI `windows-msvc` 잡이 `reshield.def`로 `reshield.dll`을 빌드해 같은 시나리오를 실행한다. `make shared`가 `build/libreshield.so`(macOS는 `.dylib`)를 만든다(Linux는 `-Wl,-Bsymbolic`로 같은 이름의 호스트 심볼에 가려지지 않게 한다).
 - 한계: 호스트 EXE나 다른 모듈(엔진 본체 등)의 메모리는 검사하지 않는다. Linux에서 라이브러리를 상대경로로 열어도 `/proc/self/maps`로 절대경로를 얻어 검증한다(`/proc`이 없거나 로드 뒤 파일이 지워지거나 교체되면 fail-closed `INTERNAL_ERROR`). 한 프로세스에 re-shield가 두 모듈(예: EXE와 플러그인)에 들어 있으면 각자 자기 레코드를 자기 이미지에서 검증하지만, ELF에서 두 복사본의 심볼이 기본 가시성으로 내보내지면 동적 링커가 한쪽으로 합칠 수 있으니 라이브러리를 `-Wl,-Bsymbolic`으로 링크한다(`make shared`는 그렇게 한다).
+
+## 9. SHA-256 하드웨어 가속
+
+코드 섹션(수십 MB)과 에셋 해시는 시작 지연의 대부분이다. `src/sha256_accel.c`가 블록 압축을 CPU 명령으로 처리하고, `src/sha256.c`의 `sha256_update`가 입력의 온전한 64바이트 블록을 한 번에 넘긴다. 외부 의존성 없이 컴파일러 intrinsics만 쓰고, 공개 API·ABI는 그대로다. 결과는 이식성 C 구현과 비트 단위로 같다(`tests/test_sha256_accel.c`).
+
+| backend | 조건 | 판정 |
+|---|---|---|
+| `armv8` | AArch64, gcc/clang, macOS 또는 Linux | macOS는 항상, Linux는 `getauxval(AT_HWCAP) & HWCAP_SHA2` |
+| `shani` | x86-64, gcc/clang(Windows 제외) 또는 MSVC `cl` | `cpuid` leaf 7 EBX bit 29(SHA) + leaf 1 ECX의 SSSE3·SSE4.1 |
+| `portable` | 위 밖의 모든 조합 | 기존 C 코드 |
+
+- 가속은 함수 단위 `target` 속성으로만 켠다(전역 `-march` 변경 없음). 선택은 첫 사용 때 한 번 정하고 이후 읽기만 한다.
+- 폴백: CPU가 명령을 지원하지 않거나, 확인하지 않은 조합(Windows ARM64, mingw, clang-cl, 32비트 x86, 그 밖의 OS)이면 이식성 C 구현을 쓴다. 이 조합들도 경고 없이 컴파일된다.
+- 끄는 법: `-DRESHIELD_NO_HW_SHA`로 컴파일(예: `make CFLAGS="-Wall -Wextra -Wpedantic -Werror -O2 -DRESHIELD_NO_HW_SHA"`). 어느 backend가 쓰이는지는 `make test`의 `sha256 backend: ...` 줄과 `make bench`로 본다.
+- 처리량은 `make bench`(256 MiB 버퍼 한 번에 해시, 3회 중 최고값, 1 MB = 10^6 바이트)로 쟀다.
+
+| 환경 | 컴파일러 | 이식성 C | 가속 |
+|---|---|---|---|
+| 가속 도입 전(origin/main), Apple M1 Pro, macOS 27.2.1 | Apple clang 21, `-O2` | 161 MB/s | - |
+| 같은 기계, 이 변경 | 같음 | 220 MB/s | 2223 MB/s (`armv8`) |
+| Linux aarch64 컨테이너(Docker, 같은 M1 Pro) | gcc 14.4, `-O2` | 151 MB/s | 2200 MB/s (`armv8`) |
+| GitHub Actions `macos-latest`, Apple M1 (Virtual) | Apple clang, `-O2` | 133 MB/s | 1441 MB/s (`armv8`) |
+| GitHub Actions `ubuntu-latest`, AMD EPYC 9V74 | gcc, `-O2` | 320 MB/s | 1813 MB/s (`shani`) |
+| GitHub Actions `windows-latest`, AMD EPYC 7763 | MSVC `cl /O2` | 237 MB/s | 1582 MB/s (`shani`) |
+
+공유 CI 러너 수치는 실행마다 달라진다. Docker amd64 에뮬레이션에서는 SHA 명령이 없어 `portable`로 폴백하며, 그 수치는 근거로 쓰지 않았다. 1 GiB 해시 시간은 위 수치로 계산하면 M1 Pro에서 약 6.7초(이전 161 MB/s)에서 약 0.5초(2223 MB/s)다.
+
+검증하지 못한 것: Linux에서 `HWCAP_SHA2`가 없는 aarch64 CPU(폴백 경로를 그 CPU에서 돌려보지 못함), Linux aarch64 + clang, SHA-NI가 있는 Intel CPU(CI 러너는 AMD였다), macOS x86-64, FreeBSD 등 다른 OS.

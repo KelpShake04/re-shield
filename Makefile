@@ -48,6 +48,7 @@ SEAL_WORKFLOW_TEST ?= $(PYTHON3) tests/test_seal_workflow.py
 RUN ?=
 
 LIB_SRCS  = src/sha256.c \
+            src/sha256_accel.c \
             src/integrity_common.c \
             src/integrity_macos.c \
             src/integrity_linux.c \
@@ -90,10 +91,12 @@ TEST_RUNTIME_DISABLED   = $(BUILD_DIR)/test_runtime_disabled$(EXE)
 TEST_WX                 = $(BUILD_DIR)/test_wx$(EXE)
 TEST_VERIFY_APP         = $(BUILD_DIR)/test_verify_app$(EXE)
 TEST_NO_ALLOW           = $(BUILD_DIR)/test_no_allow_unsealed$(EXE)
+TEST_SHA256_ACCEL       = $(BUILD_DIR)/test_sha256_accel$(EXE)
+BENCH_SHA256            = $(BUILD_DIR)/bench_sha256$(EXE)
 TEST_SAVE_SEAL          = $(BUILD_DIR)/test_save_seal$(EXE)
 TEST_MODULE_HOST        = $(BUILD_DIR)/test_module_host$(EXE)
 
-.PHONY: all lib shared release-shared module-test csharp-test guard-test release-sample clean test crackme release-demo sanitize fuzz-build fuzz fuzz-pe
+.PHONY: all lib shared release-shared module-test csharp-test guard-test release-sample clean test bench crackme release-demo sanitize fuzz-build fuzz fuzz-pe
 
 all: $(LIB_TARGET) $(DEMO_INTEGRITY) $(SAMPLE_GAME) $(SAMPLE_GAME_SEALED) \
      $(TEST_INTEGRITY) $(TEST_MANIFEST) $(TEST_RUNTIME) $(TEST_WX) $(TEST_VERIFY_APP) $(TEST_SAVE_SEAL)
@@ -179,6 +182,17 @@ $(TEST_RUNTIME): tests/test_runtime.c $(LIB_TARGET)
 $(TEST_RUNTIME_DISABLED): tests/test_runtime.c $(LIB_SRCS) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) $(RS_CFLAGS) -DRESHIELD_DISABLE $^ $(LDFLAGS) -o $@
 
+# Includes src/sha256.c itself (streaming update), so it links only the library's other objects.
+$(TEST_SHA256_ACCEL): tests/test_sha256_accel.c src/sha256.c src/sha256_accel.h $(LIB_TARGET)
+	$(CC) $(CFLAGS) $(RS_CFLAGS) $< $(LIB_TARGET) $(LDFLAGS) -o $@
+
+$(BENCH_SHA256): tests/bench_sha256.c src/sha256_accel.h $(LIB_TARGET)
+	$(CC) $(CFLAGS) $(RS_CFLAGS) $< $(LIB_TARGET) $(LDFLAGS) -o $@
+
+# SHA-256 throughput (active backend vs portable). Not part of `make test`.
+bench: $(BENCH_SHA256)
+	$(RUN) ./$(BENCH_SHA256)
+
 $(TEST_NO_ALLOW): tests/test_no_allow_unsealed.c $(LIB_SRCS) | $(BUILD_DIR)
 	$(CC) $(filter-out -DRESHIELD_ALLOW_UNSEALED,$(CFLAGS)) $(RS_BASE) $^ $(LDFLAGS) -o $@
 
@@ -242,7 +256,7 @@ endif
 test: $(CRACKME_TEST) $(MODULE_TEST_TARGET) $(GUARD_TEST_TARGET) \
       $(TEST_INTEGRITY) $(TEST_INTEGRITY_DISABLED) \
       $(TEST_MANIFEST) $(TEST_MANIFEST_DISABLED) \
-      $(TEST_RUNTIME) $(TEST_RUNTIME_DISABLED) $(TEST_WX) $(TEST_NO_ALLOW) $(TEST_VERIFY_APP) $(TEST_SAVE_SEAL) \
+      $(TEST_RUNTIME) $(TEST_RUNTIME_DISABLED) $(TEST_WX) $(TEST_NO_ALLOW) $(TEST_VERIFY_APP) $(TEST_SHA256_ACCEL) $(TEST_SAVE_SEAL) \
       $(DEMO_INTEGRITY) $(DEMO_INTEGRITY_DISABLED) \
       $(SAMPLE_GAME) $(SAMPLE_GAME_SEALED) $(SAMPLE_GAME_DISABLED) $(SAMPLE_MANIFEST)
 	$(RUN) ./$(TEST_INTEGRITY)
@@ -252,6 +266,7 @@ test: $(CRACKME_TEST) $(MODULE_TEST_TARGET) $(GUARD_TEST_TARGET) \
 	$(RUN) ./$(TEST_RUNTIME)
 	$(RUN) ./$(TEST_RUNTIME_DISABLED)
 	$(RUN) ./$(TEST_NO_ALLOW)
+	$(RUN) ./$(TEST_SHA256_ACCEL)
 	$(RUN) ./$(TEST_WX)
 	$(RUN) ./$(TEST_SAVE_SEAL)
 	$(SEAL_WORKFLOW_TEST)
