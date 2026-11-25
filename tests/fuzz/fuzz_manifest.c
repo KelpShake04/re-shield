@@ -61,6 +61,36 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     if (third != NULL) {
         check_status(reshield_verify_single_asset(g_fz_manifest, g_fz_assets, third, root));
     }
+    /* Verified load: a buffer exactly when OK, never leaked (ASan), never over max_size. */
+    static const size_t caps[] = { 0, 4, 1u << 20 };
+    for (size_t i = 0; i < sizeof(caps) / sizeof(caps[0]); i++) {
+        const char *const rels[] = { third != NULL ? third : "a.cfg", "a.cfg", "sub/b.cfg" };
+        for (size_t j = 0; j < sizeof(rels) / sizeof(rels[0]); j++) {
+            void *abuf = (void *)1;
+            size_t alen = 99;
+            reshield_manifest_status_t ls =
+                reshield_load_verified_asset(g_fz_manifest, g_fz_assets, rels[j], root, caps[i], &abuf, &alen);
+            check_status(ls);
+            if ((ls == RESHIELD_MANIFEST_OK) != (abuf != NULL) || alen > caps[i] ||
+                (ls != RESHIELD_MANIFEST_OK && alen != 0)) {
+                abort();
+            }
+            reshield_free_asset(abuf);
+            if (reshield_verify_single_asset(g_fz_manifest, g_fz_assets, rels[j], root) !=
+                    RESHIELD_MANIFEST_OK && ls == RESHIELD_MANIFEST_OK) {
+                abort(); /* load must never accept what single-asset verification rejects */
+            }
+        }
+    }
+    {
+        void *abuf = (void *)1;
+        size_t alen = 99;
+        if (reshield_load_verified_asset(g_fz_manifest, g_fz_assets, "sub/b.cfg", bad, 1u << 20, &abuf, &alen) ==
+            RESHIELD_MANIFEST_OK) {
+            abort();
+        }
+        reshield_free_asset(abuf);
+    }
     check_status(reshield_verify_single_asset(g_fz_manifest, g_fz_assets, "a.cfg", root));
     check_status(reshield_verify_single_asset(g_fz_manifest, g_fz_assets, "sub/b.cfg", root));
     if (reshield_verify_single_asset(g_fz_manifest, g_fz_assets, "sub/b.cfg", bad) == RESHIELD_MANIFEST_OK) {

@@ -132,6 +132,24 @@ reshield_status_t reshield_verify_app(const char *manifest_rel, const char *asse
 int reshield_check_json(const char *manifest_rel, const char *assets_rel, char *json, size_t cap);
 
 /**
+ * reshield_load_verified_asset() with paths resolved like reshield_verify_app(): manifest_rel
+ * and assets_rel (NULL = ".") are relative to the process executable's directory, asset_rel is
+ * relative to that assets directory and must pass the manifest path rules. The manifest root is
+ * checked against the binary's sealed root (no override), and the verified bytes are returned in
+ * *out_buf / *out_len (free with reshield_free_asset()); on failure *out_buf is NULL.
+ * Returns RESHIELD_OK, ERR_UNSEALED (also in a development library: unlike reshield_verify_app()
+ * there is no allow_unsealed pass, because this call hands back data), ERR_MANIFEST_MISMATCH,
+ * ERR_ASSET_TAMPERED (asset not listed, missing, resized, altered), or ERR_MANIFEST_IO (manifest_rel
+ * NULL, manifest unreadable, unsafe asset_rel, asset larger than max_size, NULL outputs).
+ * A path that does not fit the 4096-byte buffers, or an unresolvable executable path, is
+ * ERR_INTERNAL (fail closed). No callback or report. Under -DRESHIELD_DISABLE the file is read
+ * without verification and manifest_rel may be NULL.
+ */
+reshield_status_t reshield_load_verified_app_asset(const char *manifest_rel, const char *assets_rel,
+                                                   const char *asset_rel, size_t max_size,
+                                                   void **out_buf, size_t *out_len);
+
+/**
  * Returns a human-readable static string for a reshield_status_t value.
  */
 const char *reshield_status_name(reshield_status_t status);

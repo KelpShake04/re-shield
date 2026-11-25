@@ -109,3 +109,32 @@ int reshield_check_json(const char *manifest_rel, const char *assets_rel, char *
     reshield_report_to_json(&report, json, cap); /* NULL json or cap 0: writes nothing */
     return (int)st;
 }
+
+reshield_status_t reshield_load_verified_app_asset(const char *manifest_rel, const char *assets_rel,
+                                                   const char *asset_rel, size_t max_size,
+                                                   void **out_buf, size_t *out_len) {
+    if (out_buf == NULL || out_len == NULL) {
+        return RESHIELD_ERR_MANIFEST_IO;
+    }
+    *out_buf = NULL;
+    *out_len = 0;
+    if (manifest_rel == NULL && reshield_is_enabled()) {
+        return RESHIELD_ERR_MANIFEST_IO;
+    }
+
+    char dir[APP_PATH_MAX], manifest[APP_PATH_MAX], assets[APP_PATH_MAX];
+    if (exe_dir(dir, sizeof(dir)) != 0 ||
+        (manifest_rel != NULL && join(manifest, sizeof(manifest), dir, manifest_rel) != 0) ||
+        join(assets, sizeof(assets), dir, assets_rel != NULL ? assets_rel : ".") != 0) {
+        return RESHIELD_ERR_INTERNAL;
+    }
+    switch (reshield_load_verified_asset(manifest_rel != NULL ? manifest : NULL, assets, asset_rel,
+                                         NULL, max_size, out_buf, out_len)) {
+        case RESHIELD_MANIFEST_OK:             return RESHIELD_OK;
+        case RESHIELD_MANIFEST_UNSEALED:       return RESHIELD_ERR_UNSEALED;
+        case RESHIELD_MANIFEST_ROOT_MISMATCH:  return RESHIELD_ERR_MANIFEST_MISMATCH;
+        case RESHIELD_MANIFEST_ASSET_MISMATCH: return RESHIELD_ERR_ASSET_TAMPERED;
+        case RESHIELD_MANIFEST_IO_ERROR:       return RESHIELD_ERR_MANIFEST_IO;
+        default:                               return RESHIELD_ERR_INTERNAL;
+    }
+}

@@ -664,6 +664,212 @@ static void test_strict_manifest(void) {
 }
 #endif
 
+/* reshield_load_verified_asset(): the verified bytes are the returned bytes. Runs in the
+ * RESHIELD_DISABLE build too (there it only reads: no manifest, same path and size rules). */
+#define LDIR "build/mt_load"
+#define LMPATH "build/mt_load_manifest.txt"
+
+static void put_file(const char *path, const char *data, size_t len) {
+    FILE *f = fopen(path, "wb");
+    if (f != NULL) {
+        fwrite(data, 1, len, f);
+        fclose(f);
+    }
+}
+
+static void lhex(const char *data, size_t len, char out[65]) {
+    uint8_t h[RESHIELD_SHA256_SIZE];
+    reshield_sha256(data, len, h);
+    hash_to_hex(h, out);
+}
+
+/* The outputs are passed by address: C leaves the evaluation order of the call that fills them
+ * and of these arguments unspecified, so they are only read here, after the call returned. */
+static int loaded(reshield_manifest_status_t st, void **pbuf, size_t *plen, const char *want, size_t want_len) {
+    int ok = st == RESHIELD_MANIFEST_OK && *pbuf != NULL && *plen == want_len &&
+             (want_len == 0 || memcmp(*pbuf, want, want_len) == 0);
+    reshield_free_asset(*pbuf);
+    return ok;
+}
+
+static int refused(reshield_manifest_status_t st, void **pbuf, size_t *plen, reshield_manifest_status_t want) {
+    int ok = st == want && *pbuf == NULL && *plen == 0;
+    reshield_free_asset(*pbuf);
+    return ok;
+}
+
+static void test_load_verified_asset(void) {
+    void *buf = (void *)1;
+    size_t len = 99;
+    mkdir("build", 0755);
+    mkdir(LDIR, 0755);
+    mkdir(LDIR "/sub", 0755);
+    put_file(LDIR "/a.cfg", "abc", 3);
+    put_file(LDIR "/sub/b.cfg", "hello", 5);
+    put_file(LDIR "/empty.cfg", "", 0);
+    put_file("build/mt_load_outside.txt", "abc", 3);
+
+    char ha[65], hb[65], he[65], text[512];
+    lhex("abc", 3, ha);
+    lhex("hello", 5, hb);
+    lhex("", 0, he);
+    snprintf(text, sizeof(text), "%s 3 a.cfg\n%s 5 sub/b.cfg\n%s 0 empty.cfg\n", ha, hb, he);
+    put_file(LMPATH, text, strlen(text));
+    uint8_t root[RESHIELD_SHA256_SIZE];
+    reshield_sha256(text, strlen(text), root);
+
+#ifdef RESHIELD_DISABLE
+    ASSERT_TRUE(loaded(reshield_load_verified_asset(NULL, LDIR, "a.cfg", NULL, 16, &buf, &len), &buf, &len, "abc", 3),
+                "load (disabled): reads the file without a manifest");
+    put_file(LDIR "/a.cfg", "xyz", 3);
+    buf = (void *)1;
+    ASSERT_TRUE(loaded(reshield_load_verified_asset(LMPATH, LDIR, "a.cfg", root, 16, &buf, &len), &buf, &len, "xyz", 3),
+                "load (disabled): a modified file is not verified");
+    ASSERT_TRUE(refused(reshield_load_verified_asset(LMPATH, LDIR, "../mt_load_outside.txt", root, 16, &buf, &len),
+                        &buf, &len, RESHIELD_MANIFEST_IO_ERROR), "load (disabled): '..' path rejected");
+    ASSERT_TRUE(refused(reshield_load_verified_asset(LMPATH, LDIR, "a.cfg", root, 2, &buf, &len),
+                        &buf, &len, RESHIELD_MANIFEST_IO_ERROR), "load (disabled): over max_size is IO_ERROR");
+    ASSERT_TRUE(refused(reshield_load_verified_asset(LMPATH, LDIR, "nope.cfg", root, 16, &buf, &len),
+                        &buf, &len, RESHIELD_MANIFEST_IO_ERROR), "load (disabled): missing file is IO_ERROR");
+    ASSERT_TRUE(reshield_load_verified_asset(LMPATH, LDIR, "a.cfg", root, 16, NULL, &len) ==
+                    RESHIELD_MANIFEST_IO_ERROR, "load (disabled): NULL out_buf is IO_ERROR");
+#else
+    ASSERT_TRUE(loaded(reshield_load_verified_asset(LMPATH, LDIR, "a.cfg", root, 16, &buf, &len), &buf, &len, "abc", 3),
+                "load: valid asset returns its bytes");
+    buf = (void *)1;
+    ASSERT_TRUE(loaded(reshield_load_verified_asset(LMPATH, LDIR, "sub/b.cfg", root, 5, &buf, &len), &buf, &len, "hello", 5),
+                "load: nested asset, size exactly max_size, passes");
+    buf = (void *)1;
+    ASSERT_TRUE(loaded(reshield_load_verified_asset(LMPATH, LDIR, "empty.cfg", root, 0, &buf, &len), &buf, &len, "", 0),
+                "load: empty asset returns a non-NULL empty buffer");
+
+    /* The buffer is a copy: changing the file afterwards does not change it. */
+    buf = (void *)1;
+    reshield_manifest_status_t st = reshield_load_verified_asset(LMPATH, LDIR, "a.cfg", root, 16, &buf, &len);
+    put_file(LDIR "/a.cfg", "xyz", 3);
+    ASSERT_TRUE(st == RESHIELD_MANIFEST_OK && buf != NULL && len == 3 && memcmp(buf, "abc", 3) == 0,
+                "load: bytes stay the verified ones after the file is replaced");
+    reshield_free_asset(buf);
+
+    buf = (void *)1;
+    ASSERT_TRUE(refused(reshield_load_verified_asset(LMPATH, LDIR, "a.cfg", root, 16, &buf, &len), &buf, &len,
+                        RESHIELD_MANIFEST_ASSET_MISMATCH), "load: 1-byte change (same size) is ASSET_MISMATCH, no buffer");
+    put_file(LDIR "/a.cfg", "abcd", 4);
+    buf = (void *)1;
+    ASSERT_TRUE(refused(reshield_load_verified_asset(LMPATH, LDIR, "a.cfg", root, 16, &buf, &len), &buf, &len,
+                        RESHIELD_MANIFEST_ASSET_MISMATCH), "load: longer file is ASSET_MISMATCH");
+    put_file(LDIR "/a.cfg", "ab", 2);
+    buf = (void *)1;
+    ASSERT_TRUE(refused(reshield_load_verified_asset(LMPATH, LDIR, "a.cfg", root, 16, &buf, &len), &buf, &len,
+                        RESHIELD_MANIFEST_ASSET_MISMATCH), "load: shorter file is ASSET_MISMATCH");
+    put_file(LDIR "/a.cfg", "abc", 3);
+    remove(LDIR "/sub/b.cfg");
+    buf = (void *)1;
+    ASSERT_TRUE(refused(reshield_load_verified_asset(LMPATH, LDIR, "sub/b.cfg", root, 16, &buf, &len), &buf, &len,
+                        RESHIELD_MANIFEST_ASSET_MISMATCH), "load: missing file is ASSET_MISMATCH");
+    put_file(LDIR "/sub/b.cfg", "hello", 5);
+    put_file(LDIR "/unlisted.cfg", "abc", 3);
+    buf = (void *)1;
+    ASSERT_TRUE(refused(reshield_load_verified_asset(LMPATH, LDIR, "unlisted.cfg", root, 16, &buf, &len), &buf, &len,
+                        RESHIELD_MANIFEST_ASSET_MISMATCH), "load: a file the manifest does not list is ASSET_MISMATCH");
+
+    buf = (void *)1;
+    ASSERT_TRUE(refused(reshield_load_verified_asset(LMPATH, LDIR, "a.cfg", root, 2, &buf, &len), &buf, &len,
+                        RESHIELD_MANIFEST_IO_ERROR), "load: asset larger than max_size is IO_ERROR");
+    buf = (void *)1;
+    ASSERT_TRUE(refused(reshield_load_verified_asset(LMPATH, LDIR, "a.cfg", root, 0, &buf, &len), &buf, &len,
+                        RESHIELD_MANIFEST_IO_ERROR), "load: max_size 0 only admits an empty asset");
+
+    static const char *const bad_paths[] = { "../mt_load_outside.txt", "sub/../a.cfg", "/etc/passwd",
+                                             "sub//b.cfg", "sub\\b.cfg", "a.cfg/", "", "." };
+    for (size_t i = 0; i < sizeof(bad_paths) / sizeof(bad_paths[0]); i++) {
+        buf = (void *)1;
+        len = 99;
+        char msg[96];
+        snprintf(msg, sizeof(msg), "load: unsafe path '%s' is IO_ERROR", bad_paths[i]);
+        ASSERT_TRUE(refused(reshield_load_verified_asset(LMPATH, LDIR, bad_paths[i], root, 16, &buf, &len), &buf, &len,
+                            RESHIELD_MANIFEST_IO_ERROR), msg);
+    }
+    /* A manifest cannot list a '..' entry either, so even a file that exists outside is unreachable. */
+    snprintf(text, sizeof(text), "%s 3 ../mt_load_outside.txt\n", ha);
+    put_file("build/mt_load_m2.txt", text, strlen(text));
+    uint8_t root2[RESHIELD_SHA256_SIZE];
+    reshield_sha256(text, strlen(text), root2);
+    buf = (void *)1;
+    ASSERT_TRUE(refused(reshield_load_verified_asset("build/mt_load_m2.txt", LDIR, "../mt_load_outside.txt", root2, 16,
+                                                     &buf, &len), &buf, &len, RESHIELD_MANIFEST_IO_ERROR),
+                "load: manifest listing a '..' entry does not reach the outside file");
+    remove("build/mt_load_m2.txt");
+
+    char longbase[1100];
+    memset(longbase, 'd', sizeof(longbase) - 1);
+    longbase[sizeof(longbase) - 1] = '\0';
+    buf = (void *)1;
+    ASSERT_TRUE(refused(reshield_load_verified_asset(LMPATH, longbase, "a.cfg", root, 16, &buf, &len), &buf, &len,
+                        RESHIELD_MANIFEST_ASSET_MISMATCH), "load: a path that does not fit fails closed");
+
+    uint8_t bad_root[RESHIELD_SHA256_SIZE];
+    memcpy(bad_root, root, sizeof(bad_root));
+    bad_root[0] ^= 1u;
+    buf = (void *)1;
+    ASSERT_TRUE(refused(reshield_load_verified_asset(LMPATH, LDIR, "a.cfg", bad_root, 16, &buf, &len), &buf, &len,
+                        RESHIELD_MANIFEST_ROOT_MISMATCH), "load: wrong root is ROOT_MISMATCH, no buffer");
+    buf = (void *)1;
+    ASSERT_TRUE(refused(reshield_load_verified_asset(LMPATH, LDIR, "a.cfg", NULL, 16, &buf, &len), &buf, &len,
+                        RESHIELD_MANIFEST_UNSEALED), "load: unsealed test binary with no root is UNSEALED");
+    buf = (void *)1;
+    ASSERT_TRUE(refused(reshield_load_verified_asset("build/does_not_exist.txt", LDIR, "a.cfg", root, 16, &buf, &len),
+                        &buf, &len, RESHIELD_MANIFEST_IO_ERROR), "load: missing manifest is IO_ERROR");
+    ASSERT_TRUE(reshield_load_verified_asset(LMPATH, LDIR, "a.cfg", root, 16, NULL, &len) ==
+                        RESHIELD_MANIFEST_IO_ERROR &&
+                    reshield_load_verified_asset(LMPATH, LDIR, "a.cfg", root, 16, &buf, NULL) ==
+                        RESHIELD_MANIFEST_IO_ERROR &&
+                    reshield_load_verified_asset(NULL, LDIR, "a.cfg", root, 16, &buf, &len) ==
+                        RESHIELD_MANIFEST_IO_ERROR,
+                "load: NULL output or NULL manifest path is IO_ERROR");
+    reshield_free_asset(NULL);
+
+#ifndef _WIN32
+    /* A symlink to a regular file is read through (content stays bound to the hash); a link to a
+     * device, a dangling link and a link to different bytes are not accepted. */
+    ASSERT_TRUE(symlink("a.cfg", LDIR "/link.cfg") == 0, "load: create symlink to a regular file");
+    ASSERT_TRUE(symlink("/dev/zero", LDIR "/zero.bin") == 0, "load: create /dev/zero symlink");
+    ASSERT_TRUE(symlink("nowhere", LDIR "/dangling.cfg") == 0, "load: create dangling symlink");
+    ASSERT_TRUE(symlink("sub/b.cfg", LDIR "/bytes.cfg") == 0, "load: create symlink to other bytes");
+    snprintf(text, sizeof(text), "%s 3 link.cfg\n%s 3 zero.bin\n%s 3 dangling.cfg\n%s 3 bytes.cfg\n", ha, ha, ha, ha);
+    put_file("build/mt_load_m3.txt", text, strlen(text));
+    uint8_t root3[RESHIELD_SHA256_SIZE];
+    reshield_sha256(text, strlen(text), root3);
+    buf = (void *)1;
+    ASSERT_TRUE(loaded(reshield_load_verified_asset("build/mt_load_m3.txt", LDIR, "link.cfg", root3, 16, &buf, &len),
+                       &buf, &len, "abc", 3), "load: symlink to a matching regular file passes");
+    buf = (void *)1;
+    ASSERT_TRUE(refused(reshield_load_verified_asset("build/mt_load_m3.txt", LDIR, "zero.bin", root3, 16, &buf, &len),
+                        &buf, &len, RESHIELD_MANIFEST_ASSET_MISMATCH), "load: symlink to /dev/zero is ASSET_MISMATCH");
+    buf = (void *)1;
+    ASSERT_TRUE(refused(reshield_load_verified_asset("build/mt_load_m3.txt", LDIR, "dangling.cfg", root3, 16, &buf, &len),
+                        &buf, &len, RESHIELD_MANIFEST_ASSET_MISMATCH), "load: dangling symlink is ASSET_MISMATCH");
+    buf = (void *)1;
+    ASSERT_TRUE(refused(reshield_load_verified_asset("build/mt_load_m3.txt", LDIR, "bytes.cfg", root3, 16, &buf, &len),
+                        &buf, &len, RESHIELD_MANIFEST_ASSET_MISMATCH), "load: symlink to other bytes is ASSET_MISMATCH");
+    remove(LDIR "/link.cfg");
+    remove(LDIR "/zero.bin");
+    remove(LDIR "/dangling.cfg");
+    remove(LDIR "/bytes.cfg");
+    remove("build/mt_load_m3.txt");
+#endif
+#endif
+
+    remove(LDIR "/a.cfg");
+    remove(LDIR "/sub/b.cfg");
+    remove(LDIR "/empty.cfg");
+    remove(LDIR "/unlisted.cfg");
+    rmdir(LDIR "/sub");
+    rmdir(LDIR);
+    remove(LMPATH);
+    remove("build/mt_load_outside.txt");
+}
+
 int main(void) {
     const char *asset_path = "build/test_asset_tmp.txt";
     const char *manifest_path = "build/test_manifest_tmp.txt";
@@ -731,6 +937,7 @@ int main(void) {
     test_manifest_edge_cases();
     test_strict_manifest();
 #endif
+    test_load_verified_asset();
 
     if (g_failures > 0) {
         fprintf(stderr, "%d test(s) failed.\n", g_failures);
