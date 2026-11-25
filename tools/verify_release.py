@@ -7,6 +7,12 @@ Checks:
 2. If --manifest and --assets are provided, verifies manifest root binding and all assets
    (and, for a strict v2 manifest, that no unlisted, non-#allow file exists under --assets).
 3. Reports defined symbol count via nm (helpful to confirm release strip).
+4. Refuses (exit code 2) a binary that was linked against a development build of re-shield
+   (the RESHIELD-DEV-BUILD-v1 marker, present only with -DRESHIELD_ALLOW_UNSEALED); --allow-dev-build
+   overrides it for demos and CI. The marker only guards against shipping the wrong build by mistake:
+   an attacker can erase it, so it is not a defense.
+5. Warns (exit code unchanged) when a steam_appid.txt sits next to the binary, in --assets or in
+   the manifest: Steam uses that file for development runs, so shipping it is not recommended.
 """
 
 from __future__ import annotations
@@ -36,6 +42,36 @@ def count_defined_symbols(binary: str) -> int | str:
         1 for ln in proc.stdout.splitlines()
         if len(ln.split()) >= 3 and ln.split()[1] != "U"
     )
+
+
+STEAM_APPID = "steam_appid.txt"
+
+# Compiled into integrity_common.c only when RESHIELD_ALLOW_UNSEALED is defined (development build).
+DEV_BUILD_MARKER = b"RESHIELD-DEV-BUILD-v1"
+DEV_BUILD_HELP = (
+    "linked against a DEVELOPMENT build of re-shield (RESHIELD_ALLOW_UNSEALED): flipping the sealed byte "
+    "in the record would bypass the checks. Rebuild with `make ALLOW_UNSEALED=0 lib` / `make release-shared`, "
+    "or drop -DRESHIELD_ALLOW_UNSEALED from your own build. --allow-dev-build is for demos and CI only."
+)
+
+
+def is_dev_build(data: bytes) -> bool:
+    return DEV_BUILD_MARKER in data
+
+
+def steam_appid_warnings(binary: str, asset_dir: str | None, manifest: str | None) -> list[str]:
+    """Where a steam_appid.txt was found (case-insensitive, like Windows). Only a hint, never a failure."""
+    found = []
+    for label, d in (("next to the binary", os.path.dirname(os.path.abspath(binary))),
+                     ("in --assets", asset_dir)):
+        if d and os.path.isdir(d) and any(n.lower() == STEAM_APPID for n in os.listdir(d)):
+            found.append(f"{label} ({d})")
+    if manifest:
+        with open(manifest, "rb") as f:
+            for raw in f.read().decode("utf-8", "replace").split("\n"):
+                if raw and not raw.startswith("#") and raw.split(" ", 2)[-1].lower().split("/")[-1] == STEAM_APPID:
+                    found.append(f"in the manifest ({raw.split(' ', 2)[-1]})")
+    return found
 
 
 def verify_manifest_entries(manifest_path: str, asset_dir: str) -> tuple[bool, int, str]:
@@ -69,10 +105,19 @@ def main() -> int:
     parser.add_argument("binary", help="Path to sealed executable")
     parser.add_argument("--manifest", help="Path to bound asset manifest")
     parser.add_argument("--assets", help="Path to asset base directory")
+    parser.add_argument("--allow-dev-build", action="store_true",
+                        help="Accept a binary linked against a development build of re-shield (demos and CI only)")
     args = parser.parse_args()
 
     with open(args.binary, "rb") as f:
         data = f.read()
+
+    if is_dev_build(data):
+        if not args.allow_dev_build:
+            print(f"[verify_release] error: {args.binary}: {DEV_BUILD_HELP}", file=sys.stderr)
+            return 2
+        print(f"[verify_release] warning: {args.binary} is a development build; "
+              "--allow-dev-build is for demos and CI, never for a shipped build.", file=sys.stderr)
 
     fmt_name, text_off, text_size = seal_binary.find_code_section(data)
     rec_off = seal_binary.find_integrity_record_offset(data)
@@ -101,6 +146,10 @@ def main() -> int:
     print(f"  code_seal:       {'OK' if code_ok else 'FAIL'} (size={text_size})")
     print(f"  manifest_assets: {'OK' if manifest_ok else 'FAIL'} ({asset_msg})")
     print(f"  defined_symbols: {syms}")
+
+    for where in steam_appid_warnings(args.binary, args.assets, args.manifest):
+        print(f"[verify_release] warning: {STEAM_APPID} found {where}. Steam reads it for development runs; "
+              "recommended: do not ship it in a release build.", file=sys.stderr)
 
     return 0 if (code_ok and manifest_ok) else 1
 

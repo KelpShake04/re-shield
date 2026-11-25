@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <!-- The SDK's own TFM: any other one needs a targeting pack download (no NuGet). -->
+    <TargetFramework>net$(BundledNETCoreAppPackageVersion.Split('.')[0]).0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../Reshield.cs" />
+  </ItemGroup>
+</Project>

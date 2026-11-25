@@ -2,9 +2,10 @@
 """
 One-call release step for re-shield: strip -> manifest -> seal -> sign -> verify, in that order.
 
-Run it on the final linked executable, in place:
+Run it on the final linked executable or shared library, in place:
 
     python3 tools/reshield_release.py dist/game --assets dist/assets --strip
+    python3 tools/reshield_release.py dist/game --assets dist --exclude "*.pdb"
     python3 tools/reshield_release.py dist/game --assets dist/assets --sign "Developer ID Application: Me (TEAMID)"
     python3 tools/reshield_release.py dist/game.exe --assets dist/assets --sign-cmd "signtool sign /fd sha256 /a {}"
     python3 tools/reshield_release.py dist/game --assets dist/assets --strict --allow "saves/*"
@@ -12,11 +13,14 @@ Run it on the final linked executable, in place:
 Sealing rewrites the binary, so signing must come after it (and strip before it). This tool only
 calls the existing tools (gen_manifest.py, seal_binary.py, verify_release.py) plus strip/codesign,
 so the seal format stays defined in one place. A Mach-O that already has a real signature is refused.
+A binary linked against a development build of re-shield (RESHIELD-DEV-BUILD-v1 marker) is refused
+with exit code 2 before anything is modified; --allow-dev-build is for demos and CI only.
 """
 
 from __future__ import annotations
 
 import argparse
+import glob
 import os
 import shlex
 import subprocess
@@ -25,6 +29,7 @@ import sys
 TOOLS = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, TOOLS)
 import seal_binary  # noqa: E402
+import verify_release  # noqa: E402
 
 
 def run(cmd: list[str]) -> None:
@@ -46,8 +51,12 @@ def file_kind(path: str) -> str:
 
 def main() -> int:
     p = argparse.ArgumentParser(description="strip -> manifest -> seal -> sign -> verify")
-    p.add_argument("binary", help="Final linked executable (not an .app bundle); modified in place")
+    p.add_argument("binary", help="Final linked executable or shared library (not an .app bundle); modified in place")
     p.add_argument("--assets", help="Asset directory to bind (a manifest is generated from it)")
+    p.add_argument("--exclude", action="append", default=[], metavar="GLOB",
+                   help="Leave files matching GLOB (relative POSIX path under --assets) out of the "
+                        "manifest; repeatable. The binary itself is excluded automatically. "
+                        "With --strict an excluded file is allowed automatically.")
     p.add_argument("--strict", action="store_true",
                    help="Strict manifest: the runtime reports ASSET_EXTRA for any file under --assets "
                         "that is not listed or --allow'ed (see docs/integrity-verification.md)")
@@ -55,8 +64,8 @@ def main() -> int:
                    help="With --strict: path glob exempt from the scan, relative to --assets; repeatable")
     p.add_argument("--manifest-out",
                    help="Manifest output path (default: <binary dir>/<binary name without extension>.manifest)")
-    p.add_argument("--build-id", type=int, default=int(os.environ.get("BUILD_NUMBER") or 1),
-                   help="Build identifier (default: $BUILD_NUMBER or 1)")
+    p.add_argument("--build-id", type=int,
+                   help="Build identifier, 0..4294967295 (default: $BUILD_NUMBER or 1)")
     p.add_argument("--strip", action="store_true", help="Run $STRIP (default 'strip') first (ELF and Mach-O)")
     p.add_argument("--sign", default="-",
                    help="macOS codesign identity after sealing ('-' = ad-hoc, the default). "
@@ -64,9 +73,21 @@ def main() -> int:
     p.add_argument("--entitlements", help="macOS entitlements plist for --sign")
     p.add_argument("--sign-cmd", help="Signing command run after sealing instead of the macOS codesign; "
                                       "{} is replaced by the binary path (e.g. signtool)")
+    p.add_argument("--allow-dev-build", action="store_true",
+                   help="Accept a binary linked against a development build of re-shield "
+                        "(demos and CI only; never for a shipped build)")
     args = p.parse_args()
     if args.allow and not args.strict:
         p.error("--allow needs --strict")
+
+    build_id = args.build_id
+    if build_id is None:
+        raw = os.environ.get("BUILD_NUMBER") or "1"
+        if not raw.isdigit():
+            raise SystemExit(f"[reshield_release] $BUILD_NUMBER must be a non-negative integer, got {raw!r}")
+        build_id = int(raw)
+    if not 0 <= build_id <= 0xFFFFFFFF:  # seal_binary.py would silently truncate to 32 bits
+        raise SystemExit(f"[reshield_release] build id {build_id} is outside 0..4294967295")
 
     binary = args.binary
     if os.path.isdir(binary):
@@ -74,8 +95,19 @@ def main() -> int:
                          "(MyGame.app/Contents/MacOS/MyGame), then sign the bundle yourself with --sign-cmd")
     kind = file_kind(binary)
     if kind == "unknown":
-        raise SystemExit(f"[reshield_release] {binary}: not a Mach-O, ELF or PE executable")
+        raise SystemExit(f"[reshield_release] {binary}: not a Mach-O, ELF or PE executable or shared library")
+    with open(binary, "rb") as f:
+        dev_build = verify_release.is_dev_build(f.read())
+    if dev_build and not args.allow_dev_build:
+        print(f"[reshield_release] error: {binary}: {verify_release.DEV_BUILD_HELP}", file=sys.stderr)
+        return 2
+    if dev_build:
+        print("[reshield_release] warning: sealing a DEVELOPMENT build (--allow-dev-build). "
+              "Demos and CI only: never ship this file.", file=sys.stderr)
     macos = kind == "macho" and sys.platform == "darwin"
+    if not macos and not args.sign_cmd and (args.sign != "-" or args.entitlements):
+        print("[reshield_release] warning: --sign/--entitlements only apply to a Mach-O on macOS; "
+              "this binary will NOT be signed. Use --sign-cmd.", file=sys.stderr)
     if macos:
         seal_binary.check_macho_resignable(binary)  # refuses a real signature: seal first, sign last
 
@@ -87,18 +119,26 @@ def main() -> int:
         manifest = args.manifest_out or os.path.join(
             os.path.dirname(os.path.abspath(binary)),
             os.path.splitext(os.path.basename(binary))[0] + ".manifest")
-        gen = [sys.executable, os.path.join(TOOLS, "gen_manifest.py"), args.assets, "-o", manifest,
-               # The binary is rewritten by sealing, so it must not be listed (its pre-seal hash
-               # would fail verification); with --strict gen_manifest allows it automatically.
-               "--exclude", binary]
+        exclude = list(args.exclude)
+        try:  # abspath, like gen_manifest's own output check: the same names os.walk will produce
+            rel = os.path.relpath(os.path.abspath(binary), os.path.abspath(args.assets)).replace(os.sep, "/")
+        except ValueError:  # Windows: binary and assets on different drives
+            rel = ".."
+        if not (rel == ".." or rel.startswith("../")):
+            # Sealing rewrites the binary, so a manifest entry for it would fail verification.
+            print(f"[reshield_release] excluding the sealed binary from the manifest: {rel}")
+            exclude.append(glob.escape(rel))
+        gen = [sys.executable, os.path.join(TOOLS, "gen_manifest.py"), args.assets, "-o", manifest]
+        for pattern in exclude:
+            gen += ["--exclude", pattern]
         if args.strict:
-            gen.append("--strict")
+            gen.append("--strict")  # gen_manifest allows the excluded binary and the manifest itself
         for g in args.allow:
             gen += ["--allow", g]
         run(gen)
 
     seal = [sys.executable, os.path.join(TOOLS, "seal_binary.py"), binary,
-            "--build-id", str(args.build_id), "--no-codesign"]
+            "--build-id", str(build_id), "--no-codesign"]
     if manifest:
         seal += ["--manifest", manifest]
     run(seal)
@@ -114,6 +154,8 @@ def main() -> int:
         run(cmd + [binary])
 
     verify = [sys.executable, os.path.join(TOOLS, "verify_release.py"), binary]
+    if args.allow_dev_build:
+        verify.append("--allow-dev-build")
     if manifest:
         verify += ["--manifest", manifest, "--assets", args.assets]
     run(verify)

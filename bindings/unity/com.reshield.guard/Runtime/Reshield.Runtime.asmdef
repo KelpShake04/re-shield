@@ -1,0 +1,9 @@
+{
+  "name": "Reshield.Runtime",
+  "rootNamespace": "Reshield",
+  "references": [],
+  "includePlatforms": [],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "autoReferenced": true
+}

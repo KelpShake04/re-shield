@@ -20,7 +20,9 @@ Runs the `make test` flow with `-fsanitize=address,undefined -fno-sanitize-recov
   creates that directory.
 - On macOS (Apple clang) LeakSanitizer does not exist, so leaks are not checked there. On
   Linux it is on by default.
-- No test was excluded: the W^X test and the code-section hash test pass under sanitizers
+- `module-test` is skipped (`MODULE_TEST_TARGET=` in the Makefile): an ASan shared library
+  needs an ASan host runtime. It runs in the normal CI jobs (`make all test`).
+- No other test was excluded: the W^X test and the code-section hash test pass under sanitizers
   (sealing hashes the `.text` bytes of the sanitized binary itself, so instrumentation does
   not matter).
 

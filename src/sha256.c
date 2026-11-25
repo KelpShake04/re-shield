@@ -1,6 +1,9 @@
 #include "reshield/integrity.h"
 
 #include "file_platform.h"
+#include "reshield/reshield.h"
+#include "sha256_accel.h"
+#include "sha256_internal.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -99,14 +102,34 @@ static void sha256_init(sha256_ctx_t *ctx) {
     ctx->state[7] = 0x5be0cd19u;
 }
 
+/* n whole blocks: CPU instructions when available, else the portable transform. */
+static void sha256_blocks(sha256_ctx_t *ctx, const uint8_t *p, size_t n) {
+    if (reshield_sha256_backend() != 0) {
+        reshield_sha256_hw_compress(ctx->state, p, n);
+    } else {
+        for (size_t i = 0; i < n; i++) {
+            sha256_transform(ctx, p + i * 64);
+        }
+    }
+    ctx->bitlen += (uint64_t)n * 512;
+}
+
 static void sha256_update(sha256_ctx_t *ctx, const uint8_t *data, size_t len) {
-    for (size_t i = 0; i < len; i++) {
-        ctx->data[ctx->datalen++] = data[i];
+    size_t i = 0;
+    while (ctx->datalen > 0 && i < len) {
+        ctx->data[ctx->datalen++] = data[i++];
         if (ctx->datalen == 64) {
-            sha256_transform(ctx, ctx->data);
-            ctx->bitlen += 512;
+            sha256_blocks(ctx, ctx->data, 1);
             ctx->datalen = 0;
         }
+    }
+    if (len - i >= 64) {
+        size_t n = (len - i) / 64;
+        sha256_blocks(ctx, data + i, n);
+        i += n * 64;
+    }
+    while (i < len) {
+        ctx->data[ctx->datalen++] = data[i++];
     }
 }
 
@@ -146,6 +169,33 @@ void reshield_sha256(const void *data, size_t len, uint8_t out_hash[RESHIELD_SHA
         sha256_update(&ctx, (const uint8_t *)data, len);
     }
     sha256_final(&ctx, out_hash);
+}
+
+int reshield_sha256_parts(const reshield_sha256_part_t *parts, size_t count, uint8_t out_hash[32]) {
+    if (parts == NULL || out_hash == NULL) {
+        return -1;
+    }
+    uint64_t total = 0;
+    for (size_t i = 0; i < count; i++) {
+        if (parts[i].len > 0 && parts[i].ptr == NULL) {
+            return -1;
+        }
+        /* bitlen is a uint64: keep total*8 plus HMAC's two blocks well below 2^64. */
+        if ((uint64_t)parts[i].len > (UINT64_MAX / 8u) - 256u - total) {
+            return -1;
+        }
+        total += (uint64_t)parts[i].len;
+    }
+    sha256_ctx_t ctx;
+    sha256_init(&ctx);
+    for (size_t i = 0; i < count; i++) {
+        if (parts[i].len > 0) {
+            sha256_update(&ctx, (const uint8_t *)parts[i].ptr, parts[i].len);
+        }
+    }
+    sha256_final(&ctx, out_hash);
+    reshield_secure_zero(&ctx, sizeof(ctx)); /* ctx.data holds key-derived bytes when used by HMAC */
+    return 0;
 }
 
 /* Internal (declared extern in manifest.c): hashes at most max_read bytes of a regular

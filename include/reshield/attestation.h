@@ -12,8 +12,8 @@ typedef enum reshield_attestation_status {
 } reshield_attestation_status_t;
 
 /**
- * Verifies that the main executable's in-memory code section obeys W^X
- * (readable + executable, NOT writable).
+ * Verifies that the in-memory code section obeys W^X (readable + executable, NOT writable).
+ * Same image as reshield_verify_code_section(): the one that holds the integrity record.
  * - macOS: mach_vm_region() walked over the whole __TEXT,__text range (gaps fail).
  * - Linux: /proc/self/maps; the whole .text range must be covered by r-x mappings.
  * - Windows: VirtualQuery over the whole .text range; every region must be committed,
@@ -22,7 +22,8 @@ typedef enum reshield_attestation_status {
 reshield_attestation_status_t reshield_verify_code_page_wx(void);
 
 /**
- * Verifies OS-level code signature validity for the running executable.
+ * Verifies OS-level code signature validity for the running executable (the process EXE,
+ * also when re-shield is linked into a shared library: the module itself is not checked).
  * - macOS: Security.framework SecCodeCopySelf + SecCodeCheckValidity.
  * - Windows: WinVerifyTrust (Authenticode, no UI, no revocation check) on the EXE file.
  *   An UNSIGNED executable returns RESHIELD_ATTEST_FAILED.

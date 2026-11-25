@@ -17,7 +17,7 @@ extern int reshield_sha256_file_limited(const char *path,
 #define RESHIELD_MANIFEST_MAX_BYTES (4u * 1024u * 1024u)
 #define RESHIELD_MANIFEST_MAX_LINE  1023u
 
-/* Manifest v2 header (see docs/integrity-verification.md, section 8). */
+/* Manifest v2 header (see docs/integrity-verification.md, section 10). */
 #define RESHIELD_MANIFEST_MAX_ALLOW 64u
 #define RESHIELD_ALLOW_MAX_GLOB     255u
 #define RESHIELD_STRICT_MAX_DEPTH   32u
