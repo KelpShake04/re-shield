@@ -192,24 +192,26 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Continue'
-          function Expect([int]$want, [string]$what, [string]$lib, [string]$text) {
+          # $cj: the library's reshield_check_json line (reshield_status_t value and status name)
+          function Expect([int]$want, [string]$what, [string]$lib, [string]$text, [string]$cj) {
             $out = & .\build\test_module_host.exe (Resolve-Path $lib) 2>&1 | Out-String
             Write-Host $out
             if ($LASTEXITCODE -ne $want) { throw "$what : expected exit $want, got $LASTEXITCODE" }
             if ($out -notmatch $text) { throw "$what : output does not contain '$text'" }
+            if ($out -notmatch $cj) { throw "$what : output does not contain '$cj'" }
           }
           # reshield_integrity_status_t: OK=0 UNSEALED=1 TAMPERED=2
           if ([System.Text.Encoding]::Latin1.GetString([System.IO.File]::ReadAllBytes("$PWD\build\test_module_host.exe")).Contains('RSHLDCHK')) { throw "host EXE must not contain an integrity record" }
-          Expect 1 "unsealed release DLL is UNSEALED" build\reshield.dll 'status=UNSEALED'
+          Expect 1 "unsealed release DLL is UNSEALED" build\reshield.dll 'status=UNSEALED' 'check_json: status=1 json=.*"status":"UNSEALED"'
           Copy-Item build\reshield.dll build\mod_sealed.dll
           python tools\seal_binary.py build\mod_sealed.dll --build-id 11
           if ($LASTEXITCODE -ne 0) { throw "seal_binary failed on the DLL" }
           python tools\seal_binary.py build\mod_sealed.dll --verify-only
           if ($LASTEXITCODE -ne 0) { throw "verify-only failed on the DLL" }
-          Expect 0 "sealed DLL verifies OK (host EXE is unsealed)" build\mod_sealed.dll 'status=OK wx=0'
+          Expect 0 "sealed DLL verifies OK (host EXE is unsealed)" build\mod_sealed.dll 'status=OK wx=0' 'check_json: status=0 json=.*"status":"OK"'
           python tests\tamper_pe_text.py build\mod_sealed.dll build\mod_tampered.dll
           if ($LASTEXITCODE -ne 0) { throw "tamper helper failed on the DLL" }
-          Expect 2 "tampered DLL .text is TAMPERED" build\mod_tampered.dll 'status=TAMPERED'
+          Expect 2 "tampered DLL .text is TAMPERED" build\mod_tampered.dll 'status=TAMPERED' 'check_json: status=2 json=.*"status":"CODE_TAMPERED"'
           exit 0  # the last native call exited 2 on purpose; every real failure above throws
 
       # Dev-build guard on MSVC output: the marker is in the development object and EXE (it survives

@@ -3,8 +3,12 @@
  * the shared library given as argv[1] and calls the library's reshield_verify_code_section() and
  * reshield_verify_code_page_wx(). The library must verify its own image, not this host.
  *
+ * With argv[2] and argv[3] (manifest and assets, relative to THIS executable's directory) it also
+ * calls the library's reshield_check_json() with them: the manifest-bound check of module mode.
+ *
  * Output: module_host: status=<NAME> wx=<0|1|2> actual_size=<n> expected_size=<n>
  *         check_json: status=<reshield_status_t> json=<report>   (the library's flat reshield_check_json)
+ *         check_json_manifest: status=<reshield_status_t> json=<report>   (only with argv[2], argv[3])
  * Exit code: reshield_integrity_status_t (OK=0 UNSEALED=1 TAMPERED=2 ERROR=3),
  *            10 = library did not load, 11 = symbol missing.
  */
@@ -41,8 +45,10 @@ int main(int argc, char **argv) {
      * renames <file> over it, so the library's on-disk path no longer names the mapped image. */
     int unlink_after = argc == 3 && strcmp(argv[2], "--unlink") == 0;
     int replace_after = argc == 4 && strcmp(argv[2], "--replace") == 0;
-    if (argc != 2 && !unlink_after && !replace_after) {
-        fprintf(stderr, "usage: %s <shared-library> [--unlink | --replace <file>]\n", argv[0]);
+    int manifest_mode = argc == 4 && !replace_after;
+    if (argc != 2 && !unlink_after && !replace_after && !manifest_mode) {
+        fprintf(stderr, "usage: %s <shared-library> [--unlink | --replace <file> | <manifest_rel> <assets_rel>]\n",
+                argv[0]);
         return 2;
     }
 
@@ -95,5 +101,9 @@ int main(int argc, char **argv) {
     char json[1024];
     int cj = check_json(NULL, NULL, json, sizeof(json));
     printf("check_json: status=%d json=%s\n", cj, json);
+    if (manifest_mode) {
+        cj = check_json(argv[2], argv[3], json, sizeof(json));
+        printf("check_json_manifest: status=%d json=%s\n", cj, json);
+    }
     return (int)st;
 }

@@ -1,5 +1,6 @@
 ; Exports of reshield.dll (cl /LD ... /link /DEF:reshield.def). A header-wide __declspec(dllexport)
-; macro would touch every declaration, so the DLL's public surface is listed here instead.
+; macro would touch every declaration, so the exports are listed here instead. Only the subset an
+; engine binding needs is exported; a POSIX shared library exposes the whole public API.
 LIBRARY reshield
 EXPORTS
     reshield_verify_code_section

@@ -21,8 +21,10 @@ typedef enum reshield_status {
     RESHIELD_ERR_MANIFEST_MISMATCH = 5, /* Manifest file SHA-256 does not match sealed root */
     RESHIELD_ERR_ASSET_TAMPERED    = 6, /* Asset file missing, resized, or hash mismatch */
     RESHIELD_ERR_INTERNAL          = 7, /* Internal section/file lookup error */
-    RESHIELD_ERR_MANIFEST_IO       = 8  /* Manifest or asset could not be opened/parsed (wrong path, missing
-                                         * file, malformed manifest); not a tamper verdict, not INTERNAL */
+    RESHIELD_ERR_MANIFEST_IO       = 8  /* Manifest file could not be opened or parsed (wrong path, missing
+                                         * file, malformed or empty manifest, unsafe asset path in it);
+                                         * not a tamper verdict, not INTERNAL. A missing, resized or
+                                         * altered asset file is ASSET_TAMPERED instead. */
 } reshield_status_t;
 
 typedef enum reshield_check_flags {
@@ -80,7 +82,7 @@ typedef struct reshield_config {
 int reshield_is_enabled(void);
 
 /**
- * Returns the active platform backend name ("macos", "linux", "unsupported").
+ * Returns the active platform backend name ("macos", "linux", "windows", "unsupported").
  */
 const char *reshield_platform_name(void);
 
@@ -105,6 +107,8 @@ reshield_status_t reshield_verify(const reshield_config_t *config,
  * the CWD still works. Paths use fixed 4096-byte buffers; a path that does not fit, or an
  * executable path that cannot be resolved, returns RESHIELD_ERR_INTERNAL (fail closed).
  * Both arguments are relative paths (not validated; an absolute one just fails to open).
+ * The base is the process executable's directory, also when re-shield is linked into a shared
+ * library: not the library's directory and not the library's own file.
  * In a library compiled with -DRESHIELD_ALLOW_UNSEALED (development library) unsealed binaries
  * pass; a release library requires a sealed binary. on_violation, user_data and out_report as
  * in reshield_verify(). Under -DRESHIELD_DISABLE it returns RESHIELD_OK.
@@ -119,7 +123,9 @@ reshield_status_t reshield_verify_app(const char *manifest_rel, const char *asse
  * report layout change never breaks a binding). Returns the reshield_status_t value as an int
  * (0 = RESHIELD_OK). json receives the report as in reshield_report_to_json(), truncated safely
  * to cap bytes including the NUL; json may be NULL (or cap 0) when only the status is wanted.
- * There is no violation callback. Paths and build flavor behave as in reshield_verify_app().
+ * There is no violation callback. Paths (relative to the process executable's directory, not to
+ * the library) and build flavor (a development library, built with -DRESHIELD_ALLOW_UNSEALED,
+ * reports an unsealed binary as OK) behave as in reshield_verify_app().
  */
 int reshield_check_json(const char *manifest_rel, const char *assets_rel, char *json, size_t cap);
 
