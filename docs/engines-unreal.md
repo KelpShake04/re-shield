@@ -62,7 +62,7 @@ python3 tools/reshield_release.py <Stage>/<Project>/Binaries/Win64/<Project>-Win
 
 모두 실측하지 않은 추정이다. 먼저 report-only로 켜서 비율을 본다.
 
-- **오버레이(Steam, Discord, OBS), 백신, 모드/업데이트로 섞인 파일**: [engines-unity.md의 오탐 절](engines-unity.md#오탐-위험)과 같다. 파일 잠금은 `MANIFEST_IO_ERROR`(변조 아님), 바뀐 에셋은 `ASSET_TAMPERED`다.
+- **오버레이(Steam, Discord, OBS), 백신, 모드/업데이트로 섞인 파일**: [engines-unity.md의 오탐 절](engines-unity.md#오탐-위험)과 같다. 매니페스트를 열 수 없으면 `MANIFEST_IO_ERROR`(변조 아님). 에셋이 없거나 바뀌었거나 열 수 없으면(백신 잠금·격리·권한 포함) `ASSET_TAMPERED`로 보고될 수 있으므로 변조 증거로 단정하지 말 것(코드 읽기 기준, 실측하지 않음).
 - **Steam DRM 래퍼(SteamStub)**: 실행 파일을 다시 쓰므로 `.text` 해시가 맞지 않을 수 있다. 봉인 -> 래핑 순서에서 오탐이 나는지 실측하지 않았다([steam-pipeline.md](steam-pipeline.md)). UE의 Steamworks 온라인 서브시스템과는 별개의 이야기다.
 - **Proton/Wine**: 실행해 보지 않았다.
 
