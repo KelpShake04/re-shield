@@ -217,13 +217,14 @@ jobs:
           cl %TFLAGS% /Fo:build\ tests\test_incremental.c build\reshield.lib /Fe:build\test_incremental.exe /link /INCREMENTAL:NO || set FAIL=1
           cl %TFLAGS% /Fo:build\ tests\test_incremental_real.c build\reshield.lib /Fe:build\test_incremental_real.exe /link /INCREMENTAL:NO || set FAIL=1
           cl %TFLAGS% /Fo:build\ tests\test_codesign_toctou_windows.c build\reshield.lib /Fe:build\test_codesign_toctou_windows.exe /link /INCREMENTAL:NO || set FAIL=1
+          cl %TFLAGS% /Fo:build\ tests\test_load_asset_windows.c build\reshield.lib /Fe:build\test_load_asset_windows.exe /link /INCREMENTAL:NO || set FAIL=1
           if defined FAIL exit /b 1
 
       - name: Unit tests
         shell: pwsh
         run: |
           $bad = 0
-          foreach ($t in 'test_integrity', 'test_manifest', 'test_runtime', 'test_wx', 'test_sha256_accel', 'test_save_seal', 'test_incremental', 'test_incremental_real') {
+          foreach ($t in 'test_integrity', 'test_manifest', 'test_runtime', 'test_wx', 'test_sha256_accel', 'test_save_seal', 'test_incremental', 'test_incremental_real', 'test_load_asset_windows') {
             "=== $t ==="
             & ".\build\$t.exe"
             if ($LASTEXITCODE -ne 0) { "FAILED: $t exit=$LASTEXITCODE"; $bad = 1 }
@@ -510,6 +511,76 @@ jobs:
           Run 19 "junction (reparse point) is an extra item" "asset=jct"
           (Get-Item "$assets\jct").Delete()
           Run 10 "junction removed"
+          Pop-Location
+          exit 0  # the last native call exited non-zero on purpose; every real failure above throws
+
+      # reshield_code_scan_begin/step on the real .text of a sealed PE: every budget must give the
+      # one-shot verdict (test_incremental_real prints "budget N: same result as one-shot (status=X)"),
+      # first OK on the sealed EXE and then TAMPERED after one .text byte is flipped.
+      - name: Incremental code scan on a sealed EXE (OK, then TAMPERED .text)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          function Scan([string]$exe, [string]$status) {
+            $out = & $exe 2>&1 | Out-String
+            Write-Host $out
+            if ($LASTEXITCODE -ne 0) { throw "$exe : exit $LASTEXITCODE" }
+            if ($out -notmatch "(?m)^status=$status\r?$") { throw "$exe : expected status=$status" }
+            if ($out -notmatch '(?m)^section_size=[1-9]') { throw "$exe : empty code section" }
+            $n = [regex]::Matches($out, "budget \d+: same result as one-shot \(status=$status\)").Count
+            if ($n -ne 7) { throw "$exe : expected 7 budgets with status=$status, got $n" }
+            $n = [regex]::Matches($out, 'budget \d+: second pass same result').Count
+            if ($n -ne 7) { throw "$exe : expected 7 second passes, got $n" }
+          }
+          Scan .\build\test_incremental_real.exe UNSEALED
+          Copy-Item build\test_incremental_real.exe build\incr_sealed.exe
+          python tools\seal_binary.py build\incr_sealed.exe --build-id 12
+          if ($LASTEXITCODE -ne 0) { throw "seal_binary failed" }
+          Scan .\build\incr_sealed.exe OK
+          python tests\tamper_pe_text.py build\incr_sealed.exe build\incr_tampered.exe
+          if ($LASTEXITCODE -ne 0) { throw "tamper helper failed" }
+          Scan .\build\incr_tampered.exe TAMPERED
+          exit 0
+
+      # reshield_load_verified_app_asset on Windows: paths next to the EXE (CWD elsewhere), content check,
+      # and the unsafe-path rules through the app-level API. The helper prints "load=<status> len=<n> ...".
+      - name: load_verified_app_asset on a sealed EXE (OK, tamper, unsafe paths)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          New-Item -ItemType Directory -Force build\la, build\la_cwd | Out-Null
+          Copy-Item -Recurse examples\assets build\la\assets
+          python tools\gen_manifest.py build\la\assets -o build\la\lapp.manifest
+          if ($LASTEXITCODE -ne 0) { throw "gen_manifest failed" }
+          Copy-Item build\test_verify_app.exe build\la\lapp.exe
+          python tools\seal_binary.py build\la\lapp.exe --manifest build\la\lapp.manifest --build-id 9
+          if ($LASTEXITCODE -ne 0) { throw "seal failed" }
+          $exe = Resolve-Path build\la\lapp.exe
+          $asset = Resolve-Path build\la\assets\stage1.cfg
+          Push-Location build\la_cwd
+          function Load([string]$rel, [string]$want, [string]$what) {
+            $out = & $exe lapp.manifest assets $rel 2>&1 | Out-String
+            Write-Host $out
+            if ($LASTEXITCODE -eq 97) { throw "$what : buffer returned without OK (or the reverse)" }
+            if ($out -notmatch "(?m)^load=$want len=") { throw "$what : expected load=$want" }
+            return $out
+          }
+          $o = Load "stage1.cfg" "OK" "valid asset, CWD elsewhere"
+          $want = (Get-Item "$asset").Length
+          if ($o -notmatch "(?m)^load=OK len=$want ") { throw "wrong length for stage1.cfg (file is $want bytes)" }
+          foreach ($bad in 'sub\stage1.cfg', '..\lapp.manifest', 'C:\Windows\win.ini', 'C:/Windows/win.ini', 'c:stage1.cfg', '\\server\share\x', 'CON', 'nul.txt', 'stage1.cfg.', 'stage1.cfg:s', '../lapp.manifest') {
+            Load $bad "MANIFEST_IO_ERROR" "unsafe path '$bad'" | Out-Null
+          }
+          Load "nope.cfg" "ASSET_TAMPERED" "unlisted asset" | Out-Null
+          Load "STAGE1.CFG" "ASSET_TAMPERED" "other letter case is not a listed entry" | Out-Null
+          # flip one byte, same size
+          $bytes = [System.IO.File]::ReadAllBytes("$asset")
+          $bytes[0] = $bytes[0] -bxor 1
+          [System.IO.File]::WriteAllBytes("$asset", $bytes)
+          Load "stage1.cfg" "ASSET_TAMPERED" "1-byte change" | Out-Null
+          $bytes[0] = $bytes[0] -bxor 1
+          [System.IO.File]::WriteAllBytes("$asset", $bytes)
+          Load "stage1.cfg" "OK" "restored asset" | Out-Null
           Pop-Location
           exit 0  # the last native call exited non-zero on purpose; every real failure above throws
 

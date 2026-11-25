@@ -69,4 +69,5 @@ POSIX 공유 라이브러리는 공개 API 전체가 보인다. Windows DLL은 `
 
 - `tests/test_incremental.c`: 합성 섹션(플랫폼 훅을 덮어씀). 예산 1/63/64/65/4096/섹션-1/섹션/섹션+1/1 MiB/`SIZE_MAX` 모두 일괄 결과와 필드 단위로 같음, 두 번째 pass(`begin` 없이) 동일, 하드웨어 경로와 이식 C 경로 둘 다, pass 도중 변경(아직 안 읽은 바이트는 이번 pass, 이미 읽은 바이트는 다음 pass, 되돌린 패치는 못 잡음), 인자 오류, 훅 실패 시 ERROR, 상태 크기 192 B. `-DRESHIELD_DISABLE` 변형 포함.
 - `tests/test_incremental_real.c`: 이 바이너리의 실제 섹션. 같은 예산들에서 일괄 결과와 같음, 독립 SHA-256과 일치. `tests/test_seal_workflow.py`가 복사본을 봉인해 OK를 확인하고, `reshield_incr_sentinel`의 1바이트를 바꿔 TAMPERED를 확인한다. Linux에서는 봉인된 상태에서 `mprotect`로 `.text`를 쓰기 가능하게 만들어 pass 도중 패치를 넣고, 앞쪽 패치는 이번 pass에서 TAMPERED, 뒤쪽 패치는 다음 pass에서 TAMPERED임을 확인한다. macOS에서는 코드 페이지를 쓸 수 없어 이 부분은 합성 섹션 테스트로만 확인한다.
+- Windows(CI `windows-msvc`): 봉인한 `test_incremental_real.exe`의 실제 PE `.text`에서 같은 예산 7종이 일괄 결과와 같음(봉인 전 UNSEALED, 봉인 후 OK, `.text` 1바이트 변조 후 TAMPERED)을 CI 스텝이 출력으로 확인한다.
 - `-DRESHIELD_NO_HW_SHA`로 빌드해도 같은 테스트가 통과한다.
