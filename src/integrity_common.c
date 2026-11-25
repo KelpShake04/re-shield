@@ -1,5 +1,7 @@
 #include "reshield/integrity.h"
 
+#include "sha256_internal.h"
+
 #include <string.h>
 
 /* Platform backend hook implemented in integrity_macos.c / integrity_linux.c / integrity_windows.c */
@@ -134,7 +136,53 @@ int reshield_get_sealed_manifest_root(uint8_t out_root[RESHIELD_SHA256_SIZE]) {
     return 0;
 }
 
-reshield_integrity_status_t reshield_verify_code_section(reshield_integrity_result_t *out_result) {
+/* Private layout of reshield_code_scan_t. The public struct is an opaque uint64_t array; this
+ * is copied in and out with memcpy so no uint64_t object is ever read through a struct type. */
+#define RESHIELD_SCAN_MAGIC 0x52534353u /* "RSCS" */
+
+typedef struct reshield_scan_impl {
+    uint32_t       magic;
+    uint32_t       reserved;
+    const uint8_t *base;
+    uint64_t       size;
+    uint64_t       done;
+    sha256_ctx_t   ctx;
+} reshield_scan_impl_t;
+
+/* Compile-time check that the private state fits (a negative array size is the C and C++ way). */
+typedef char reshield_scan_fits_t[sizeof(reshield_scan_impl_t) <= sizeof(reshield_code_scan_t) ? 1 : -1];
+
+reshield_integrity_status_t reshield_code_scan_begin(reshield_code_scan_t *scan) {
+    if (scan == NULL) {
+        return RESHIELD_INTEGRITY_ERROR;
+    }
+    memset(scan, 0, sizeof(*scan));
+
+    reshield_scan_impl_t st;
+    memset(&st, 0, sizeof(st));
+#ifndef RESHIELD_DISABLE
+    if (reshield_platform_get_code_section(&st.base, &st.size) != 0 ||
+        st.base == NULL || st.size == 0) {
+        return RESHIELD_INTEGRITY_ERROR;
+    }
+    reshield_sha256_ctx_init(&st.ctx);
+#endif
+    st.magic = RESHIELD_SCAN_MAGIC;
+    memcpy(scan, &st, sizeof(st));
+    return RESHIELD_INTEGRITY_OK;
+}
+
+int reshield_code_scan_step(reshield_code_scan_t *scan, size_t max_bytes,
+                            reshield_integrity_result_t *out_result) {
+    if (scan == NULL || max_bytes == 0) {
+        return -1;
+    }
+    reshield_scan_impl_t st;
+    memcpy(&st, scan, sizeof(st));
+    if (st.magic != RESHIELD_SCAN_MAGIC) {
+        return -1;
+    }
+
     reshield_integrity_result_t res;
     memset(&res, 0, sizeof(res));
 
@@ -143,44 +191,66 @@ reshield_integrity_status_t reshield_verify_code_section(reshield_integrity_resu
     if (out_result != NULL) {
         *out_result = res;
     }
-    return res.status;
+    return 1;
 #else
+    uint64_t left = st.size - st.done;
+    size_t n = (uint64_t)max_bytes < left ? max_bytes : (size_t)left;
+    reshield_sha256_ctx_update(&st.ctx, st.base + st.done, n);
+    st.done += n;
+    if (st.done < st.size) {
+        memcpy(scan, &st, sizeof(st));
+        return 0;
+    }
+
+    /* The record is read only now: a change to it during the pass still counts. */
     reshield_integrity_record_t rec;
     read_record(&rec);
 
-    const uint8_t *code_ptr = NULL;
-    uint64_t code_size = 0;
-    if (reshield_platform_get_code_section(&code_ptr, &code_size) != 0 ||
-        code_ptr == NULL || code_size == 0) {
-        res.status = RESHIELD_INTEGRITY_ERROR;
-        if (out_result != NULL) {
-            *out_result = res;
-        }
-        return res.status;
-    }
-
     res.build_id = rec.build_id;
     res.has_manifest = rec.has_manifest != 0u ? 1 : 0;
-    res.actual_size = code_size;
+    res.actual_size = st.size;
     res.expected_size = rec.expected_size;
     memcpy(res.expected_sha256, rec.expected_sha256, RESHIELD_SHA256_SIZE);
     memcpy(res.manifest_root_sha256, rec.manifest_root_sha256, RESHIELD_SHA256_SIZE);
-    reshield_sha256(code_ptr, (size_t)code_size, res.actual_sha256);
+    reshield_sha256_ctx_final(&st.ctx, res.actual_sha256);
 
     if (!record_is_valid(&rec)) {
         res.status = RESHIELD_INTEGRITY_TAMPERED;
     } else if (rec.sealed == 0u) {
         res.status = RESHIELD_INTEGRITY_UNSEALED;
-    } else if (rec.expected_size != code_size ||
+    } else if (rec.expected_size != st.size ||
                !reshield_digest_equal(res.actual_sha256, rec.expected_sha256)) {
         res.status = RESHIELD_INTEGRITY_TAMPERED;
     } else {
         res.status = RESHIELD_INTEGRITY_OK;
     }
 
+    /* Next call starts a new pass over the same section; no need to call begin again. */
+    st.done = 0;
+    reshield_sha256_ctx_init(&st.ctx);
+    memcpy(scan, &st, sizeof(st));
+
+    if (out_result != NULL) {
+        *out_result = res;
+    }
+    return 1;
+#endif
+}
+
+reshield_integrity_status_t reshield_verify_code_section(reshield_integrity_result_t *out_result) {
+    reshield_integrity_result_t res;
+    memset(&res, 0, sizeof(res));
+
+    /* One pass in one step: the verdict logic lives only in reshield_code_scan_step(). */
+    reshield_code_scan_t scan;
+    if (reshield_code_scan_begin(&scan) != RESHIELD_INTEGRITY_OK ||
+        reshield_code_scan_step(&scan, SIZE_MAX, &res) != 1) {
+        memset(&res, 0, sizeof(res));
+        res.status = RESHIELD_INTEGRITY_ERROR;
+    }
+
     if (out_result != NULL) {
         *out_result = res;
     }
     return res.status;
-#endif
 }

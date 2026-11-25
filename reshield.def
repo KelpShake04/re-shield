@@ -4,6 +4,8 @@
 LIBRARY reshield
 EXPORTS
     reshield_verify_code_section
+    reshield_code_scan_begin
+    reshield_code_scan_step
     reshield_verify_code_page_wx
     reshield_verify_app
     reshield_check_json

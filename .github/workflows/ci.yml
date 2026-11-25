@@ -20,9 +20,11 @@ jobs:
           grep -m1 "model name" /proc/cpuinfo
           make bench
       - run: |
-          make BUILD_DIR=build/nohw CFLAGS="-Wall -Wextra -Wpedantic -Werror -O2 -DRESHIELD_NO_HW_SHA" build/nohw/test_sha256_accel build/nohw/test_save_seal
+          make BUILD_DIR=build/nohw CFLAGS="-Wall -Wextra -Wpedantic -Werror -O2 -DRESHIELD_NO_HW_SHA" build/nohw/test_sha256_accel build/nohw/test_save_seal build/nohw/test_incremental build/nohw/test_incremental_real
           ./build/nohw/test_sha256_accel
           ./build/nohw/test_save_seal
+          ./build/nohw/test_incremental
+          ./build/nohw/test_incremental_real
       # The sources must also compile as C++ (engines may compile them into a C++ module).
       - run: for f in src/*.c; do c++ -x c++ -std=c++11 -fsyntax-only -Wall -Wextra -Wpedantic -Werror -Iinclude "$f" || exit 1; done
       - run: python3 tests/fuzz/test_parser_regressions.py
@@ -212,6 +214,8 @@ jobs:
           cl %TFLAGS% /Fo:build\ tests\test_sha256_accel.c build\reshield.lib /Fe:build\test_sha256_accel.exe /link /INCREMENTAL:NO || set FAIL=1
           cl %TFLAGS% /Fo:build\ tests\bench_sha256.c build\reshield.lib /Fe:build\bench_sha256.exe /link /INCREMENTAL:NO || set FAIL=1
           cl %TFLAGS% /Fo:build\ tests\test_save_seal.c build\reshield.lib /Fe:build\test_save_seal.exe /link /INCREMENTAL:NO || set FAIL=1
+          cl %TFLAGS% /Fo:build\ tests\test_incremental.c build\reshield.lib /Fe:build\test_incremental.exe /link /INCREMENTAL:NO || set FAIL=1
+          cl %TFLAGS% /Fo:build\ tests\test_incremental_real.c build\reshield.lib /Fe:build\test_incremental_real.exe /link /INCREMENTAL:NO || set FAIL=1
           cl %TFLAGS% /Fo:build\ tests\test_codesign_toctou_windows.c build\reshield.lib /Fe:build\test_codesign_toctou_windows.exe /link /INCREMENTAL:NO || set FAIL=1
           if defined FAIL exit /b 1
 
@@ -219,7 +223,7 @@ jobs:
         shell: pwsh
         run: |
           $bad = 0
-          foreach ($t in 'test_integrity', 'test_manifest', 'test_runtime', 'test_wx', 'test_sha256_accel', 'test_save_seal') {
+          foreach ($t in 'test_integrity', 'test_manifest', 'test_runtime', 'test_wx', 'test_sha256_accel', 'test_save_seal', 'test_incremental', 'test_incremental_real') {
             "=== $t ==="
             & ".\build\$t.exe"
             if ($LASTEXITCODE -ne 0) { "FAILED: $t exit=$LASTEXITCODE"; $bad = 1 }
