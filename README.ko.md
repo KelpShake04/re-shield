@@ -20,6 +20,8 @@
 - **strict 매니페스트 (v2)**: 에셋 폴더에 끼워 넣은 파일을 `RESHIELD_ERR_ASSET_EXTRA`(값 9)로 보고한다. `#allow` 글롭으로 세이브·로그 경로를 허용한다(아래 [strict 모드](#내-프로젝트에-적용하기)와 [docs/integrity-verification.md](docs/integrity-verification.md#10-매니페스트-v2와-strict-모드) 참고).
 - **SHA-256 하드웨어 가속**: 코드 섹션·에셋 해시의 블록 압축을 CPU 명령(AArch64 SHA2, x86-64 SHA-NI)으로 처리하고, 명령이 없거나 확인하지 않은 조합이면 이식성 C로 폴백한다. 라이브러리를 `-DRESHIELD_NO_HW_SHA`로 컴파일하면 끈다. 처리량은 `make bench`로 잰다(GitHub Actions 러너: macos 1441, ubuntu 1813, windows 1582 MB/s. 로컬 Apple M1 Pro: 가속 2223 MB/s, 같은 기계의 이식성 C 220 MB/s). 조건과 측정 환경은 [docs/integrity-verification.md](docs/integrity-verification.md#9-sha-256-하드웨어-가속).
 - **세이브·설정 파일 seal (`include/reshield/save_seal.h`)**: `reshield_save_tag()`/`reshield_save_verify()`가 HMAC-SHA256 태그로 캐주얼 편집·손상을 탐지한다. 키가 바이너리에 있어야 하므로 전문 공격자는 막지 못한다([docs/save-seal.md](docs/save-seal.md)).
+- **점진 재검증 (`include/reshield/integrity.h`)**: `reshield_code_scan_begin()`/`reshield_code_scan_step()`이 코드 섹션을 호출당 최대 `max_bytes`씩 나눠 해시해서, 프레임 루프에서 긴 정지 없이 재검사할 수 있다. 상태(192 B)는 호출자 소유이고 `malloc`이 없다([docs/incremental-scan.md](docs/incremental-scan.md)).
+- **검증된 에셋 로딩**: `reshield_load_verified_asset()`/`reshield_load_verified_app_asset()`은 에셋을 한 번만 읽고, 해시한 바로 그 바이트를 돌려준다(검사·사용 사이의 경쟁 없음). 버퍼는 `free()`가 아니라 `reshield_free_asset()`으로 해제한다([docs/asset-loading.md](docs/asset-loading.md)).
 - **엔진 바인딩**: 평면 C 함수 `reshield_check_json()`을 부르는 C# P/Invoke 바인딩(`bindings/csharp/Reshield.cs`)과 Unity 패키지 골격(`bindings/unity/com.reshield.guard`, Unity 미검증)이 있다([docs/engines-unity.md](docs/engines-unity.md)).
 - **릴리스 검증 CLI (`tools/verify_release.py`)**: CI/CD 단계에서 바이너리 봉인과 매니페스트 일치를 검증하고, 정의 심볼 수는 보고만 한다(검증하지 않음). 개발 빌드 마커가 든 바이너리는 거부한다.
 - **GitHub Action (`action.yml`)**: `tools/reshield_release.py`(strip, 매니페스트, 봉인, 서명, 검증)를 한 단계로 실행한다([docs/steam-pipeline.md](docs/steam-pipeline.md)).
@@ -64,6 +66,8 @@ make release-demo
 - 무엇을 막고 무엇을 못 막는지 직접 실험하는 crackme 랩(자기 바이너리만 대상): [docs/crackme-lab.md](docs/crackme-lab.md)
 - Unity(C# P/Invoke 바인딩, Unity 미검증 패키지 골격): [docs/engines-unity.md](docs/engines-unity.md)
 - GitHub Actions로 봉인한 뒤 steamcmd로 올리기(검증하지 못한 부분 포함): [docs/steam-pipeline.md](docs/steam-pipeline.md)
+- 코드 섹션 점진 재검증(프레임 루프용, 비용 측정과 한계 포함): [docs/incremental-scan.md](docs/incremental-scan.md)
+- 검증된 에셋 로딩(검증한 바로 그 바이트를 돌려받기, 영어): [docs/asset-loading.md](docs/asset-loading.md)
 - 세이브·설정 파일의 캐주얼 편집·손상 탐지(HMAC-SHA256, 전문 공격자는 못 막음): [docs/save-seal.md](docs/save-seal.md)
 
 ## 내 프로젝트에 적용하기
@@ -136,7 +140,7 @@ python3 tools/verify_release.py build/game --manifest build/game.manifest --asse
 - macOS에서 `seal_binary.py`는 ad-hoc 서명을 적용한다. 배포용이면 봉인 뒤에 Developer ID로 다시 서명한다. 서명은 `__text` 해시에 영향을 주지 않는다.
 - 매니페스트 파일도 함께 배포한다. 루트 해시가 바이너리에 봉인되어 있어, 매니페스트를 바꾸면 `MANIFEST_MISMATCH`가 난다.
 
-**4. 에셋 로딩.** 검증한 뒤 같은 경로를 다시 열면 그 사이 파일이 바뀔 수 있다(TOCTOU). 파일을 메모리로 읽고 `reshield_verify_buffer()`로 검증한 뒤 그 버퍼를 사용한다. `reshield_verify_single_asset()`도 경로 기반이라 같은 한계가 있다.
+**4. 에셋 로딩.** 검증한 뒤 같은 경로를 다시 열면 그 사이 파일이 바뀔 수 있다(TOCTOU). 파일을 메모리로 읽고 `reshield_verify_buffer()`로 검증한 뒤 그 버퍼를 사용한다. `reshield_verify_single_asset()`도 경로 기반이라 같은 한계가 있다. `reshield_load_verified_asset()`과 `reshield_load_verified_app_asset()`은 이 읽기와 해시를 한 번에 하고 검증된 버퍼를 돌려준다([docs/asset-loading.md](docs/asset-loading.md)).
 
 **5. 개발 중, 릴리스 빌드.** 개발용과 릴리스용 라이브러리는 디렉터리가 다르다: `make lib`은 `build/libreshield.a`(개발용), `make ALLOW_UNSEALED=0 lib`은 `build/release/libreshield.a`(릴리스용)를 만든다. 서로의 오브젝트를 재사용하지 않는다. `-std=c11`, `-Iinclude`, `ALLOW_UNSEALED` 정의는 항상 적용되어 `make CFLAGS=-O0`이나 상위 make가 지울 수 없다. `-DRESHIELD_DISABLE`로 검사를 끈다. 이 매크로는 **라이브러리를 컴파일할 때** 줘야 한다(`make clean` 후 `make CFLAGS="-O2 -DRESHIELD_DISABLE"` 등). 앱 컴파일 플래그에만 넣으면 아무 효과가 없다. 디버거 중단점이 `.text`를 바꾸면 `CODE_TAMPERED`가 나므로 디버깅 중에는 꺼 둔다.
 
@@ -144,7 +148,7 @@ python3 tools/verify_release.py build/game --manifest build/game.manifest --asse
 
 ## 공유 라이브러리와 C++
 
-- `make shared`는 모듈 모드용 `build/libreshield.so`(macOS는 `build/libreshield.dylib`)를, `make release-shared`는 릴리스판(`ALLOW_UNSEALED=0`)을 `build/release/`에 만든다. Windows DLL은 `cl /LD ... /link /DEF:reshield.def`로 만들며, `reshield.def`는 엔진 바인딩에 필요한 부분집합(`reshield_verify_code_section`, `reshield_verify_code_page_wx`, `reshield_verify_app`, `reshield_check_json`, `reshield_report_to_json`, `reshield_status_name`, `reshield_platform_name`)만 export한다. POSIX 공유 라이브러리는 공개 API 전체가 보인다. 라이브러리는 `tools/seal_binary.py`로 봉인한다.
+- `make shared`는 모듈 모드용 `build/libreshield.so`(macOS는 `build/libreshield.dylib`)를, `make release-shared`는 릴리스판(`ALLOW_UNSEALED=0`)을 `build/release/`에 만든다. Windows DLL은 `cl /LD ... /link /DEF:reshield.def`로 만들며, `reshield.def`는 엔진 바인딩에 필요한 부분집합(`reshield_verify_code_section`, `reshield_code_scan_begin`, `reshield_code_scan_step`, `reshield_verify_code_page_wx`, `reshield_verify_app`, `reshield_check_json`, `reshield_report_to_json`, `reshield_status_name`, `reshield_platform_name`, `reshield_load_verified_app_asset`, `reshield_free_asset`)만 export한다. POSIX 공유 라이브러리는 공개 API 전체가 보인다. 라이브러리는 `tools/seal_binary.py`로 봉인한다.
 - `src/*.c`와 공개 헤더는 C++로도 컴파일된다(CI의 구문 검사 게이트: Linux·macOS는 `c++ -std=c++11 -fsyntax-only`, Windows는 `cl /TP`). C++ 오브젝트를 링크·실행하는 검증은 하지 않는다.
 
 ## 개발·테스트 빌드 옵션
