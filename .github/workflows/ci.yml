@@ -17,6 +17,12 @@ jobs:
       # The sources must also compile as C++ (engines may compile them into a C++ module).
       - run: for f in src/*.c; do c++ -x c++ -std=c++11 -fsyntax-only -Wall -Wextra -Wpedantic -Werror -Iinclude "$f" || exit 1; done
       - run: python3 tests/fuzz/test_parser_regressions.py
+      # The development marker must survive the linker's dead-section removal (dev-build guard).
+      - run: |
+          cc -std=c11 -O2 -Iinclude -DRESHIELD_ALLOW_UNSEALED -ffunction-sections -fdata-sections \
+            examples/sample_game.c src/*.c -Wl,--gc-sections -o /tmp/gc_game
+          strip /tmp/gc_game
+          grep -q RESHIELD-DEV-BUILD-v1 /tmp/gc_game
       # `ld.so ./prog` makes /proc/self/exe the loader: must be an error exit, never a crash (>=128).
       - run: |
           cp build/integrity_demo /tmp/pie
@@ -48,6 +54,76 @@ jobs:
       - uses: actions/checkout@v4
       - run: make clean && make all test release-demo
       - run: for f in src/*.c; do c++ -x c++ -std=c++11 -fsyntax-only -Wall -Wextra -Wpedantic -Werror -Iinclude "$f" || exit 1; done
+
+  # The composite action (action.yml) used the way a game's workflow would: `uses: ./`, on a copy of
+  # the build output. Then run the sealed binary like a shipped host, tamper one asset byte, expect a refusal.
+  action-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: make all
+
+      - name: Stage a dist directory from the build output
+        run: |
+          mkdir -p dist
+          cp build/sample_game dist/game
+          cp -R examples/assets dist/assets
+          echo "debug symbols" > dist/assets/game.pdb
+
+      # make all gives a DEVELOPMENT build: the action refuses it unless allow-dev-build is set.
+      - name: The action refuses a development build
+        id: refused
+        continue-on-error: true
+        uses: ./
+        with:
+          binary: dist/game
+          assets: dist/assets
+          strip: "true"
+
+      - name: The refusal happened and left the binary and assets alone
+        env:
+          OUTCOME: ${{ steps.refused.outcome }}
+        run: |
+          test "$OUTCOME" = "failure"
+          test ! -e dist/game.manifest
+          cmp build/sample_game dist/game
+
+      - name: Seal with the action
+        id: seal
+        uses: ./
+        with:
+          binary: dist/game
+          assets: dist/assets
+          exclude: |
+            *.pdb
+          strip: "true"
+          allow-dev-build: "true"
+
+      - name: Sealed binary runs, manifest honors exclude, build id output matches
+        env:
+          MANIFEST: ${{ steps.seal.outputs.manifest }}
+          BUILD_ID: ${{ steps.seal.outputs.build-id }}
+          RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          test "$BUILD_ID" = "$RUN_NUMBER"
+          test -f "$MANIFEST"
+          cat "$MANIFEST"
+          ! grep -q "game.pdb" "$MANIFEST"
+          ./dist/game "$MANIFEST" dist/assets STAGE-1-CLEAR-2026 | tee /tmp/run.out
+          grep -q "STAGE UNLOCKED (build_id=$RUN_NUMBER)" /tmp/run.out
+
+      - name: One tampered asset byte is refused
+        env:
+          MANIFEST: ${{ steps.seal.outputs.manifest }}
+        run: |
+          printf 'x' >> dist/assets/stage1.cfg
+          rc=0; ./dist/game "$MANIFEST" dist/assets STAGE-1-CLEAR-2026 || rc=$?
+          echo "rc=$rc"
+          test "$rc" -ne 0
 
   # Windows x64 (MSVC) runtime backend: builds with cl (no make on Windows), seals a copy of the
   # demo EXE, runs it, tampers .text and checks detection. Skipped on purpose: the POSIX-only
@@ -138,6 +214,15 @@ jobs:
           Expect 2 "tampered DLL .text is TAMPERED" build\mod_tampered.dll 'status=TAMPERED' 'check_json: status=2 json=.*"status":"CODE_TAMPERED"'
           exit 0  # the last native call exited 2 on purpose; every real failure above throws
 
+      # Dev-build guard on MSVC output: the marker is in the development object and EXE (it survives
+      # /OPT:REF) and absent from the release object and DLL; the release tools refuse the former and
+      # accept the latter. (build\reshield.lib is the DLL's import library by now: check objects.)
+      - name: Dev-build guard (marker present in dev, absent in release, tools refuse dev)
+        shell: pwsh
+        run: |
+          python tests\test_dev_build_guard.py --dev-artifact build\lib\integrity_common.obj --dev-artifact build\integrity_demo.exe --dev-bin build\integrity_demo.exe --release-artifact build\dll\integrity_common.obj --release-artifact build\reshield.dll --release-bin build\reshield.dll
+          if ($LASTEXITCODE -ne 0) { throw "dev-build guard test failed" }
+
       - name: Seal, run, tamper, verify_release (integrity_demo)
         shell: pwsh
         run: |
@@ -159,7 +244,7 @@ jobs:
           if ($o -notmatch 'status=OK') { throw "sealed EXE did not print status=OK" }
           python tools\seal_binary.py build\demo_sealed.exe --verify-only
           if ($LASTEXITCODE -ne 0) { throw "verify-only failed" }
-          python tools\verify_release.py build\demo_sealed.exe
+          python tools\verify_release.py build\demo_sealed.exe --allow-dev-build
           if ($LASTEXITCODE -ne 0) { throw "verify_release failed" }
 
           Expect .\build\demo_sealed.exe 4 "unsigned sealed EXE: WinVerifyTrust codesign check fails" @("--check-codesign") | Out-Null
@@ -202,7 +287,7 @@ jobs:
           # seal first, sign after: the seal and the release checks still hold on the signed file
           python tools\seal_binary.py build\demo_signed.exe --verify-only
           if ($LASTEXITCODE -ne 0) { throw "verify-only on signed EXE failed" }
-          python tools\verify_release.py build\demo_signed.exe
+          python tools\verify_release.py build\demo_signed.exe --allow-dev-build
           if ($LASTEXITCODE -ne 0) { throw "verify_release on signed EXE failed" }
 
           $o = Expect .\build\demo_signed.exe 0 "signed sealed EXE: WinVerifyTrust passes" @("--check-codesign")
@@ -248,10 +333,41 @@ jobs:
           Copy-Item build\sample_game.exe build\sample_game_sealed.exe
           python tools\seal_binary.py build\sample_game_sealed.exe --manifest build\sample_assets.manifest --build-id 1
           if ($LASTEXITCODE -ne 0) { throw "seal failed" }
-          python tools\verify_release.py build\sample_game_sealed.exe --manifest build\sample_assets.manifest --assets examples\assets
+          python tools\verify_release.py build\sample_game_sealed.exe --allow-dev-build --manifest build\sample_assets.manifest --assets examples\assets
           if ($LASTEXITCODE -ne 0) { throw "verify_release failed" }
           .\build\sample_game_sealed.exe build\sample_assets.manifest examples\assets STAGE-1-CLEAR-2026
           if ($LASTEXITCODE -ne 0) { throw "sealed sample_game exit=$LASTEXITCODE" }
+
+      # The same action on the MSVC-built EXE (Git Bash step shell; python3 may not exist there).
+      - name: Stage a dist directory for the action
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force build\act | Out-Null
+          Copy-Item build\sample_game.exe build\act\game.exe
+          Copy-Item -Recurse examples\assets build\act\assets
+
+      - name: Seal with the action
+        id: seal
+        uses: ./
+        with:
+          binary: build/act/game.exe
+          assets: build/act/assets
+          python: python
+          allow-dev-build: "true"  # the demo EXE is built with /DRESHIELD_ALLOW_UNSEALED
+
+      - name: Action-sealed EXE runs, then a tampered asset is refused
+        shell: pwsh
+        env:
+          MANIFEST: ${{ steps.seal.outputs.manifest }}
+        run: |
+          $ErrorActionPreference = 'Continue'
+          Write-Host "manifest output: $env:MANIFEST"
+          .\build\act\game.exe $env:MANIFEST build\act\assets STAGE-1-CLEAR-2026
+          if ($LASTEXITCODE -ne 0) { throw "action-sealed EXE exit=$LASTEXITCODE" }
+          Add-Content -Path build\act\assets\stage1.cfg -Value "x" -NoNewline
+          .\build\act\game.exe $env:MANIFEST build\act\assets STAGE-1-CLEAR-2026
+          if ($LASTEXITCODE -eq 0) { throw "tampered asset was accepted" }
+          exit 0  # the last native call failed on purpose
 
       # reshield_verify_app: manifest and assets are found next to the EXE even when the CWD is elsewhere.
       # Exit code = 10 + status: OK=0 ASSET_TAMPERED=6 MANIFEST_IO=8.

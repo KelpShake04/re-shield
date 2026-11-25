@@ -9,7 +9,8 @@ build of the library this checks:
 1. unsealed library          -> UNSEALED (exit 1)
 2. library sealed by tools/seal_binary.py -> OK (exit 0), W^X check OK, sizes match
 3. one byte of the library's .text changed -> TAMPERED (exit 2)
-4. (Linux) library opened by a relative path -> ERROR (exit 3, fails closed)
+4. (Linux) library opened by a relative path (also one with spaces) -> OK, a tampered one ->
+   TAMPERED; if the file is deleted or replaced after loading -> ERROR (exit 3, fails closed)
 5. (ELF) a host that links re-shield too and exports its symbols (-rdynamic) does not capture the
    library's calls: a sealed library is OK although the host is unsealed, and an unsealed library is
    UNSEALED although the host is sealed (-Wl,-Bsymbolic: each module uses its own record)
@@ -43,7 +44,8 @@ OK, UNSEALED, TAMPERED, ERROR = 0, 1, 2, 3
 UNCALLED_SYMBOL = "reshield_verify_buffer"
 
 
-def run_host(host: str, lib: str, cwd: str | None = None, *extra: str) -> subprocess.CompletedProcess[str]:
+def run_host(host: str, lib: str, *extra: str,
+             cwd: str | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run([host, lib, *extra], capture_output=True, text=True, cwd=cwd)
 
 
@@ -87,7 +89,7 @@ def test_manifest_binding(host: str, lib: str, label: str, tmpdir: str) -> None:
 
     def run() -> subprocess.CompletedProcess[str]:
         # cwd is neither directory: only the host EXE directory can make the relative paths resolve
-        return run_host(host_copy, sealed, root, "app.manifest", "assets")
+        return run_host(host_copy, sealed, "app.manifest", "assets", cwd=root)
 
     manifest_check(run(), 0, "OK", f"{label}: sealed library + manifest, host in another directory: OK")
 
@@ -168,9 +170,34 @@ def test_library(host: str, lib: str, label: str, tmpdir: str, plain_cj: tuple[i
            f"{label}: one changed .text byte of the library is TAMPERED", (2, "CODE_TAMPERED"))
 
     if sys.platform.startswith("linux"):
-        # dlpi_name is relative: the file cannot be trusted to be the mapped image, so fail closed
-        r = run_host(host, "./" + os.path.basename(sealed), cwd=tmpdir)
-        expect(r, ERROR, "ERROR", f"{label}: relative dlopen path fails closed (ERROR, not OK)")
+        # dlpi_name is relative: the library path comes from /proc/self/maps (the mapping that
+        # holds the record), so the verdict is the same as for an absolute path.
+        rel = "./" + os.path.basename(sealed)
+        out = expect(run_host(host, rel, cwd=tmpdir), OK, "OK",
+                     f"{label}: relative dlopen path verifies OK")
+        assert "wx=0" in out, f"{label}: W^X check did not pass: {out}"
+        expect(run_host(host, "./" + os.path.basename(tampered), cwd=tmpdir), TAMPERED,
+               "TAMPERED", f"{label}: tampered library opened by a relative path is TAMPERED")
+
+        # a path with spaces and "(deleted)" inside it is not confused with a deleted file
+        odd_dir = os.path.join(tmpdir, f"{label} dir (deleted) x")
+        os.mkdir(odd_dir)
+        shutil.copy2(sealed, os.path.join(odd_dir, "lib with space.so"))
+        expect(run_host(host, f"{label} dir (deleted) x/lib with space.so", cwd=tmpdir),
+               OK, "OK", f"{label}: relative path with spaces verifies OK")
+
+        # the file behind the relative name is deleted, or replaced by another file, after
+        # loading: the path no longer names the mapped image, so fail closed
+        gone = os.path.join(tmpdir, f"{label}_gone{ext}")
+        shutil.copy2(sealed, gone)
+        expect(run_host(host, "./" + os.path.basename(gone), "--unlink", cwd=tmpdir),
+               ERROR, "ERROR", f"{label}: relative path, library deleted after load, fails closed")
+        swapped = os.path.join(tmpdir, f"{label}_swapped{ext}")
+        shutil.copy2(tampered, swapped)
+        spare = os.path.join(tmpdir, f"{label}_spare{ext}")
+        shutil.copy2(sealed, spare)
+        expect(run_host(host, "./" + os.path.basename(swapped), "--replace", spare, cwd=tmpdir),
+               ERROR, "ERROR", f"{label}: relative path, library replaced after load, fails closed")
 
     test_manifest_binding(host, lib, label, tmpdir)
 

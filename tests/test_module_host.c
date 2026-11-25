@@ -17,11 +17,13 @@
 
 #include <inttypes.h>
 #include <stdio.h>
+#include <string.h>
 
 #ifdef _WIN32
 #include <windows.h>
 #else
 #include <dlfcn.h>
+#include <unistd.h>
 #endif
 
 typedef reshield_integrity_status_t (*verify_code_fn)(reshield_integrity_result_t *);
@@ -39,8 +41,14 @@ static const char *status_name(reshield_integrity_status_t st) {
 }
 
 int main(int argc, char **argv) {
-    if (argc != 2 && argc != 4) {
-        fprintf(stderr, "usage: %s <shared-library> [<manifest_rel> <assets_rel>]\n", argv[0]);
+    /* POSIX only: after loading, "--unlink" deletes the library file and "--replace <file>"
+     * renames <file> over it, so the library's on-disk path no longer names the mapped image. */
+    int unlink_after = argc == 3 && strcmp(argv[2], "--unlink") == 0;
+    int replace_after = argc == 4 && strcmp(argv[2], "--replace") == 0;
+    int manifest_mode = argc == 4 && !replace_after;
+    if (argc != 2 && !unlink_after && !replace_after && !manifest_mode) {
+        fprintf(stderr, "usage: %s <shared-library> [--unlink | --replace <file> | <manifest_rel> <assets_rel>]\n",
+                argv[0]);
         return 2;
     }
 
@@ -75,6 +83,13 @@ int main(int argc, char **argv) {
         fprintf(stderr, "symbol not found in %s\n", argv[1]);
         return 11;
     }
+#ifndef _WIN32
+    if ((unlink_after && unlink(argv[1]) != 0) ||
+        (replace_after && rename(argv[3], argv[1]) != 0)) {
+        perror("unlink/rename");
+        return 12;
+    }
+#endif
 
     reshield_integrity_result_t res;
     reshield_integrity_status_t st = verify_code(&res);
@@ -86,7 +101,7 @@ int main(int argc, char **argv) {
     char json[1024];
     int cj = check_json(NULL, NULL, json, sizeof(json));
     printf("check_json: status=%d json=%s\n", cj, json);
-    if (argc == 4) {
+    if (manifest_mode) {
         cj = check_json(argv[2], argv[3], json, sizeof(json));
         printf("check_json_manifest: status=%d json=%s\n", cj, json);
     }

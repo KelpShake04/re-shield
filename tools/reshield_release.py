@@ -12,6 +12,8 @@ Run it on the final linked executable or shared library, in place:
 Sealing rewrites the binary, so signing must come after it (and strip before it). This tool only
 calls the existing tools (gen_manifest.py, seal_binary.py, verify_release.py) plus strip/codesign,
 so the seal format stays defined in one place. A Mach-O that already has a real signature is refused.
+A binary linked against a development build of re-shield (RESHIELD-DEV-BUILD-v1 marker) is refused
+with exit code 2 before anything is modified; --allow-dev-build is for demos and CI only.
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ import sys
 TOOLS = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, TOOLS)
 import seal_binary  # noqa: E402
+import verify_release  # noqa: E402
 
 
 def run(cmd: list[str]) -> None:
@@ -63,6 +66,9 @@ def main() -> int:
     p.add_argument("--entitlements", help="macOS entitlements plist for --sign")
     p.add_argument("--sign-cmd", help="Signing command run after sealing instead of the macOS codesign; "
                                       "{} is replaced by the binary path (e.g. signtool)")
+    p.add_argument("--allow-dev-build", action="store_true",
+                   help="Accept a binary linked against a development build of re-shield "
+                        "(demos and CI only; never for a shipped build)")
     args = p.parse_args()
 
     build_id = args.build_id
@@ -81,6 +87,14 @@ def main() -> int:
     kind = file_kind(binary)
     if kind == "unknown":
         raise SystemExit(f"[reshield_release] {binary}: not a Mach-O, ELF or PE executable or shared library")
+    with open(binary, "rb") as f:
+        dev_build = verify_release.is_dev_build(f.read())
+    if dev_build and not args.allow_dev_build:
+        print(f"[reshield_release] error: {binary}: {verify_release.DEV_BUILD_HELP}", file=sys.stderr)
+        return 2
+    if dev_build:
+        print("[reshield_release] warning: sealing a DEVELOPMENT build (--allow-dev-build). "
+              "Demos and CI only: never ship this file.", file=sys.stderr)
     macos = kind == "macho" and sys.platform == "darwin"
     if not macos and not args.sign_cmd and (args.sign != "-" or args.entitlements):
         print("[reshield_release] warning: --sign/--entitlements only apply to a Mach-O on macOS; "
@@ -127,6 +141,8 @@ def main() -> int:
         run(cmd + [binary])
 
     verify = [sys.executable, os.path.join(TOOLS, "verify_release.py"), binary]
+    if args.allow_dev_build:
+        verify.append("--allow-dev-build")
     if manifest:
         verify += ["--manifest", manifest, "--assets", args.assets]
     run(verify)
