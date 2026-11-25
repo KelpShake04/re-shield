@@ -204,7 +204,9 @@ int reshield_sha256_parts(const reshield_sha256_part_t *parts, size_t count, uin
 }
 
 /* Internal (declared extern in manifest.c): hashes at most max_read bytes of a regular
- * file (non-regular files are rejected by reshield_file_open_regular). */
+ * file (non-regular files are rejected by reshield_file_open_regular). Returns 0, -1, or
+ * RESHIELD_FILE_UNREADABLE when the file could not be opened or read for an access, lock or
+ * I/O reason (see file_platform.h). */
 int reshield_sha256_file_limited(const char *path,
                                  uint8_t out_hash[RESHIELD_SHA256_SIZE],
                                  uint64_t *out_size,
@@ -213,8 +215,9 @@ int reshield_sha256_file_limited(const char *path,
         return -1;
     }
     reshield_file_t file;
-    if (reshield_file_open_regular(path, &file, NULL) != 0) {
-        return -1;
+    int orc = reshield_file_open_regular(path, &file, NULL);
+    if (orc != 0) {
+        return orc;
     }
 
     sha256_ctx_t ctx;
@@ -228,7 +231,7 @@ int reshield_sha256_file_limited(const char *path,
         intptr_t n = reshield_file_read_full(file, buf, want);
         if (n < 0) {
             reshield_file_close(file);
-            return -1;
+            return (int)n;
         }
         sha256_update(&ctx, buf, (size_t)n);
         total += (uint64_t)n;
@@ -248,5 +251,5 @@ int reshield_sha256_file_limited(const char *path,
 int reshield_sha256_file(const char *path,
                          uint8_t out_hash[RESHIELD_SHA256_SIZE],
                          uint64_t *out_size) {
-    return reshield_sha256_file_limited(path, out_hash, out_size, UINT64_MAX);
+    return reshield_sha256_file_limited(path, out_hash, out_size, UINT64_MAX) == 0 ? 0 : -1;
 }

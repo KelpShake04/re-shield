@@ -66,6 +66,7 @@ const char *reshield_status_name(reshield_status_t status) {
         case RESHIELD_ERR_INTERNAL:          return "INTERNAL_ERROR";
         case RESHIELD_ERR_MANIFEST_IO:       return "MANIFEST_IO_ERROR";
         case RESHIELD_ERR_ASSET_EXTRA:       return "ASSET_EXTRA";
+        case RESHIELD_ERR_ASSET_UNREADABLE:  return "ASSET_UNREADABLE";
         default:                             return "UNKNOWN";
     }
 }
@@ -158,6 +159,9 @@ reshield_status_t reshield_verify(const reshield_config_t *config,
                         break;
                     case RESHIELD_MANIFEST_ASSET_EXTRA:
                         report.status = RESHIELD_ERR_ASSET_EXTRA;
+                        break;
+                    case RESHIELD_MANIFEST_ASSET_UNREADABLE:
+                        report.status = RESHIELD_ERR_ASSET_UNREADABLE;
                         break;
                     default:
                         report.status = RESHIELD_ERR_INTERNAL;

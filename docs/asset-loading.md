@@ -53,7 +53,7 @@ The caller owns the buffer. Changing the file afterwards does not change it. Fre
 
 ## Statuses
 
-No new codes. The manifest-level call returns `reshield_manifest_status_t`, the app-level call the
+No new codes beyond `ASSET_UNREADABLE` (`ERR_ASSET_UNREADABLE`, value 10, appended to the enums; existing values unchanged). The manifest-level call returns `reshield_manifest_status_t`, the app-level call the
 matching `reshield_status_t`.
 
 | Case | manifest status | app status |
@@ -62,12 +62,17 @@ matching `reshield_status_t`.
 | binary has no sealed root | `UNSEALED` | `ERR_UNSEALED` |
 | manifest changed | `ROOT_MISMATCH` | `ERR_MANIFEST_MISMATCH` |
 | asset not listed, missing, not a regular file, resized, 1 byte changed, path too long | `ASSET_MISMATCH` | `ERR_ASSET_TAMPERED` |
+| asset exists but cannot be opened or read: permission denied, sharing or lock violation, antivirus block, I/O error | `ASSET_UNREADABLE` | `ERR_ASSET_UNREADABLE` |
 | unsafe `asset_rel_path`, manifest unreadable or malformed, NULL output, asset larger than `max_size` | `IO_ERROR` | `ERR_MANIFEST_IO` |
 | executable path or a joined path does not fit 4096 bytes (app-level only) | n/a | `ERR_INTERNAL` |
 
 On every non-OK status `*out_buf` is NULL and `*out_len` is 0. "Larger than `max_size`" is not a
 tamper verdict: it is the caller's own limit, so it is `IO_ERROR`, checked against the size on disk
-without reading the file.
+without reading the file. `ASSET_UNREADABLE` is not a tamper verdict either, and not a pass: the
+library only reports it. Log it apart from `ASSET_TAMPERED` and let the caller pick the policy
+(retry, or fail open as for `IO_ERROR`). A cause the library does not recognise stays
+`ASSET_MISMATCH` (fail closed). Under `-DRESHIELD_DISABLE` nothing is verified and an unreadable
+file is `IO_ERROR`, as before.
 
 ## Limits and decisions
 

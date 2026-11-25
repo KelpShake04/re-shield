@@ -56,7 +56,7 @@ Mono의 `Assembly-CSharp.dll`은 IL(관리 코드)이고 JIT가 메모리에서 
 모두 실측하지 않은 추정이다. 먼저 report-only로 켜서 비율을 본 뒤에 판단한다.
 
 - **Steam 오버레이, Discord/OBS 오버레이**: 보통 그래픽·입력 시스템 DLL을 훅하고 게임 모듈의 `.text`는 건드리지 않는다. 낮은 위험이지만 오버레이 켬/끔별로 비율을 보는 것이 좋다.
-- **백신**: 파일을 잠그면 매니페스트 읽기가 `MANIFEST_IO_ERROR`가 된다(변조 아님, fail-open으로 처리). 격리·삭제는 진짜 파일 손상이다.
+- **백신**: 파일을 잠그면 매니페스트 읽기는 `MANIFEST_IO_ERROR`, 에셋 읽기는 `ASSET_UNREADABLE`(값 10)이 된다(둘 다 변조 아님, 변조와 구분해 로그만 남기고 fail-open 등 정책은 호출자가 고른다). 격리·삭제로 파일이 사라지면 `ASSET_TAMPERED`다(진짜 파일 손상).
 - **Proton/Wine(Steam Deck)**: 메모리 보호 비트, 섹션 매핑, 코드 서명 API 동작이 Windows와 다를 수 있다. 이 저장소는 Proton에서 실행해 보지 않았다. Wine에서 `PAGE_PERMISSIONS`나 `CODESIGN_INVALID`가 나오면 변조가 아니라 환경 차이일 수 있다.
 - **Steam 업데이트 중단, 모드 로더(BepInEx 등)**: 섞인 버전이나 하드 패치된 `Managed/*.dll`은 `ASSET_TAMPERED`로 잡힌다(진짜 불일치지만 정상 사용자가 고의로 한 것일 수 있다).
 

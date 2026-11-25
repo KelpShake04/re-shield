@@ -8,7 +8,8 @@
 #include <string.h>
 
 #ifndef RESHIELD_DISABLE
-/* Internal helper in sha256.c: hashes at most max_read bytes of a regular file. */
+/* Internal helper in sha256.c: hashes at most max_read bytes of a regular file. Returns 0, -1,
+ * or RESHIELD_FILE_UNREADABLE (access, lock or I/O failure, see file_platform.h). */
 extern int reshield_sha256_file_limited(const char *path,
                                         uint8_t out_hash[RESHIELD_SHA256_SIZE],
                                         uint64_t *out_size,
@@ -139,13 +140,15 @@ static int build_asset_path(char *out, size_t cap, const char *base, const char 
 /* Reads a regular file once, in one open, into a fresh malloc buffer (+1 spare byte, so a file
  * that grew is noticed). The size comes from the open handle, not from a second stat.
  * want_size != NULL: the file must be exactly that long. Returns 0 (out and out_len set, the
- * caller frees), 1 if the file is larger than max_size (nothing read), -1 on any other failure. */
+ * caller frees), 1 if the file is larger than max_size (nothing read), RESHIELD_FILE_UNREADABLE if
+ * it could not be opened or read for an access, lock or I/O reason, -1 on any other failure. */
 static int read_asset(const char *path, size_t max_size, const uint64_t *want_size,
                       uint8_t **out, size_t *out_len) {
     reshield_file_t file;
     uint64_t size = 0;
-    if (reshield_file_open_regular(path, &file, &size) != 0) {
-        return -1;
+    int orc = reshield_file_open_regular(path, &file, &size);
+    if (orc != 0) {
+        return orc;
     }
     if (want_size != NULL && size != *want_size) {
         reshield_file_close(file);
@@ -164,7 +167,7 @@ static int read_asset(const char *path, size_t max_size, const uint64_t *want_si
     reshield_file_close(file);
     if (n < 0 || (uint64_t)n != size) { /* read error, shrank or grew while reading */
         free(buf);
-        return -1;
+        return n == RESHIELD_FILE_UNREADABLE ? RESHIELD_FILE_UNREADABLE : -1;
     }
     *out = buf;
     *out_len = (size_t)size;
@@ -446,26 +449,31 @@ static int strict_visit(const char *rel, void *vctx) {
     return 1;
 }
 
-static int verify_one_asset_entry(const char *asset_base_dir,
-                                  const char *rel_path,
-                                  uint64_t expected_size,
-                                  const uint8_t expected_hash[RESHIELD_SHA256_SIZE]) {
+/* OK, ASSET_MISMATCH (missing, wrong kind, resized, altered, unknown open failure) or
+ * ASSET_UNREADABLE (could not be opened or read: access, lock, I/O; says nothing about content). */
+static reshield_manifest_status_t verify_one_asset_entry(
+    const char *asset_base_dir,
+    const char *rel_path,
+    uint64_t expected_size,
+    const uint8_t expected_hash[RESHIELD_SHA256_SIZE]) {
     char full_path[1024];
     if (build_asset_path(full_path, sizeof(full_path), asset_base_dir, rel_path) != 0) {
-        return 0;
+        return RESHIELD_MANIFEST_ASSET_MISMATCH;
     }
 
     uint8_t actual_hash[RESHIELD_SHA256_SIZE];
     uint64_t actual_size = 0;
     /* Read at most expected_size+1 bytes so a FIFO/huge file cannot hang or exhaust us. */
     uint64_t max_read = expected_size < UINT64_MAX ? expected_size + 1u : UINT64_MAX;
-    if (reshield_sha256_file_limited(full_path, actual_hash, &actual_size, max_read) != 0) {
-        return 0;
+    int hrc = reshield_sha256_file_limited(full_path, actual_hash, &actual_size, max_read);
+    if (hrc == RESHIELD_FILE_UNREADABLE) {
+        return RESHIELD_MANIFEST_ASSET_UNREADABLE;
     }
-    if (actual_size != expected_size) {
-        return 0;
+    if (hrc != 0 || actual_size != expected_size) {
+        return RESHIELD_MANIFEST_ASSET_MISMATCH;
     }
-    return reshield_digest_equal(actual_hash, expected_hash);
+    return reshield_digest_equal(actual_hash, expected_hash) ? RESHIELD_MANIFEST_OK
+                                                             : RESHIELD_MANIFEST_ASSET_MISMATCH;
 }
 #endif
 
@@ -500,6 +508,9 @@ reshield_manifest_status_t reshield_verify_manifest_files(
     const char **names = NULL; /* entry paths, only collected when the manifest is strict */
     size_t n_names = 0;
     int entries = 0;
+    /* An unreadable asset does not stop the pass: a later tampered one must still win. */
+    int unreadable = 0;
+    char unreadable_path[RESHIELD_MANIFEST_MAX_LINE + 1u] = "";
     for (;;) {
         uint8_t exp_hash[RESHIELD_SHA256_SIZE];
         uint64_t exp_size = 0;
@@ -515,10 +526,16 @@ reshield_manifest_status_t reshield_verify_manifest_files(
         }
         entries++;
 
-        if (!verify_one_asset_entry(asset_base_dir, rel_path, exp_size, exp_hash)) {
+        reshield_manifest_status_t as = verify_one_asset_entry(asset_base_dir, rel_path, exp_size,
+                                                               exp_hash);
+        if (as == RESHIELD_MANIFEST_ASSET_MISMATCH) {
             copy_failed_path(failed_path_buf, failed_path_cap, rel_path);
             st = RESHIELD_MANIFEST_ASSET_MISMATCH;
             break;
+        }
+        if (as == RESHIELD_MANIFEST_ASSET_UNREADABLE && !unreadable) {
+            unreadable = 1;
+            copy_failed_path(unreadable_path, sizeof(unreadable_path), rel_path);
         }
         if (it.policy.strict) {
             if (names == NULL) {
@@ -533,8 +550,9 @@ reshield_manifest_status_t reshield_verify_manifest_files(
         }
     }
 
-    /* Strict scan runs only after every listed asset verified, so ROOT_MISMATCH, IO_ERROR and
-     * ASSET_MISMATCH take precedence over ASSET_EXTRA. */
+    /* Strict scan runs only after every listed asset verified or was unreadable, so ROOT_MISMATCH,
+     * IO_ERROR and ASSET_MISMATCH take precedence over ASSET_EXTRA, and ASSET_EXTRA (an unlisted
+     * file is tamper evidence) over ASSET_UNREADABLE. */
     if (st == RESHIELD_MANIFEST_OK && it.policy.strict) {
         qsort((void *)names, n_names, sizeof(*names), cmp_name_ptr);
         strict_scan_t sc = { (const char *const *)names, n_names, &it.policy, RESHIELD_GLOB_BUDGET,
@@ -544,6 +562,10 @@ reshield_manifest_status_t reshield_verify_manifest_files(
                               RESHIELD_STRICT_MAX_ENTRIES, strict_visit, &sc) != 0) {
             st = RESHIELD_MANIFEST_ASSET_EXTRA; /* extra file found, or the scan could not finish */
         }
+    }
+    if (st == RESHIELD_MANIFEST_OK && unreadable) {
+        st = RESHIELD_MANIFEST_ASSET_UNREADABLE;
+        copy_failed_path(failed_path_buf, failed_path_cap, unreadable_path);
     }
 
     free((void *)names);
@@ -592,9 +614,7 @@ reshield_manifest_status_t reshield_verify_single_asset(
             break;
         }
         if (strcmp(rel_path, asset_rel_path) == 0) {
-            st = verify_one_asset_entry(asset_base_dir, rel_path, exp_size, exp_hash)
-                     ? RESHIELD_MANIFEST_OK
-                     : RESHIELD_MANIFEST_ASSET_MISMATCH;
+            st = verify_one_asset_entry(asset_base_dir, rel_path, exp_size, exp_hash);
             break;
         }
     }
@@ -674,6 +694,8 @@ reshield_manifest_status_t reshield_load_verified_asset(
                      : read_asset(path, max_size, &exp_size, &data, &dlen);
         if (rc == 1) {
             st = RESHIELD_MANIFEST_IO_ERROR; /* larger than the caller allows: not a tamper verdict */
+        } else if (rc == RESHIELD_FILE_UNREADABLE) {
+            st = RESHIELD_MANIFEST_ASSET_UNREADABLE;
         } else if (rc != 0) {
             st = RESHIELD_MANIFEST_ASSET_MISMATCH;
         } else {

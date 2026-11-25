@@ -10,11 +10,19 @@
 /* POSIX file descriptor or Windows HANDLE. */
 typedef intptr_t reshield_file_t;
 
+/* Return values of the open and read calls below when the failure is environmental, not a
+ * statement about the file: access denied, sharing/lock violation, antivirus block, I/O error.
+ * Every other failure (missing file, directory, special file, bad path, unknown cause) stays -1,
+ * which callers treat as a tamper verdict (fail closed). */
+#define RESHIELD_FILE_UNREADABLE (-2)
+
 /* Opens `path` read-only. Succeeds (returns 0) only for a regular file, and never blocks
- * on FIFOs or devices. *size_out receives the current file size. Returns -1 otherwise. */
+ * on FIFOs or devices. *size_out receives the current file size. Returns -1 otherwise, or
+ * RESHIELD_FILE_UNREADABLE when the file could not be opened for the reason above. */
 int reshield_file_open_regular(const char *path, reshield_file_t *handle_out, uint64_t *size_out);
 
-/* Reads up to n bytes once: -1 on error, 0 at EOF, otherwise the byte count (retries EINTR). */
+/* Reads up to n bytes once: -1 on error, RESHIELD_FILE_UNREADABLE on an I/O, lock or access
+ * error, 0 at EOF, otherwise the byte count (retries EINTR). */
 intptr_t reshield_file_read(reshield_file_t handle, void *buf, size_t n);
 
 void reshield_file_close(reshield_file_t handle);
@@ -32,13 +40,14 @@ void reshield_file_close(reshield_file_t handle);
 int reshield_dir_walk(const char *base_dir, unsigned max_depth, size_t max_entries,
                       int (*visit)(const char *rel_path, void *ctx), void *ctx);
 
-/* Reads until n bytes or EOF. Returns the byte count (< n only at EOF) or -1 on error. */
+/* Reads until n bytes or EOF. Returns the byte count (< n only at EOF), or the negative
+ * error value of reshield_file_read(). */
 static inline intptr_t reshield_file_read_full(reshield_file_t handle, void *buf, size_t n) {
     size_t got = 0;
     while (got < n) {
         intptr_t r = reshield_file_read(handle, (uint8_t *)buf + got, n - got);
         if (r < 0) {
-            return -1;
+            return r;
         }
         if (r == 0) {
             break;

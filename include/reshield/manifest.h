@@ -13,8 +13,11 @@ typedef enum reshield_manifest_status {
     RESHIELD_MANIFEST_ROOT_MISMATCH  = 2, /* Manifest file SHA-256 does not match sealed root */
     RESHIELD_MANIFEST_ASSET_MISMATCH = 3, /* An asset file is missing, resized, or hash-mismatched */
     RESHIELD_MANIFEST_IO_ERROR       = 4, /* Could not open or parse manifest file */
-    RESHIELD_MANIFEST_ASSET_EXTRA    = 5  /* Strict manifest: a file under asset_base_dir is neither
-                                           * listed nor allowed, or the scan could not complete */
+    RESHIELD_MANIFEST_ASSET_EXTRA    = 5, /* Strict manifest: a file under asset_base_dir is neither
+                                            * listed nor allowed, or the scan could not complete */
+    RESHIELD_MANIFEST_ASSET_UNREADABLE = 6 /* An asset exists but could not be opened or read
+                                            * (permission, lock or sharing violation, antivirus,
+                                            * I/O error): not evidence of tampering */
 } reshield_manifest_status_t;
 
 /**
@@ -35,6 +38,13 @@ typedef enum reshield_manifest_status {
  * long) also gives ASSET_EXTRA, with an empty failed path. Names are compared as bytes.
  * Unknown directives or a malformed header are IO_ERROR. See docs/integrity-verification.md.
  *
+ * An asset that is missing, not a regular file, resized or hash-mismatched is ASSET_MISMATCH. An
+ * asset that cannot be opened or read (permission denied, sharing or lock violation, antivirus
+ * block, I/O error) is ASSET_UNREADABLE instead: not evidence of tampering. A cause the library
+ * does not recognise stays ASSET_MISMATCH. Every listed asset is checked: ASSET_MISMATCH wins over
+ * ASSET_UNREADABLE, and in a strict manifest ASSET_EXTRA does too; failed_path_buf then names the
+ * first unreadable asset.
+ *
  * If an asset fails (or, for ASSET_EXTRA, an extra entry is found) and failed_path_buf is
  * non-NULL, writes its relative path into failed_path_buf (up to failed_path_cap bytes,
  * NUL-terminated).
@@ -51,6 +61,8 @@ reshield_manifest_status_t reshield_verify_manifest_files(
  * Verifies a single asset (asset_rel_path under asset_base_dir) against the manifest
  * after first verifying the manifest's own SHA-256 against expected_root_sha256
  * (or the binary's sealed manifest root if NULL). The strict scan is not part of this call.
+ * Asset statuses as in reshield_verify_manifest_files(): ASSET_MISMATCH, or ASSET_UNREADABLE when
+ * the file cannot be opened or read.
  */
 reshield_manifest_status_t reshield_verify_single_asset(
     const char *manifest_path,
@@ -75,7 +87,8 @@ reshield_manifest_status_t reshield_verify_single_asset(
  * max_size is never read and gives RESHIELD_MANIFEST_IO_ERROR (not a tamper verdict). Statuses
  * as in reshield_verify_single_asset(): an unsafe asset_rel_path (same path rules as manifest
  * entries) is IO_ERROR; an asset that is not listed, missing, not a regular file, resized or
- * hash-mismatched is ASSET_MISMATCH. A symlink to a regular file is read through (the bytes are
+ * hash-mismatched is ASSET_MISMATCH; one that cannot be opened or read (permission, lock, I/O
+ * error) is ASSET_UNREADABLE. A symlink to a regular file is read through (the bytes are
  * still bound to the manifest hash). The strict scan is not part of this call. Under
  * -DRESHIELD_DISABLE nothing is verified: the file is only read, with the same path and
  * max_size rules. See docs/asset-loading.md.
