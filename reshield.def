@@ -9,3 +9,4 @@ EXPORTS
     reshield_check_json
     reshield_report_to_json
     reshield_status_name
+    reshield_platform_name
