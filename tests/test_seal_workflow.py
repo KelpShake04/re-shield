@@ -230,6 +230,42 @@ def test_gen_manifest_path_policy() -> None:
     print("PASS: gen_manifest rejects unsafe names, case-fold duplicates and non-NFC names")
 
 
+def test_gen_manifest_exclude(tmpdir: str) -> None:
+    root = os.path.join(tmpdir, "gx")
+    for rel, data in (("a.cfg", b"a"), ("sub/b.pdb", b"b"), ("sub/c.cfg", b"c"), ("nul.txt", b"n"),
+                      ("Dbg_DoNotShip/d.bin", b"d")):
+        os.makedirs(os.path.dirname(os.path.join(root, rel)), exist_ok=True)
+        with open(os.path.join(root, rel), "wb") as f:
+            f.write(data)
+
+    def listed(*exclude: str) -> list[str]:
+        out = os.path.join(tmpdir, "gx.manifest")
+        gen_manifest_mod.generate_manifest(root, out, tuple(exclude))
+        with open(out) as f:
+            return [line.split(" ", 2)[2].strip() for line in f]
+
+    # nul.txt is an unsafe name: without an exclude it is an error, with one it is skipped first.
+    try:
+        listed()
+        raise AssertionError("an unsafe name must still be rejected without --exclude")
+    except ValueError as exc:
+        assert "Unsafe asset path" in str(exc), exc
+    assert listed("nul.txt") == ["Dbg_DoNotShip/d.bin", "a.cfg", "sub/b.pdb", "sub/c.cfg"]
+    assert listed("nul.txt", "*.pdb") == ["Dbg_DoNotShip/d.bin", "a.cfg", "sub/c.cfg"]  # repeatable, "*" crosses "/"
+    assert listed("nul.txt", "*.pdb", "*_DoNotShip/**") == ["a.cfg", "sub/c.cfg"]
+    assert listed("nul.txt", "sub/*") == ["Dbg_DoNotShip/d.bin", "a.cfg"]
+    assert listed("nul.txt", "A.CFG") == ["Dbg_DoNotShip/d.bin", "a.cfg", "sub/b.pdb", "sub/c.cfg"]  # case-sensitive
+    try:
+        listed("*")
+        raise AssertionError("excluding everything must still be an error")
+    except ValueError as exc:
+        assert "No asset files found" in str(exc), exc
+    r = run_cmd([sys.executable, os.path.join(os.path.dirname(__file__), "..", "tools", "gen_manifest.py"),
+                 root, "-o", os.path.join(tmpdir, "gx_cli.manifest"), "--exclude", "nul.txt", "--exclude", "*.pdb"])
+    assert r.returncode == 0 and "2 excluded" in r.stdout and "3 asset(s)" in r.stdout, r
+    print("PASS: gen_manifest --exclude (fnmatchcase on relative POSIX paths, repeatable, before the path checks)")
+
+
 def test_path_rules() -> None:
     safe = gen_manifest_mod.is_safe_relative_path
     assert safe("a.cfg") and safe("sub/a.cfg") and safe("v1..2.cfg") and safe(".hidden/a.cfg")
@@ -725,7 +761,7 @@ def test_verify_app(tmpdir: str, repo_root: str) -> None:
         return subprocess.run([path, *args], capture_output=True, text=True, cwd=elsewhere)
 
     r = run_app(exe, "vapp.manifest", "assets")
-    assert r.returncode == 10 and "status=OK" in r.stdout, r
+    assert r.returncode == 10 and "status=OK" in r.stdout and "check_json=same" in r.stdout, r
     link = os.path.join(elsewhere, "vapp_link")
     os.symlink(exe, link)
     r = run_app(link, "vapp.manifest", "assets")
@@ -739,11 +775,33 @@ def test_verify_app(tmpdir: str, repo_root: str) -> None:
     with open(stage_cfg, "ab") as f:
         f.write(b"x")
     r = run_app(exe, "vapp.manifest", "assets")
-    assert r.returncode == 16 and "asset=stage1.cfg" in r.stdout, r
+    assert r.returncode == 16 and "asset=stage1.cfg" in r.stdout and "check_json=same" in r.stdout, r
     os.unlink(manifest)
     r = run_app(exe, "vapp.manifest", "assets")
-    assert r.returncode == 18 and "MANIFEST_IO_ERROR" in r.stdout, r
+    assert r.returncode == 18 and "MANIFEST_IO_ERROR" in r.stdout and "check_json=same" in r.stdout, r
     print("PASS: verify_app reports ASSET_TAMPERED, then MANIFEST_IO_ERROR for a missing manifest")
+
+
+def test_release_cli_binary_in_assets(tmpdir: str, repo_root: str) -> None:
+    """The usual engine layout: the binary sits inside the directory that is the asset set."""
+    tool = os.path.join(repo_root, "tools", "reshield_release.py")
+    dist = os.path.join(tmpdir, "relin")
+    shutil.copytree(os.path.join(repo_root, "examples", "assets"), os.path.join(dist, "data"))
+    exe = os.path.join(dist, "game")
+    shutil.copy2(os.path.join(repo_root, "build", "sample_game"), exe)
+    with open(os.path.join(dist, "game.pdb"), "wb") as f:
+        f.write(b"debug symbols")
+
+    r = run_cmd([sys.executable, tool, exe, "--assets", dist, "--exclude", "*.pdb", "--build-id", "6"])
+    assert r.returncode == 0 and "excluding the sealed binary from the manifest: game" in r.stdout, r
+    with open(os.path.join(dist, "game.manifest")) as f:
+        listed = [line.split(" ", 2)[2].strip() for line in f]
+    assert listed == ["data/stage1.cfg"], f"binary, pdb and the manifest itself must not be listed: {listed}"
+    r = run_cmd([sys.executable, os.path.join(repo_root, "tools", "verify_release.py"), exe, "--manifest",
+                 os.path.join(dist, "game.manifest"), "--assets", dist])
+    assert r.returncode == 0 and "code_seal:       OK" in r.stdout, r
+    print("PASS: reshield_release excludes a binary that sits inside --assets (and --exclude patterns); "
+          "verify_release passes")
 
 
 def test_release_cli(tmpdir: str, repo_root: str) -> None:
@@ -896,6 +954,8 @@ def main() -> int:
     test_path_rules()
     test_shared_path_rule_table(repo_root)
     test_gen_manifest_path_policy()
+    with tempfile.TemporaryDirectory(prefix="reshield_gx_") as tmp_gx:
+        test_gen_manifest_exclude(tmp_gx)
     with tempfile.TemporaryDirectory(prefix="reshield_s2_") as tmp2:
         a2 = os.path.join(tmp2, "assets")
         shutil.copytree(assets_src, a2)
@@ -904,6 +964,7 @@ def main() -> int:
         test_macho_signature_policy(tmp2, repo_root)
         test_verify_app(tmp2, repo_root)
         test_release_cli(tmp2, repo_root)
+        test_release_cli_binary_in_assets(tmp2, repo_root)
     with tempfile.TemporaryDirectory(prefix="reshield_pe_") as tmp3:
         test_pe_support(tmp3, repo_root)
 

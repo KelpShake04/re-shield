@@ -114,6 +114,16 @@ reshield_status_t reshield_verify_app(const char *manifest_rel, const char *asse
                                       reshield_report_t *out_report);
 
 /**
+ * Binding-friendly startup check for engines and other languages: reshield_verify_app() followed
+ * by reshield_report_to_json() in one call, with flat C types only (no struct to mirror, so a
+ * report layout change never breaks a binding). Returns the reshield_status_t value as an int
+ * (0 = RESHIELD_OK). json receives the report as in reshield_report_to_json(), truncated safely
+ * to cap bytes including the NUL; json may be NULL (or cap 0) when only the status is wanted.
+ * There is no violation callback. Paths and build flavor behave as in reshield_verify_app().
+ */
+int reshield_check_json(const char *manifest_rel, const char *assets_rel, char *json, size_t cap);
+
+/**
  * Returns a human-readable static string for a reshield_status_t value.
  */
 const char *reshield_status_name(reshield_status_t status);

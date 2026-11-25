@@ -122,6 +122,7 @@ make release-demo
 
 - 이미지를 찾는 기준은 레코드 변수의 주소(내부 함수 `reshield_internal_record_anchor()`)다. macOS는 `dladdr`의 `dli_fbase`, Linux는 `dl_iterate_phdr`에서 그 주소를 포함하는 `PT_LOAD`를 가진 항목, Windows는 `GetModuleHandleExW(FROM_ADDRESS)`다.
 - 봉인은 그 라이브러리 파일에 한다: `python3 tools/seal_binary.py libfoo.so --build-id N`. `seal_binary.py`는 형식(ELF·Mach-O·PE)만 보고 EXE인지 라이브러리인지 구분하지 않는다. 호스트 EXE는 봉인하지 않아도 된다.
+- 엔진 바인딩(C#, GDScript 등)은 구조체 없이 `int`와 문자열만 주고받는 `reshield_check_json()`을 부르면 된다(`reshield_verify_app()` + `reshield_report_to_json()` 한 번에). 매니페스트·에셋 경로는 라이브러리가 아니라 프로세스 EXE의 디렉터리 기준이다. 라이브러리에서는 `reshield.def`(Windows)나 기본 가시성(POSIX)으로 내보낸다.
 - 코드 서명 검사(`RESHIELD_CHECK_CODESIGN`)는 모듈 모드에서도 프로세스 EXE를 본다. 라이브러리 자체의 서명은 검사하지 않는다(엔진 DLL은 대개 서명이 없다).
 - 확인한 것: `make test`의 `module-test`(`tests/test_module_host.c` + `tests/test_module_mode.py`)가 호스트(미봉인, re-shield 코드 없음)에서 라이브러리를 `dlopen`해 미봉인 라이브러리 `UNSEALED`, 봉인 후 `OK`(W^X 포함), `.text` 1바이트 변조 `TAMPERED`를 개발·릴리스 두 빌드로 확인한다(macOS, Linux glibc·musl). Windows는 CI `windows-msvc` 잡이 `reshield.def`로 `reshield.dll`을 빌드해 같은 시나리오를 실행한다. `make shared`가 `build/libreshield.so`(macOS는 `.dylib`)를 만든다(Linux는 `-Wl,-Bsymbolic`로 같은 이름의 호스트 심볼에 가려지지 않게 한다).
 - 한계: 호스트 EXE나 다른 모듈(엔진 본체 등)의 메모리는 검사하지 않는다. Linux에서 라이브러리를 상대경로로 열면 fail-closed(`INTERNAL_ERROR`)다. 한 프로세스에 re-shield가 두 모듈(예: EXE와 플러그인)에 들어 있으면 각자 자기 레코드를 자기 이미지에서 검증하지만, ELF에서 두 복사본의 심볼이 기본 가시성으로 내보내지면 동적 링커가 한쪽으로 합칠 수 있으니 라이브러리를 `-Wl,-Bsymbolic`으로 링크한다(`make shared`는 그렇게 한다).

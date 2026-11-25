@@ -3,7 +3,7 @@
 Module-mode test: re-shield linked into a shared library verifies the LIBRARY, not the host.
 
 tests/test_module_host.c links no re-shield code and is never sealed. It dlopen()s the library
-and calls reshield_verify_code_section() in it. For a development and a release (ALLOW_UNSEALED=0)
+and calls reshield_verify_code_section() and the flat reshield_check_json() in it. For a development and a release (ALLOW_UNSEALED=0)
 build of the library this checks:
 
 1. unsealed library          -> UNSEALED (exit 1)
@@ -40,24 +40,30 @@ def run_host(host: str, lib: str, cwd: str | None = None) -> subprocess.Complete
     return subprocess.run([host, lib], capture_output=True, text=True, cwd=cwd)
 
 
-def expect(r: subprocess.CompletedProcess[str], rc: int, status: str, what: str) -> str:
+def expect(r: subprocess.CompletedProcess[str], rc: int, status: str, what: str,
+           cj: tuple[int, str] | None = None) -> str:
+    """cj = (reshield_status_t, status name) that the library's reshield_check_json must report."""
     assert r.returncode == rc and f"status={status}" in r.stdout, f"{what}: {r}"
+    if cj is not None:
+        assert f"check_json: status={cj[0]} json=" in r.stdout and f'"status":"{cj[1]}"' in r.stdout, \
+            f"{what}: reshield_check_json: {r}"
     print(f"PASS: {what}")
     return r.stdout
 
 
-def test_library(host: str, lib: str, label: str, tmpdir: str) -> None:
+def test_library(host: str, lib: str, label: str, tmpdir: str, plain_cj: tuple[int, str]) -> None:
     ext = os.path.splitext(lib)[1]
     plain = os.path.join(tmpdir, f"{label}_plain{ext}")
     shutil.copy2(lib, plain)
 
-    expect(run_host(host, plain), UNSEALED, "UNSEALED", f"{label}: unsealed library is UNSEALED")
+    expect(run_host(host, plain), UNSEALED, "UNSEALED", f"{label}: unsealed library is UNSEALED", plain_cj)
 
     sealed = os.path.join(tmpdir, f"{label}_sealed{ext}")
     shutil.copy2(lib, sealed)
     subprocess.run([sys.executable, os.path.join(HERE, "..", "tools", "seal_binary.py"), sealed,
                     "--build-id", "11"], check=True, stdout=subprocess.DEVNULL)
-    out = expect(run_host(host, sealed), OK, "OK", f"{label}: sealed library verifies OK")
+    out = expect(run_host(host, sealed), OK, "OK", f"{label}: sealed library verifies OK (also via reshield_check_json)",
+                 (0, "OK"))
     assert "wx=0" in out, f"{label}: W^X check did not pass for the library: {out}"
     m = re.search(r"actual_size=(\d+) expected_size=(\d+)", out)
     assert m and m.group(1) == m.group(2) and int(m.group(1)) > 0, f"{label}: sizes: {out}"
@@ -69,7 +75,7 @@ def test_library(host: str, lib: str, label: str, tmpdir: str) -> None:
     tampered = os.path.join(tmpdir, f"{label}_tampered{ext}")
     wf.patch_file(sealed, tampered, off, data[off] ^ 0x01)
     expect(run_host(host, tampered), TAMPERED, "TAMPERED",
-           f"{label}: one changed .text byte of the library is TAMPERED")
+           f"{label}: one changed .text byte of the library is TAMPERED", (2, "CODE_TAMPERED"))
 
     if sys.platform.startswith("linux"):
         # dlpi_name is relative: the file cannot be trusted to be the mapped image, so fail closed
@@ -90,9 +96,10 @@ def main() -> int:
     print("PASS: test host contains no integrity record (it is never sealed)")
 
     with tempfile.TemporaryDirectory(prefix="reshield_module_") as tmpdir:
-        test_library(host, os.path.abspath(args.lib), "dev", tmpdir)
+        # An unsealed development library passes reshield_check_json (allow_unsealed); a release one does not.
+        test_library(host, os.path.abspath(args.lib), "dev", tmpdir, (0, "OK"))
         if args.release_lib:
-            test_library(host, os.path.abspath(args.release_lib), "release", tmpdir)
+            test_library(host, os.path.abspath(args.release_lib), "release", tmpdir, (1, "UNSEALED"))
     print("ALL PASS: module mode")
     return 0
 

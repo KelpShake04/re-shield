@@ -14,6 +14,8 @@ jobs:
       - uses: actions/checkout@v4
       - run: make clean && make all test release-demo
       - run: make sanitize
+      # The sources must also compile as C++ (engines may compile them into a C++ module).
+      - run: for f in src/*.c; do c++ -x c++ -std=c++11 -fsyntax-only -Wall -Wextra -Wpedantic -Werror -Iinclude "$f" || exit 1; done
       - run: python3 tests/fuzz/test_parser_regressions.py
       # `ld.so ./prog` makes /proc/self/exe the loader: must be an error exit, never a crash (>=128).
       - run: |
@@ -45,6 +47,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: make clean && make all test release-demo
+      - run: for f in src/*.c; do c++ -x c++ -std=c++11 -fsyntax-only -Wall -Wextra -Wpedantic -Werror -Iinclude "$f" || exit 1; done
 
   # Windows x64 (MSVC) runtime backend: builds with cl (no make on Windows), seals a copy of the
   # demo EXE, runs it, tampers .text and checks detection. Skipped on purpose: the POSIX-only
@@ -93,6 +96,13 @@ jobs:
 
       # Module mode: re-shield linked into a DLL (reshield.def exports) is verified by an unsealed host
       # EXE that links no re-shield code. Release flavor (no RESHIELD_ALLOW_UNSEALED), like a shipped DLL.
+      - name: Sources also compile as C++ (cl /TP)
+        shell: cmd
+        run: |
+          call "%VSDIR%\VC\Auxiliary\Build\vcvars64.bat"
+          mkdir build\cxx
+          cl /nologo /TP /EHsc /std:c++14 /W3 /WX /c /I include /Fo:build\cxx\ src\sha256.c src\integrity_common.c src\integrity_windows.c src\file_windows.c src\manifest.c src\attestation_windows.c src\reshield.c src\verify_app.c || exit /b 1
+
       - name: Build module-mode DLL and host EXE
         shell: cmd
         run: |
