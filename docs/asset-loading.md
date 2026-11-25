@@ -98,3 +98,9 @@ load, plus the `RESHIELD_DISABLE` variant), `tests/test_seal_workflow.py` (app-l
 and unsealed binaries), `tests/fuzz/fuzz_manifest.c` (no leak, buffer exactly when `OK`, never
 accepts what `reshield_verify_single_asset()` rejects) and `bindings/csharp/tests` (`LoadAsset`
 against real sealed libraries).
+
+Windows (CI `windows-msvc` only): `tests/test_load_asset_windows.c` (backslash, drive letter, UNC,
+`\\?\`, `..`, device names, trailing dot or space and `:` stream paths refused; a path over `MAX_PATH`
+that exists on disk fails closed; rename-over replacement, a file held open by another handle and a
+directory in place of the file) and a CI step that runs `reshield_load_verified_app_asset` from a
+sealed `test_verify_app.exe` with another CWD.
