@@ -1,7 +1,9 @@
 #include "reshield/integrity.h"
 
 #include "file_platform.h"
+#include "reshield/reshield.h"
 #include "sha256_accel.h"
+#include "sha256_internal.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -167,6 +169,33 @@ void reshield_sha256(const void *data, size_t len, uint8_t out_hash[RESHIELD_SHA
         sha256_update(&ctx, (const uint8_t *)data, len);
     }
     sha256_final(&ctx, out_hash);
+}
+
+int reshield_sha256_parts(const reshield_sha256_part_t *parts, size_t count, uint8_t out_hash[32]) {
+    if (parts == NULL || out_hash == NULL) {
+        return -1;
+    }
+    uint64_t total = 0;
+    for (size_t i = 0; i < count; i++) {
+        if (parts[i].len > 0 && parts[i].ptr == NULL) {
+            return -1;
+        }
+        /* bitlen is a uint64: keep total*8 plus HMAC's two blocks well below 2^64. */
+        if ((uint64_t)parts[i].len > (UINT64_MAX / 8u) - 256u - total) {
+            return -1;
+        }
+        total += (uint64_t)parts[i].len;
+    }
+    sha256_ctx_t ctx;
+    sha256_init(&ctx);
+    for (size_t i = 0; i < count; i++) {
+        if (parts[i].len > 0) {
+            sha256_update(&ctx, (const uint8_t *)parts[i].ptr, parts[i].len);
+        }
+    }
+    sha256_final(&ctx, out_hash);
+    reshield_secure_zero(&ctx, sizeof(ctx)); /* ctx.data holds key-derived bytes when used by HMAC */
+    return 0;
 }
 
 /* Internal (declared extern in manifest.c): hashes at most max_read bytes of a regular
