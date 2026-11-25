@@ -101,3 +101,11 @@ reshield_status_t reshield_verify_app(const char *manifest_rel, const char *asse
     }
     return reshield_verify(&cfg, out_report);
 }
+
+int reshield_check_json(const char *manifest_rel, const char *assets_rel, char *json, size_t cap) {
+    reshield_report_t report;
+    memset(&report, 0, sizeof(report));
+    reshield_status_t st = reshield_verify_app(manifest_rel, assets_rel, NULL, NULL, &report);
+    reshield_report_to_json(&report, json, cap); /* NULL json or cap 0: writes nothing */
+    return (int)st;
+}

@@ -2,3 +2,5 @@ build/
 *.o
 *.a
 .DS_Store
+bindings/csharp/tests/obj/
+bindings/csharp/tests/bin/

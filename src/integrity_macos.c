@@ -1,18 +1,26 @@
 #if defined(__APPLE__) && defined(__MACH__)
 
-#include <mach-o/dyld.h>
+#include <dlfcn.h>
 #include <mach-o/getsect.h>
 #include <mach-o/loader.h>
 #include <stddef.h>
 #include <stdint.h>
 
+extern const void *reshield_internal_record_anchor(void);
+
+/* Hashes __text of the image that holds the integrity record: the main executable for a
+ * statically linked program, the dylib/bundle itself when re-shield is linked into one. */
 int reshield_platform_get_code_section(const uint8_t **out_ptr, uint64_t *out_size) {
     if (out_ptr == NULL || out_size == NULL) {
         return -1;
     }
 
-    const struct mach_header *hdr = _dyld_get_image_header(0);
-    if (hdr == NULL || hdr->magic != MH_MAGIC_64) {
+    Dl_info info;
+    if (dladdr(reshield_internal_record_anchor(), &info) == 0 || info.dli_fbase == NULL) {
+        return -1;
+    }
+    const struct mach_header *hdr = (const struct mach_header *)info.dli_fbase;
+    if (hdr->magic != MH_MAGIC_64) {
         return -1;
     }
 
