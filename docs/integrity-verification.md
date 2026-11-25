@@ -67,7 +67,7 @@ make release-demo
 - 해시 대상은 `__TEXT,__text`(macOS) 또는 `.text`(Linux)뿐이다. `__stubs`, `.plt`, `__const`, 그리고 레코드가 놓이는 `__DATA`는 해시 대상이 아니다.
 - 레코드는 평문 `RSHLDCHK` 매직으로 시작하므로 바이너리에서 문자열 검색만으로 수정 지점이 드러난다(`seal_binary.py`도 같은 방식으로 찾는다).
 - 소프트웨어 breakpoint는 코드 바이트를 패치하므로, 설치된 상태에서 검사하면 `CODE_TAMPERED`로 보고된다.
-- 매니페스트는 목록에 있는 파일만 검증한다. 매니페스트에 없는 추가 파일은 감지하지 못한다.
+- 기본(v1) 매니페스트는 목록에 있는 파일만 검증한다. 매니페스트에 없는 추가 파일은 감지하지 못한다. 매니페스트 v2 `strict` 모드는 이를 감지한다([8. 매니페스트 v2와 strict 모드](#8-매니페스트-v2와-strict-모드)). 한계는 그 절에 있다.
 - fat/universal Mach-O는 `seal_binary.py`가 지원하지 않는다(오류로 종료). 슬라이스별로 봉인해야 한다.
 - `verify_release.py`의 `defined_symbols`는 `nm` 결과를 보고할 뿐 검증하지 않는다.
 
@@ -75,6 +75,7 @@ make release-demo
 
 - 매니페스트는 한 번만 읽어(최대 4 MiB, 일반 파일만) 같은 버퍼로 루트 해시를 계산하고 파싱한다. 해시 후 재오픈하지 않는다.
 - 1023자를 넘는 줄, CR(`\r`, CRLF 포함)·NUL이 있는 매니페스트, 잘못된 줄은 `IO_ERROR`다. 항목이 하나도 없는 매니페스트도 `IO_ERROR`다.
+- `#` 줄은 파일 맨 앞(첫 항목 줄 앞)에서만 허용한다. `# ...` 주석과 v2 지시어만 쓸 수 있고([8절](#8-매니페스트-v2와-strict-모드)), 첫 항목 줄 뒤의 `#` 줄은 주석이어도 `IO_ERROR`다. **동작 변경**: 이전 C 런타임과 `verify_release.py`는 `#` 줄을 어디서든 건너뛰었다(설계 메모가 "C는 거부"라고 쓴 것은 틀렸다). 이제 C 런타임, `verify_release.py`가 같은 규칙으로 파싱하고 두 구현이 일치한다(`tests/test_seal_workflow.py`가 같은 케이스를 둘 다에 넣어 확인). `gen_manifest.py`는 첫 항목 뒤 `#` 줄을 만든 적이 없으므로 생성기로 만든 기존 매니페스트는 영향이 없다.
 - `reshield_verify()`는 이 `IO_ERROR`(경로 오류, 파일 없음, 형식 오류)를 `RESHIELD_ERR_MANIFEST_IO`(값 8, `MANIFEST_IO_ERROR`)로 보고한다. 이전에는 `RESHIELD_ERR_INTERNAL`이었다. 변조 판정이 아니므로 현장 텔레메트리에서 경로 문제와 진짜 내부 오류를 구분할 수 있다. 값은 열거형 끝에 추가했고 기존 값은 그대로다.
 - 경로 규칙은 모든 플랫폼에서 같다(C: `src/manifest.c`의 `is_safe_relative_path`, Python: `tools/manifest_path.py`). 구분자는 `/`만 허용하고 구성요소 단위로 검사한다. 다음은 거부한다.
   - 선행 `/`(절대경로)와 빈 구성요소
@@ -159,3 +160,47 @@ make release-demo
 공유 CI 러너 수치는 실행마다 달라진다. Docker amd64 에뮬레이션에서는 SHA 명령이 없어 `portable`로 폴백하며, 그 수치는 근거로 쓰지 않았다. 1 GiB 해시 시간은 위 수치로 계산하면 M1 Pro에서 약 6.7초(이전 161 MB/s)에서 약 0.5초(2223 MB/s)다.
 
 검증하지 못한 것: Linux에서 `HWCAP_SHA2`가 없는 aarch64 CPU(폴백 경로를 그 CPU에서 돌려보지 못함), Linux aarch64 + clang, SHA-NI가 있는 Intel CPU(CI 러너는 AMD였다), macOS x86-64, FreeBSD 등 다른 OS.
+
+## 10. 매니페스트 v2와 strict 모드
+
+기본 매니페스트(v1)는 목록의 파일만 검증하므로 에셋 폴더에 끼워 넣은 파일(프록시 DLL, 크랙 DLL, 모드)을 보지 못한다. v2의 `strict`는 폴더를 열거해 목록에도 `#allow`에도 없는 항목을 `RESHIELD_ERR_ASSET_EXTRA`(값 9, 이름 `ASSET_EXTRA`, JSON `status_code` 9)로 보고한다. 열거형 끝에 추가했고 기존 값은 그대로다.
+
+### 형식
+
+파일 맨 앞의 연속된 `#` 줄(빈 줄은 건너뜀)이 헤더다. 매니페스트 루트 해시는 파일 전체의 SHA-256이므로 헤더와 allow 목록도 봉인된다(레코드 형식은 v2 그대로, 변경 없음).
+
+```
+#reshield-manifest v2 strict
+#allow */.DS_Store
+#allow saves/*
+<64-hex-sha256> <byte-size> <relative-path>
+```
+
+- `#reshield-manifest v2` 또는 `#reshield-manifest v2 strict`: 최대 1회, `#allow`보다 앞. 다른 버전·모드·후행 공백은 `IO_ERROR`. `strict` 없는 v2는 v1과 같이 동작한다.
+- `#allow <glob>`: 최대 64개. glob은 1~255바이트, 상대 POSIX 경로 대상이며 선행 `/`, 제어문자, `\`, `..` 구성요소는 `IO_ERROR`. `*`는 `/`를 포함한 임의 바이트열, `?`는 임의의 한 바이트, 대소문자 구분이다. 반복형 매처(재귀 없음)이고 스캔 전체에 단계 상한(2^28)을 둔다. 상한을 넘으면 그 항목은 일치하지 않은 것으로 본다(fail-closed). `*/x`는 최상위 `x`와 일치하지 않으므로 하위 폴더까지 허용하려면 `x`와 `*/x`를 둘 다 쓴다. `*` 하나(`#allow *`)는 전부 허용한다는 뜻이므로 strict의 의미가 사라진다.
+- `# 설명`(`#` 뒤 공백)과 단독 `#`는 헤더 안에서만 허용되는 주석이다. 그 밖의 `#...`(알 수 없는 지시어), 잘못된 형식, 첫 항목 뒤의 `#` 줄은 모두 `RESHIELD_ERR_MANIFEST_IO`(fail-closed)다. 지시어 없는 v1 매니페스트는 동작이 같다.
+
+### 런타임 동작
+
+- 공통 코드 한 곳(`reshield_verify_manifest_files`)이므로 `reshield_verify(RESHIELD_CHECK_MANIFEST)`와 `reshield_verify_app()` 양쪽에서 같다. `reshield_verify_single_asset()`은 스캔하지 않는다(에셋 하나만 보는 호출).
+- 순서와 우선순위: 먼저 매니페스트 루트 해시와 목록의 모든 에셋을 검증하고, 전부 통과했을 때만 스캔한다. 그래서 순서는 루트 검증(`UNSEALED`/`MANIFEST_MISMATCH`), 헤더와 항목 줄을 읽으며 목록 에셋 검증(먼저 만난 `MANIFEST_IO` 형식 오류 또는 `ASSET_TAMPERED`), 마지막으로 스캔(`ASSET_EXTRA`)이다. 앞 단계가 실패하면 `ASSET_EXTRA`는 보고되지 않는다. `reshield_verify()` 안에서는 코드 섹션·W^X·코드 서명 상태가 있으면 그 상태가 우선하고, `failed_checks`에 `RESHIELD_CHECK_MANIFEST` 비트가 같이 켜진다.
+- `asset_base_dir`(NULL 또는 `""`은 `.`) 아래를 재귀로 열거한다. POSIX는 `opendir`/`readdir`/`lstat`, Windows는 `FindFirstFileExW`와 UTF-16→UTF-8 변환이다. **심볼릭 링크와 Windows 재분석 지점(junction 포함)은 따라가지 않고 "항목"으로 본다.** 일반 파일, 심볼릭 링크, FIFO·장치 같은 특수 파일이 목록에도 `#allow`에도 없으면 extra다. 디렉터리 자체는 무시하므로 빈 디렉터리는 문제없다. 열거 중에는 파일을 열지 않고(`lstat`만), 목록의 에셋은 기존대로 해시 검증한다. 열거 후 파일이 바뀌는 TOCTOU는 에셋 해시 검증이 이미 덮는다(목록 밖 파일은 열거 시점에 이미 extra다).
+- 상한: 중첩 깊이 32, 항목 수 100000(디렉터리 포함), 전체 경로 4096자. 초과하거나 디렉터리를 읽지 못하면 검증할 수 없으므로 `ASSET_EXTRA`로 fail-closed이며 `failed_asset_path`는 빈 문자열이다(extra 파일을 찾았을 때는 그 상대 경로). Windows에서 MAX_PATH(260자)를 넘는 경로는 `\\?\` 접두어를 쓰지 않으므로 열거에 실패해 같은 결과가 된다.
+- 이름은 **바이트 단위**로 비교한다(NFC/대소문자 정규화 없음). 그래서 오탐이 날 수 있다. APFS에서 NFD로 저장된 이름(`gen_manifest.py`는 NFC만 허용), 대소문자 비구분 파일시스템에서 파일시스템이 돌려주는 이름의 대소문자가 목록과 다른 경우, 유효한 UTF-16이 아닌 Windows 파일명이 그렇다. NTFS 대체 데이터 스트림은 열거되지 않는다.
+- `cfg.manifest_path`(매니페스트 파일)와 봉인 대상 실행 파일이 에셋 폴더 안에 있어도 **런타임은 자동 허용하지 않는다**(경로 정규화 비교를 피하려는 단순화). 대신 생성기가 `#allow`를 넣는다(아래).
+- 보고하는 extra는 열거 순서상 첫 번째 하나뿐이다(순서는 파일시스템에 달렸다).
+
+### 도구
+
+- `tools/gen_manifest.py <dir> -o <manifest> --strict [--allow GLOB]... [--exclude GLOB]...`: 헤더를 쓴다. strict에서는 `.DS_Store`, `Thumbs.db`, `desktop.ini`를 모든 폴더에서 자동 허용(`X`와 `*/X` 둘 다)하고, 이 세 이름은 OS가 다시 쓰는 파일이라 목록에는 넣지 않는다. 매니페스트 출력 파일이 `<dir>` 안에 있으면 그 상대 경로를, `--exclude` 글로브(상대 POSIX 경로, `fnmatchcase`)에 걸려 목록에서 빠진 파일은 파일마다 그 상대 경로를 자동으로 `#allow`한다(이미 `--allow` 글로브가 덮는 파일은 건너뛴다. 그래서 `--exclude "*.pdb" --allow "*.pdb"`처럼 쓰면 `#allow` 줄이 늘지 않는다. 이름에 `*`나 `?`가 있는 파일은 글로브로 오해되므로 자동 허용 대신 오류로 종료하고, `#allow`가 64개를 넘어도 오류다). `--allow`는 `--strict` 없이는 거부한다. 잘못된 glob과 64개 초과는 오류로 종료한다. 기존 dotfile 제외 정책은 그대로지만 **strict 런타임은 dotfile도 extra로 본다**(공격자가 `.x.dll`을 둘 수 있다). 그래서 생성기가 strict에서 허용되지 않은 dotfile을 발견하면 경고를 출력한다. 심볼릭 링크 디렉터리도 경고한다.
+- `tools/verify_release.py`: 지시어를 C와 같은 규칙으로 파싱(`tools/manifest_policy.py`)하고, strict면 extra 파일 검사(깊이·항목 수 상한 포함)를 한다.
+- `tools/reshield_release.py --strict --allow GLOB`: 위 옵션을 전달한다. 봉인 대상 실행 파일이 `--assets` 안에 있으면 `--exclude`로 목록에서 빼고(봉인이 파일을 바꾸므로 목록에 있으면 검증이 실패한다) strict에서는 자동 `#allow`한다. 매니페스트 기본 위치(실행 파일 옆)가 `--assets` 안이어도 마찬가지다.
+
+### 한계와 주의
+
+- 키 없는 설계다. 매니페스트와 바이너리를 같이 재봉인하는 공격자는 `#allow *`를 넣어 strict를 끌 수도 있다. strict는 "봉인된 것 이후에 끼워 넣은 파일"을 잡을 뿐, 재봉인을 막지 못한다.
+- 에셋 폴더에 세이브·로그·캐시를 쓰는 게임은 `--allow "saves/*"` 같은 허용이 필요하다(아니면 매 실행이 `ASSET_EXTRA`). 허용한 경로는 검사하지 않으므로 그 안에 코드를 두지 않는다.
+- 이 헤더를 모르는 구버전 런타임은 `#` 줄을 어디서든 주석으로 건너뛰므로 헤더 전체를 무시하고 strict를 **조용히 끈다**(목록 에셋 검증은 그대로 한다). strict가 필요하면 이 버전 이상의 라이브러리로 빌드해야 한다.
+- 열거 시점 이후에 생기거나 사라지는 파일, 에셋 폴더 밖에 놓는 DLL(검색 경로가 다른 폴더인 경우)은 이 검사가 보지 못한다.
+- 안티바이러스 격리 파일, 사용자가 둔 파일, 설치 도구가 남긴 파일도 extra다. 현장 텔레메트리로 오탐률을 먼저 재고 나서 종료 같은 조치를 붙인다.
+- 검증 범위: macOS·Linux(glibc, musl)는 CI가 `tests/test_manifest.c`(`strict` 시나리오, 항목 상한 100000, 깊이 32/33, 심볼릭 링크·FIFO)와 `tests/test_seal_workflow.py`로 확인한다. Windows는 CI `windows-msvc` 잡의 단위 테스트와 pwsh 단계(드롭인 DLL, 중첩 폴더, 한글 이름, dotfile, junction)로 확인한다. Windows에서 항목 상한 100000과 심볼릭 링크 케이스는 돌리지 않는다. mingw 빌드는 컴파일·실행 모두 확인하지 않았다.

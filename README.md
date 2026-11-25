@@ -116,7 +116,7 @@ int status = reshield_check_json("game.manifest", "assets", json, sizeof json); 
 
 Both calls resolve the two paths against the directory of the **process executable**, not the library: when re-shield is linked into a shared library (module mode), the manifest and assets are looked up next to the host EXE. In a development library (`make lib` / `make shared`, compiled with `-DRESHIELD_ALLOW_UNSEALED`) an unsealed binary reports `OK`; a release library (`ALLOW_UNSEALED=0`) requires a sealed one.
 
-Binaries inside the asset directory and build leftovers can be left out of the manifest: `python3 tools/gen_manifest.py dist -o dist/game.manifest --exclude "*.pdb" --exclude "cache/*"` (repeatable globs on the relative POSIX path). `reshield_release.py` takes the same `--exclude` and always leaves the binary it seals out of the manifest, Binaries inside the asset directory and build leftovers can be left out of the manifest: `python3 tools/gen_manifest.py dist -o dist/game.manifest --exclude "*.pdb" --exclude "cache/*"` (repeatable globs on the relative POSIX path). `reshield_release.py` takes the same `--exclude` and always leaves the binary it seals out of the manifest, so `reshield_release.py dist/game --assets dist` works. A pattern that matches no file (a typo, `./x`, a backslash path) is reported on stderr by `gen_manifest.py`; the exit code does not change.
+Binaries inside the asset directory and build leftovers can be left out of the manifest: `python3 tools/gen_manifest.py dist -o dist/game.manifest --exclude "*.pdb" --exclude "cache/*"` (repeatable globs on the relative POSIX path). `reshield_release.py` takes the same `--exclude` and always leaves the binary it seals out of the manifest, so `reshield_release.py dist/game --assets dist` works. A pattern that matches no file (a typo, `./x`, a backslash path) is reported on stderr by `gen_manifest.py`; the exit code does not change.
 
 Or set it up yourself with `reshield_verify()` (paths then relative to the current directory):
 
@@ -127,6 +127,8 @@ cfg.asset_base_dir = "assets";
 ```
 
 A manifest file that cannot be opened or parsed (wrong path, missing file, malformed or empty manifest, an unsafe asset path inside it) is reported as `MANIFEST_IO_ERROR` (`RESHIELD_ERR_MANIFEST_IO`, value 8), not `INTERNAL_ERROR`, so a wrong path is not mistaken for an internal fault. Before this change it was `INTERNAL_ERROR`. An asset that is missing, resized or altered is `ASSET_TAMPERED` (6), a tamper verdict.
+
+Strict mode catches files that were added next to your assets (a proxy DLL, a crack, a mod). Generate the manifest with `python3 tools/gen_manifest.py assets -o game.manifest --strict --allow "saves/*"` (or pass `--strict --allow` to `tools/reshield_release.py`). The manifest then starts with `#reshield-manifest v2 strict` and `#allow` lines, which are sealed with the root hash. At runtime any file, symlink or special file under the asset directory that is neither listed nor allowed gives `ASSET_EXTRA` (`RESHIELD_ERR_ASSET_EXTRA`, value 9), after the listed assets verified. Names are compared as bytes, so an NFD name on APFS can be a false positive, and a game that writes saves into the asset directory needs an `#allow`. It does not stop an attacker who re-seals the binary and manifest together. Details and limits: [docs/integrity-verification.md](docs/integrity-verification.md#10-매니페스트-v2와-strict-모드). A `#` line is now only accepted at the top of a manifest (before the first entry); it used to be skipped anywhere.
 
 If you load an asset after verifying it by path, the file can change in between (TOCTOU). Read the file into memory, check it with `reshield_verify_buffer()`, then use that buffer. See `examples/sample_game.c` for a complete program.
 
@@ -151,7 +153,7 @@ If you load an asset after verifying it by path, the file can change in between 
 - The code check covers the image that holds the sealed record: the main executable when re-shield is linked statically, or the shared library (`.so` / `.dylib` / `.dll`) when re-shield is linked into one. Seal that file; the host executable is neither checked nor required to be sealed. Other modules (an engine binary, other plugins) are not checked. The code-signature check always looks at the process executable. On Linux, a library opened by a relative path works too (its absolute path comes from `/proc/self/maps`); the check fails closed if `/proc` is unavailable or the library file was deleted or replaced after loading.
 - Only `__TEXT,__text` / `.text` is hashed. `__stubs`, `.plt`, `__const` and the `__DATA` that holds the record are not.
 - The record starts with a plain `RSHLDCHK` magic, so the place to edit is easy to find.
-- Files that are not in the manifest are not detected.
+- Files that are not in the manifest are not detected, unless the manifest is generated with `--strict` (see above).
 - A binary and its manifest can be re-sealed together. Runtime API replacement is not prevented.
 - A software breakpoint patches code bytes and is reported as `CODE_TAMPERED`.
 - On Linux, `.text` is located from the section headers on disk. An attacker who can edit the file can change them, and copying the original bytes into a code cave in the same segment is not caught.

@@ -198,6 +198,11 @@ static void test_report_json(void) {
     ASSERT_TRUE(strstr(buf, "\"status\":\"MANIFEST_IO_ERROR\",\"status_code\":8,") != NULL,
                 "report_to_json: MANIFEST_IO status name and code");
 
+    r.status = RESHIELD_ERR_ASSET_EXTRA;
+    reshield_report_to_json(&r, buf, sizeof(buf));
+    ASSERT_TRUE(strstr(buf, "\"status\":\"ASSET_EXTRA\",\"status_code\":9,") != NULL,
+                "report_to_json: ASSET_EXTRA status name and code");
+
     r.code_result.expected_size = UINT64_MAX;
     reshield_report_to_json(&r, buf, sizeof(buf));
     ASSERT_TRUE(strstr(buf, "\"expected_size\":18446744073709551615,") != NULL,
@@ -213,6 +218,7 @@ static void test_status_names(void) {
                 strcmp(reshield_status_name(RESHIELD_ERR_ASSET_TAMPERED), "ASSET_TAMPERED") == 0 &&
                 strcmp(reshield_status_name(RESHIELD_ERR_INTERNAL), "INTERNAL_ERROR") == 0 &&
                 strcmp(reshield_status_name(RESHIELD_ERR_MANIFEST_IO), "MANIFEST_IO_ERROR") == 0 &&
+                strcmp(reshield_status_name(RESHIELD_ERR_ASSET_EXTRA), "ASSET_EXTRA") == 0 &&
                 strcmp(reshield_status_name((reshield_status_t)99), "UNKNOWN") == 0,
                 "reshield_status_name() names manifest/asset/internal/unknown statuses");
 }

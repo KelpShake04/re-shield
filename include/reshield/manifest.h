@@ -12,7 +12,9 @@ typedef enum reshield_manifest_status {
     RESHIELD_MANIFEST_UNSEALED       = 1, /* Binary has no sealed manifest root */
     RESHIELD_MANIFEST_ROOT_MISMATCH  = 2, /* Manifest file SHA-256 does not match sealed root */
     RESHIELD_MANIFEST_ASSET_MISMATCH = 3, /* An asset file is missing, resized, or hash-mismatched */
-    RESHIELD_MANIFEST_IO_ERROR       = 4  /* Could not open or parse manifest file */
+    RESHIELD_MANIFEST_IO_ERROR       = 4, /* Could not open or parse manifest file */
+    RESHIELD_MANIFEST_ASSET_EXTRA    = 5  /* Strict manifest: a file under asset_base_dir is neither
+                                           * listed nor allowed, or the scan could not complete */
 } reshield_manifest_status_t;
 
 /**
@@ -23,8 +25,19 @@ typedef enum reshield_manifest_status {
  * Manifest format (UTF-8 text, sorted lines):
  *   <64-hex-sha256> <byte-size> <relative-path>
  *
- * If an asset fails and failed_path_buf is non-NULL, writes its relative path into
- * failed_path_buf (up to failed_path_cap bytes, NUL-terminated).
+ * Manifest v2 (optional, backward compatible): leading '#' lines may hold directives,
+ *   #reshield-manifest v2 strict   enable the strict (allowlist) scan
+ *   #allow <glob>                  (max 64) paths exempt from the strict scan
+ * In a strict manifest, after all listed assets verified, asset_base_dir (NULL or "" = ".")
+ * is walked recursively; any entry (file, symlink, special file; symlinks are not followed)
+ * that is neither listed nor matched by an #allow glob gives RESHIELD_MANIFEST_ASSET_EXTRA.
+ * A scan that cannot finish (unreadable directory, nesting > 32, > 100000 entries, path too
+ * long) also gives ASSET_EXTRA, with an empty failed path. Names are compared as bytes.
+ * Unknown directives or a malformed header are IO_ERROR. See docs/integrity-verification.md.
+ *
+ * If an asset fails (or, for ASSET_EXTRA, an extra entry is found) and failed_path_buf is
+ * non-NULL, writes its relative path into failed_path_buf (up to failed_path_cap bytes,
+ * NUL-terminated).
  */
 reshield_manifest_status_t reshield_verify_manifest_files(
     const char *manifest_path,
@@ -37,7 +50,7 @@ reshield_manifest_status_t reshield_verify_manifest_files(
 /**
  * Verifies a single asset (asset_rel_path under asset_base_dir) against the manifest
  * after first verifying the manifest's own SHA-256 against expected_root_sha256
- * (or the binary's sealed manifest root if NULL).
+ * (or the binary's sealed manifest root if NULL). The strict scan is not part of this call.
  */
 reshield_manifest_status_t reshield_verify_single_asset(
     const char *manifest_path,

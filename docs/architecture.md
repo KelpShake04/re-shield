@@ -43,7 +43,7 @@ Offset  Size  Field
 - 해시 대상은 `__TEXT,__text` / `.text`뿐이다. `__stubs`, `.plt`, `__const`, 레코드가 놓이는 `__DATA`는 포함되지 않는다.
 - 레코드의 평문 `RSHLDCHK` 매직이 수정 지점을 노출한다.
 - 소프트웨어 breakpoint(코드 바이트 패치)가 설치된 상태에서는 `CODE_TAMPERED`로 보고된다.
-- 매니페스트에 없는 추가 파일은 감지하지 못한다.
+- 기본 매니페스트는 목록에 없는 추가 파일을 감지하지 못한다. v2 `strict` 모드(`#reshield-manifest v2 strict`, `#allow`)는 에셋 폴더를 열거해 `RESHIELD_ERR_ASSET_EXTRA`로 보고한다. 키 없는 설계라 재봉인은 막지 못한다. [integrity-verification.md](integrity-verification.md#10-매니페스트-v2와-strict-모드) 참고.
 - macOS 코드 서명 검증은 기본적으로 `SecCodeCheckValidity`를 requirement `NULL`로 호출해 서명 유효성만 확인하며 서명 주체는 고정하지 않는다. `cfg.codesign_requirement`를 설정하면 `SecRequirementCreateWithString`으로 만든 requirement를 함께 검사한다(Team ID 고정 등). Windows는 `leaf-sha256:<64 hex>` 형식이다(아래 Windows 항목).
 - fat/universal Mach-O는 `seal_binary.py`가 지원하지 않는다.
 - Windows(PE32+ x64, MSVC)는 봉인 도구, 파일 I/O, 런타임 백엔드(`src/integrity_windows.c`의 `.text` 위치 찾기, `src/attestation_windows.c`의 `VirtualQuery` W^X 순회와 `WinVerifyTrust` 코드 서명 검사)가 구현되어 있고 CI `windows-msvc` 잡(`windows-latest`)이 실제로 빌드·봉인·실행·변조 탐지를 확인한다. Windows의 코드 서명 검사는 `WinVerifyTrust` 후 `requirement`(`leaf-sha256:<64 hex>`, 서명 leaf 인증서 DER의 SHA-256)가 주어지면 그 해시와 비교한다. 형식이 다른 문자열은 `FAILED`(fail-closed)이고, 서명 안 된 EXE도 `FAILED`다. CI가 일회용 자체 서명 인증서로 서명한 EXE에서 `OK`와 leaf pin 일치/불일치를 확인한다(공인 CA 서명은 미검증). macOS와 Windows의 requirement 문법이 달라 플랫폼별로 `#ifdef` 안에서 설정한다. 정식 지원 대상은 MSVC 빌드(CI 측정: MSVC 링크 EXE의 `.text` 안 base relocation 0개, 봉인 성공)이며 mingw-w64는 크로스 컴파일·도구 테스트 전용이다. [integrity-verification.md](integrity-verification.md#7-windows-pe32-x64) 참고.

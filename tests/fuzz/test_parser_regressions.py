@@ -7,10 +7,13 @@ from __future__ import annotations
 import os
 import struct
 import sys
+import tempfile
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import fuzz_pe  # noqa: E402
 
+import manifest_policy as mp  # noqa: E402
 import seal_binary as sb  # noqa: E402 (fuzz_pe put tools/ on sys.path)
 
 
@@ -24,7 +27,41 @@ def expect_value_error(fn, data: bytes, what: str) -> None:
     raise AssertionError(f"{what}: malformed input was accepted")
 
 
+def test_manifest_policy() -> None:
+    """Manifest v2 header parser (tools/manifest_policy.py mirrors src/manifest.c): every malformed
+    header is rejected, '#' after the first entry too, and the glob matcher cannot blow up."""
+    entry = "0" * 64 + " 1 a.cfg\n"
+    h = "#reshield-manifest v2 strict\n"
+    for bad in ("#reshield-manifest v3\n", "#reshield-manifest v2 loose\n", "#reshield-manifest\n",
+                h + h, h + "#unknown\n", h + "#allow\n", h + "#allow /abs\n", h + "#allow ../x\n",
+                h + "#allow a/..\n", h + "#allow a\\b\n", h + "#allow a\x01b\n", "#allow x\n" + h,
+                h + "#allow " + "g" * 256 + "\n",
+                h + "".join(f"#allow g{i}\n" for i in range(65)),
+                entry + "# late\n", entry + h, "\r\n" + entry, entry.replace(" 1 ", " x ")):
+        try:
+            mp.parse_manifest((bad if bad.endswith("\n") and "a.cfg" in bad else bad + entry).encode())
+        except mp.ManifestError:
+            continue
+        raise AssertionError(f"manifest header accepted: {bad!r}")
+    pol, ents = mp.parse_manifest((h + "#allow *.log\n" + entry).encode())
+    assert pol.strict and pol.allow == ["*.log"] and len(ents) == 1
+
+    # Backtracking matcher: many stars against a long non-matching string stays fast.
+    start = time.monotonic()
+    assert not mp.glob_match("a*" * 40 + "b", "a" * 4000)
+    assert time.monotonic() - start < 5, "glob matcher is too slow"
+
+    with tempfile.TemporaryDirectory(prefix="reshield_pol_") as d:
+        deep = os.path.join(d, *["d"] * 32)
+        os.makedirs(deep)
+        assert mp.find_extra(d, set(), []) is None, "32 nested empty directories pass"
+        os.makedirs(os.path.join(deep, "d"))
+        assert mp.find_extra(d, set(), []).startswith("<scan incomplete"), "33 levels cannot be verified"
+    print("PASS: manifest v2 header parser, glob matcher and scan limits")
+
+
 def main() -> int:
+    test_manifest_policy()
     elf = bytearray(fuzz_pe.seed_elf())
     macho = bytearray(fuzz_pe.seed_macho())
 
