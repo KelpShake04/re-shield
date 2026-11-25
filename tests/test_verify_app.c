@@ -1,6 +1,8 @@
 /* Helper for tests/test_seal_workflow.py: reshield_verify_app() from a copy of this binary that
- * sits next to its manifest and assets. Usage: test_verify_app <manifest_rel> [assets_rel].
- * Prints the status name; exit code = 10 + status (like examples/sample_game.c). */
+ * sits next to its manifest and assets. Usage: test_verify_app <manifest_rel> [assets_rel [asset_rel]].
+ * Prints the status name; exit code = 10 + status (like examples/sample_game.c). With asset_rel it
+ * also prints "load=<status name> len=<n> data=<first 16 bytes>" for reshield_load_verified_app_asset()
+ * (max_size 4096), before the exit code is returned. */
 #include "reshield/reshield.h"
 
 #include <stdio.h>
@@ -46,6 +48,17 @@ int main(int argc, char **argv) {
     printf("check_json_bounds=%s\n", bounds ? "ok" : "BAD");
     if (!bounds) {
         return 98;
+    }
+    if (argc > 3) {
+        void *data = NULL;
+        size_t n = 0;
+        reshield_status_t ls = reshield_load_verified_app_asset(argv[1], assets, argv[3], 4096, &data, &n);
+        printf("load=%s len=%zu data=%.*s\n", reshield_status_name(ls), n, n < 16 ? (int)n : 16,
+               data != NULL ? (const char *)data : "");
+        if ((ls == RESHIELD_OK) != (data != NULL)) {
+            return 97; /* a buffer exactly when OK */
+        }
+        reshield_free_asset(data);
     }
     return 10 + (int)st;
 }

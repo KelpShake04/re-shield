@@ -38,6 +38,23 @@ namespace Reshield
         }
     }
 
+    public sealed class AssetResult
+    {
+        /// <summary>reshield_status_t value (0 = OK), or Guard.ModuleNotFound (-1).</summary>
+        public int Status { get; }
+        public string StatusName { get; }
+        /// <summary>The verified bytes (a copy of the native buffer) when Ok, otherwise null.</summary>
+        public byte[] Data { get; }
+        public bool Ok => Status == 0;
+
+        public AssetResult(int status, string statusName, byte[] data)
+        {
+            Status = status;
+            StatusName = statusName;
+            Data = data;
+        }
+    }
+
     public static class Guard
     {
         public const int ModuleNotFound = -1;
@@ -55,6 +72,14 @@ namespace Reshield
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
         private static extern int reshield_check_json(byte[] manifestRel, byte[] assetsRel,
                                                        byte[] json, UIntPtr cap);
+
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int reshield_load_verified_app_asset(byte[] manifestRel, byte[] assetsRel,
+                                                                    byte[] assetRel, UIntPtr maxSize,
+                                                                    out IntPtr buf, out UIntPtr len);
+
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern void reshield_free_asset(IntPtr buf);
 
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
         private static extern IntPtr reshield_status_name(int status);
@@ -83,6 +108,49 @@ namespace Reshield
                 return new CheckResult(ModuleNotFound, "MODULE_NOT_FOUND",
                     "{\"v\":1,\"status\":\"MODULE_NOT_FOUND\",\"status_code\":-1,\"error\":\""
                     + e.GetType().Name + "\"}");
+            }
+        }
+
+        /// <summary>
+        /// Loads one asset and returns the bytes that were verified (manifest root, entry, size and
+        /// SHA-256 over this same buffer, so the file cannot be swapped between check and use).
+        /// manifestRel and assetsRel are relative to the running executable's directory, assetRel to
+        /// assetsRel. maxBytes is a hard cap (no default): a larger asset is not read (status 8,
+        /// MANIFEST_IO_ERROR). The asset is in memory twice while it is copied, so for multi-GB packs
+        /// use Check() instead. A missing module does not throw (ModuleNotFound, Data null): the
+        /// caller cannot load without the module either, so decide there whether to fall back to an
+        /// unverified read. Any other non-zero status means: do not use the file. Call from a worker
+        /// thread for large assets.
+        /// </summary>
+        public static AssetResult LoadAsset(string manifestRel, string assetsRel, string assetRel,
+                                            int maxBytes)
+        {
+            if (maxBytes < 0) throw new ArgumentOutOfRangeException(nameof(maxBytes));
+            try
+            {
+                IntPtr buf;
+                UIntPtr len;
+                int status = reshield_load_verified_app_asset(ToCString(manifestRel), ToCString(assetsRel),
+                                                              ToCString(assetRel), (UIntPtr)(uint)maxBytes,
+                                                              out buf, out len);
+                byte[] data = null;
+                if (buf != IntPtr.Zero)
+                {
+                    try
+                    {
+                        if (status == 0)
+                        {
+                            data = new byte[(int)len];
+                            Marshal.Copy(buf, data, 0, data.Length);
+                        }
+                    }
+                    finally { reshield_free_asset(buf); }
+                }
+                return new AssetResult(status, ReadCString(reshield_status_name(status)), data);
+            }
+            catch (Exception e) when (IsNoModule(e))
+            {
+                return new AssetResult(ModuleNotFound, "MODULE_NOT_FOUND", null);
             }
         }
 

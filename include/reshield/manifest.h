@@ -59,6 +59,41 @@ reshield_manifest_status_t reshield_verify_single_asset(
     const uint8_t *expected_root_sha256
 );
 
+/**
+ * Loads one asset and returns the exact bytes that were verified. Verification is the same as
+ * reshield_verify_single_asset() (manifest root first, then the manifest entry for
+ * asset_rel_path, then size and SHA-256), but the file is opened and read once and the hash is
+ * taken over the returned buffer, so the file cannot be swapped between check and use.
+ *
+ * On RESHIELD_MANIFEST_OK, *out_buf (malloc'd, never NULL, even for an empty asset) and *out_len
+ * are set; release the buffer with reshield_free_asset(), not free() (a DLL may use another C
+ * runtime). On any other status *out_buf is NULL and *out_len is 0. Both outputs are required
+ * (NULL gives IO_ERROR). The call is stateless and thread-safe; it re-checks the manifest root
+ * every time and holds the whole asset in memory.
+ *
+ * max_size is a hard cap in bytes with no default: an asset (per the file's size) larger than
+ * max_size is never read and gives RESHIELD_MANIFEST_IO_ERROR (not a tamper verdict). Statuses
+ * as in reshield_verify_single_asset(): an unsafe asset_rel_path (same path rules as manifest
+ * entries) is IO_ERROR; an asset that is not listed, missing, not a regular file, resized or
+ * hash-mismatched is ASSET_MISMATCH. A symlink to a regular file is read through (the bytes are
+ * still bound to the manifest hash). The strict scan is not part of this call. Under
+ * -DRESHIELD_DISABLE nothing is verified: the file is only read, with the same path and
+ * max_size rules. See docs/asset-loading.md.
+ */
+reshield_manifest_status_t reshield_load_verified_asset(
+    const char *manifest_path,
+    const char *asset_base_dir,
+    const char *asset_rel_path,
+    const uint8_t *expected_root_sha256,
+    size_t max_size,
+    void **out_buf,
+    size_t *out_len
+);
+
+/** Releases a buffer returned by reshield_load_verified_asset() or
+ * reshield_load_verified_app_asset(). NULL is allowed. */
+void reshield_free_asset(void *buf);
+
 #ifdef __cplusplus
 }
 #endif

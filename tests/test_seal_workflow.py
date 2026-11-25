@@ -783,9 +783,26 @@ def test_verify_app(tmpdir: str, repo_root: str) -> None:
     print("PASS: verify_app finds manifest/assets next to the exe from another CWD (also via symlink); "
           "oversized path fails closed")
 
+    # reshield_load_verified_app_asset(): same exe-relative paths, bytes handed back, unsealed binary refused.
+    r = run_app(exe, "vapp.manifest", "assets", "stage1.cfg")
+    assert r.returncode == 10 and "load=OK " in r.stdout and "data=stage_name=Emera" in r.stdout, r
+    for rel in ("../vapp.manifest", "sub/../stage1.cfg", "/etc/passwd"):
+        r = run_app(exe, "vapp.manifest", "assets", rel)
+        assert "load=MANIFEST_IO_ERROR len=0" in r.stdout, f"unsafe asset path {rel!r} must be refused: {r}"
+    r = run_app(exe, "vapp.manifest", "assets", "nope.cfg")
+    assert "load=ASSET_TAMPERED len=0" in r.stdout, f"unlisted asset: {r}"
+    plain = os.path.join(app_dir, "vplain")
+    shutil.copy2(os.path.join(repo_root, "build", "test_verify_app"), plain)
+    r = run_app(plain, "vapp.manifest", "assets", "stage1.cfg")
+    assert "load=UNSEALED len=0" in r.stdout, f"an unsealed binary must not load assets (even in a dev library): {r}"
+    os.unlink(plain)
+    print("PASS: load_verified_app_asset returns the verified bytes; unsafe/unlisted paths and an unsealed binary are refused")
+
     stage_cfg = os.path.join(app_dir, "assets", "stage1.cfg")
     with open(stage_cfg, "ab") as f:
         f.write(b"x")
+    r = run_app(exe, "vapp.manifest", "assets", "stage1.cfg")
+    assert "load=ASSET_TAMPERED len=0" in r.stdout, f"a changed asset must not be loaded: {r}"
     r = run_app(exe, "vapp.manifest", "assets")
     assert r.returncode == 16 and "asset=stage1.cfg" in r.stdout and "check_json=same" in r.stdout, r
     os.unlink(manifest)

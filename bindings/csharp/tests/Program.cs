@@ -1,5 +1,7 @@
 // One scenario per process (a DllImport binding is resolved once and cached per process).
-// usage: <dll> <library path | none> <expected status> <expected status name>
+// usage: <library path | none> <expected status> <expected status name>
+//        [<manifest rel> <assets rel> <asset rel> <max bytes> <expected asset status> <expected text | ->]
+// With the second group it also calls Guard.LoadAsset (paths relative to the dotnet host's directory).
 // run.py builds the libraries and starts one process per scenario.
 using System;
 using System.Reflection;
@@ -10,7 +12,8 @@ internal static class Program
 {
     private static int Main(string[] args)
     {
-        if (args.Length != 3) { Console.Error.WriteLine("usage: <lib path|none> <status> <name>"); return 2; }
+        if (args.Length != 3 && args.Length != 9)
+        { Console.Error.WriteLine("usage: <lib path|none> <status> <name> [<manifest> <assets> <asset> <max> <status> <text|->]"); return 2; }
         string lib = args[0];
         int wantStatus = int.Parse(args[1]);
         string wantName = args[2];
@@ -37,6 +40,22 @@ internal static class Program
             if (plat != null) return Fail("PlatformName must be null without a module");
         }
         else if (string.IsNullOrEmpty(plat)) return Fail("PlatformName empty");
+
+        if (args.Length == 9)
+        {
+            int wantAsset = int.Parse(args[7]);
+            Reshield.AssetResult a = Task.Run(() => Reshield.Guard.LoadAsset(args[3], args[4], args[5],
+                int.Parse(args[6]))).GetAwaiter().GetResult();
+            Console.WriteLine($"asset status={a.Status} name={a.StatusName} bytes={(a.Data == null ? -1 : a.Data.Length)}");
+            if (a.Status != wantAsset) return Fail($"asset status {a.Status}, want {wantAsset}");
+            if (a.Ok != (wantAsset == 0)) return Fail("asset Ok flag");
+            if (a.Ok)
+            {
+                if (a.Data == null || System.Text.Encoding.UTF8.GetString(a.Data) != args[8])
+                    return Fail("asset bytes differ from the expected text");
+            }
+            else if (a.Data != null) return Fail("Data must be null unless Ok");
+        }
 
         Console.WriteLine("PASS");
         return 0;
