@@ -127,6 +127,7 @@ If you load an asset after verifying it by path, the file can change in between 
 
 ## Known limitations
 
+- The code check covers the image that holds the sealed record: the main executable when re-shield is linked statically, or the shared library (`.so` / `.dylib` / `.dll`) when re-shield is linked into one. Seal that file; the host executable is neither checked nor required to be sealed. Other modules (an engine binary, other plugins) are not checked. The code-signature check always looks at the process executable. On Linux, open the library by an absolute path, otherwise the check fails closed.
 - Only `__TEXT,__text` / `.text` is hashed. `__stubs`, `.plt`, `__const` and the `__DATA` that holds the record are not.
 - The record starts with a plain `RSHLDCHK` magic, so the place to edit is easy to find.
 - Files that are not in the manifest are not detected.

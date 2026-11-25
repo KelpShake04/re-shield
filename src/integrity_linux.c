@@ -5,6 +5,7 @@
 #endif
 
 #include <elf.h>
+#include <limits.h>
 #include <link.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -14,36 +15,64 @@
 #include <sys/auxv.h>
 #include <sys/stat.h>
 
+extern const void *reshield_internal_record_anchor(void);
+
 typedef struct {
     uintptr_t         base_addr;
     const Elf64_Phdr *phdr;
     size_t            phnum;
+    char              path[PATH_MAX]; /* file the image was loaded from */
     int               found;
-} main_image_ctx_t;
+} module_image_ctx_t;
 
-/* The main image is the entry whose program headers are the ones the kernel passed in
- * AT_PHDR. Matching by an empty dlpi_name is wrong on musl, which fills the name with the
- * program path. Under `ld.so ./prog` AT_PHDR describes the loader, not prog, so nothing
- * matches and the check reports an error (fail closed) instead of hashing the wrong bytes. */
-static int find_main_image_cb(struct dl_phdr_info *info, size_t size, void *data) {
+static int anchor_in_image(const struct dl_phdr_info *info, uintptr_t anchor) {
+    for (size_t i = 0; i < info->dlpi_phnum; i++) {
+        const Elf64_Phdr *p = &info->dlpi_phdr[i];
+        uintptr_t lo = (uintptr_t)info->dlpi_addr + (uintptr_t)p->p_vaddr;
+        if (p->p_type == PT_LOAD && anchor >= lo && anchor - lo < (uintptr_t)p->p_memsz) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* The image to hash is the one that contains the integrity record (the anchor), not
+ * necessarily the main program: re-shield may be linked into a shared library. Its file is
+ * /proc/self/exe when it is the main image (the entry whose program headers are the ones the
+ * kernel passed in AT_PHDR; matching by an empty dlpi_name is wrong on musl, which fills the
+ * name with the program path), otherwise dlpi_name, which must be absolute: a relative name
+ * may no longer resolve from the current directory, so it fails closed. Under
+ * `ld.so ./prog` AT_PHDR describes the loader and the main map has no absolute name, so the
+ * check reports an error (fail closed) instead of hashing the wrong bytes. */
+static int find_module_image_cb(struct dl_phdr_info *info, size_t size, void *data) {
     (void)size;
-    main_image_ctx_t *ctx = (main_image_ctx_t *)data;
+    module_image_ctx_t *ctx = (module_image_ctx_t *)data;
+    if (!anchor_in_image(info, (uintptr_t)reshield_internal_record_anchor())) {
+        return 0;
+    }
     uintptr_t at_phdr = (uintptr_t)getauxval(AT_PHDR);
+    const char *path = NULL;
     if (at_phdr != 0 && (uintptr_t)info->dlpi_phdr == at_phdr) {
+        path = "/proc/self/exe";
+    } else if (info->dlpi_name != NULL && info->dlpi_name[0] == '/') {
+        path = info->dlpi_name;
+    }
+    /* The record's image was found either way; no path means no usable file (found stays 0). */
+    if (path != NULL && strlen(path) < sizeof(ctx->path)) {
+        strcpy(ctx->path, path);
         ctx->base_addr = (uintptr_t)info->dlpi_addr;
         ctx->phdr = info->dlpi_phdr;
         ctx->phnum = info->dlpi_phnum;
         ctx->found = 1;
-        return 1;
     }
-    return 0;
+    return 1;
 }
 
 /* The section headers come from the file on disk, which an attacker who can edit the file can
  * rewrite; the loader never reads them. So the range must lie entirely inside one
  * executable, non-writable PT_LOAD of the image that is actually mapped. This turns a bad
  * header into an error instead of a wild read or a redirect to unrelated memory. */
-static int range_in_exec_segment(const main_image_ctx_t *img, uint64_t addr, uint64_t size) {
+static int range_in_exec_segment(const module_image_ctx_t *img, uint64_t addr, uint64_t size) {
     if (size == 0u || addr + size < addr) {
         return 0;
     }
@@ -65,13 +94,14 @@ int reshield_platform_get_code_section(const uint8_t **out_ptr, uint64_t *out_si
         return -1;
     }
 
-    main_image_ctx_t img = { 0, NULL, 0, 0 };
-    dl_iterate_phdr(find_main_image_cb, &img);
+    module_image_ctx_t img; /* no static state: callers may verify from several threads */
+    memset(&img, 0, sizeof(img));
+    dl_iterate_phdr(find_module_image_cb, &img);
     if (!img.found) {
         return -1;
     }
 
-    FILE *fp = fopen("/proc/self/exe", "rb");
+    FILE *fp = fopen(img.path, "rb");
     if (fp == NULL) {
         return -1;
     }

@@ -46,6 +46,13 @@ static volatile reshield_integrity_record_t RESHIELD_USED g_reshield_integrity_r
     .manifest_root_sha256 = { 0 }
 };
 
+/* Address inside this module's image (the record lives in the module that linked re-shield).
+ * The platform hooks find "the image that holds the record" from it, so a library that links
+ * re-shield verifies itself, not the host process. Internal: not in any public header. */
+const void *reshield_internal_record_anchor(void) {
+    return (const void *)&g_reshield_integrity_record;
+}
+
 static void read_record(reshield_integrity_record_t *dst) {
     const volatile uint8_t *src = (const volatile uint8_t *)&g_reshield_integrity_record;
     uint8_t *out = (uint8_t *)dst;

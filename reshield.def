@@ -1,0 +1,6 @@
+; Exports of reshield.dll (cl /LD ... /link /DEF:reshield.def). A header-wide __declspec(dllexport)
+; macro would touch every declaration, so the DLL's public surface is listed here instead.
+LIBRARY reshield
+EXPORTS
+    reshield_verify_code_section
+    reshield_verify_code_page_wx
