@@ -43,6 +43,13 @@ inputs:
     description: Python interpreter command (3.8+).
     required: false
     default: python3
+  allow-dev-build:
+    description: >-
+      "true" accepts a binary linked against a DEVELOPMENT build of re-shield (RESHIELD_ALLOW_UNSEALED).
+      For demos and CI only: such a build can be made to pass by changing one byte, so never ship it.
+      The default "false" refuses it.
+    required: false
+    default: "false"
 
 outputs:
   manifest:
@@ -68,6 +75,7 @@ runs:
         RS_SIGN_CMD: ${{ inputs.sign-cmd }}
         RS_SIGN: ${{ inputs.sign }}
         RS_PYTHON: ${{ inputs.python }}
+        RS_ALLOW_DEV_BUILD: ${{ inputs.allow-dev-build }}
       run: |
         set -euo pipefail
         if [ -z "$RS_BINARY" ]; then echo "::error::input 'binary' is required"; exit 1; fi
@@ -85,6 +93,7 @@ runs:
         done <<<"$RS_EXCLUDE"
         if [ "$RS_STRIP" = "true" ]; then args+=(--strip); fi
         if [ -n "$RS_SIGN" ]; then args+=(--sign "$RS_SIGN"); fi
+        if [ "$RS_ALLOW_DEV_BUILD" = "true" ]; then args+=(--allow-dev-build); fi
         if [ -n "$RS_SIGN_CMD" ]; then args+=(--sign-cmd "$RS_SIGN_CMD"); fi
         "${py[@]}" "$RS_ACTION_PATH/tools/reshield_release.py" "${args[@]}"
         echo "manifest=$manifest" >> "$GITHUB_OUTPUT"

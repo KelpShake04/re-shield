@@ -112,7 +112,7 @@ char json[512];
 int status = reshield_check_json("game.manifest", "assets", json, sizeof json);  /* 0 = RESHIELD_OK */
 ```
 
-Binaries inside the asset directory and build leftovers can be left out of the manifest: `python3 tools/gen_manifest.py dist -o dist/game.manifest --exclude "*.pdb" --exclude "cache/*"` (repeatable globs on the relative POSIX path). `reshield_release.py` takes the same `--exclude` and always leaves the binary it seals out of the manifest, so `reshield_release.py dist/game --assets dist` works.
+Binaries inside the asset directory and build leftovers can be left out of the manifest: `python3 tools/gen_manifest.py dist -o dist/game.manifest --exclude "*.pdb" --exclude "cache/*"` (repeatable globs on the relative POSIX path). `reshield_release.py` takes the same `--exclude` and always leaves the binary it seals out of the manifest, so `reshield_release.py dist/game --assets dist` works. A pattern that matches no file (a typo, `./x`, a backslash path) is reported on stderr by `gen_manifest.py`; the exit code does not change.
 
 Or set it up yourself with `reshield_verify()` (paths then relative to the current directory):
 
@@ -133,6 +133,9 @@ If you load an asset after verifying it by path, the file can change in between 
 - `cfg.allow_unsealed = 1` lets a binary that was never sealed pass. It works only if the library was compiled with `-DRESHIELD_ALLOW_UNSEALED`. This repository's Makefile turns that on by default. For a release build use `make ALLOW_UNSEALED=0 lib` and link `build/release/libreshield.a`.
 - If the field is set on a library built without the macro, `reshield_verify()` returns `INTERNAL_ERROR`. It is neither ignored nor bypassed.
 - Never ship a build with `RESHIELD_ALLOW_UNSEALED`. An attacker could then skip the code and manifest checks by changing the sealed byte in the record.
+- **`make lib` and `make shared` build the development library by default.** To ship, use `make release-shared` (shared library) or `make ALLOW_UNSEALED=0 lib`, or compile your own copy without `-DRESHIELD_ALLOW_UNSEALED`.
+- A development build contains the marker `RESHIELD-DEV-BUILD-v1`; a release build never does. `tools/reshield_release.py` and `tools/verify_release.py` refuse a binary that contains it (exit code 2, before anything is modified). `--allow-dev-build` (action input `allow-dev-build`) overrides this for demos and CI only. `tools/seal_binary.py` does not check it, because the tests and demos seal development builds directly.
+- Limit: the marker is a guard against shipping the wrong build by mistake, not a defense. An attacker who holds a shipped development build can erase the marker (and flip the sealed byte); only a release build protects against that.
 
 ## Known limitations
 

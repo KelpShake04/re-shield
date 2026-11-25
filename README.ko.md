@@ -97,7 +97,7 @@ char json[512];
 int status = reshield_check_json("game.manifest", "assets", json, sizeof json);  /* 0 = RESHIELD_OK */
 ```
 
-에셋 폴더 안의 바이너리나 빌드 부산물은 매니페스트에서 뺄 수 있다: `python3 tools/gen_manifest.py dist -o dist/game.manifest --exclude "*.pdb" --exclude "cache/*"`(상대 POSIX 경로에 대한 glob, 반복 가능). `reshield_release.py`도 같은 `--exclude`를 받고, 봉인하는 바이너리 자신은 항상 매니페스트에서 뺀다. 그래서 `reshield_release.py dist/game --assets dist`가 동작한다.
+에셋 폴더 안의 바이너리나 빌드 부산물은 매니페스트에서 뺄 수 있다: `python3 tools/gen_manifest.py dist -o dist/game.manifest --exclude "*.pdb" --exclude "cache/*"`(상대 POSIX 경로에 대한 glob, 반복 가능). `reshield_release.py`도 같은 `--exclude`를 받고, 봉인하는 바이너리 자신은 항상 매니페스트에서 뺀다. 그래서 `reshield_release.py dist/game --assets dist`가 동작한다. 어떤 파일에도 매치되지 않는 패턴(오타, `./x`, 역슬래시 경로)은 `gen_manifest.py`가 stderr에 경고한다(종료 코드는 그대로).
 
 매니페스트나 에셋 경로를 열 수 없으면 `INTERNAL_ERROR`가 아니라 `MANIFEST_IO_ERROR`(`RESHIELD_ERR_MANIFEST_IO`, 값 8)로 보고한다(경로 실수가 내부 오류로 오인되지 않도록. 이전에는 `INTERNAL_ERROR`였다).
 
@@ -131,4 +131,4 @@ python3 tools/verify_release.py build/game --manifest build/game.manifest --asse
 ## 개발·테스트 빌드 옵션
 
 - `-DRESHIELD_DISABLE`: `reshield_verify()` 등 모든 런타임 무결성 검증을 no-op으로 비활성화. 단 `reshield_verify_buffer()`는 앱 로직(예: 키 커밋먼트 비교)이므로 이 빌드에서도 실제 SHA-256 비교를 수행한다.
-- `cfg.allow_unsealed = 1`: `tools/seal_binary.py`를 거치지 않은 로컬 개발 빌드 허용. 라이브러리를 `-DRESHIELD_ALLOW_UNSEALED`로 컴파일했을 때만 동작한다(저장소 Makefile 기본값, 릴리스는 `make ALLOW_UNSEALED=0 lib`로 `build/release/libreshield.a`). 매크로 없이 컴파일한 라이브러리에서 필드를 켜면 `INTERNAL_ERROR`(설정 오류)다. **경고: 매크로를 켠 빌드를 릴리스에 쓰면 sealed 바이트 변조만으로 코드·매니페스트 검사가 우회된다. 릴리스 금지.** (레코드 magic/version 불일치나 매니페스트 없이 봉인된 바이너리는 unsealed로 취급하지 않고 실패 처리한다.)
+- `cfg.allow_unsealed = 1`: `tools/seal_binary.py`를 거치지 않은 로컬 개발 빌드 허용. 라이브러리를 `-DRESHIELD_ALLOW_UNSEALED`로 컴파일했을 때만 동작한다(저장소 Makefile 기본값, 릴리스는 `make ALLOW_UNSEALED=0 lib`로 `build/release/libreshield.a`). 매크로 없이 컴파일한 라이브러리에서 필드를 켜면 `INTERNAL_ERROR`(설정 오류)다. **경고: 매크로를 켠 빌드를 릴리스에 쓰면 sealed 바이트 변조만으로 코드·매니페스트 검사가 우회된다. 릴리스 금지.** (레코드 magic/version 불일치나 매니페스트 없이 봉인된 바이너리는 unsealed로 취급하지 않고 실패 처리한다.) **`make lib`/`make shared`의 기본값은 개발 빌드다.** 배포는 `make release-shared`(공유 라이브러리) 또는 `make ALLOW_UNSEALED=0 lib`로 하거나, 자기 빌드에서 `-DRESHIELD_ALLOW_UNSEALED`를 빼고 컴파일한다. 개발 빌드에는 마커 `RESHIELD-DEV-BUILD-v1`이 들어 있고 릴리스 빌드에는 절대 없다. `tools/reshield_release.py`와 `tools/verify_release.py`는 이 마커가 있는 바이너리를 거부한다(종료 코드 2, 파일을 바꾸기 전에 검사). `--allow-dev-build`(action 입력 `allow-dev-build`)는 데모·CI 전용 우회 옵션이다. `tools/seal_binary.py`는 검사하지 않는다(테스트와 데모가 개발 빌드를 직접 봉인한다). 한계: 마커는 실수로 개발 빌드를 배포하는 것을 막는 장치이지 방어가 아니다. 개발 빌드를 손에 넣은 공격자는 마커를 지울 수 있다(sealed 바이트와 함께). 이를 막는 것은 릴리스 빌드뿐이다.

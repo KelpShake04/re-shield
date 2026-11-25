@@ -17,7 +17,8 @@ python3 tools/seal_binary.py build/sample_game_sealed \
   --build-id 1
 
 # 4. 릴리스 아티팩트 검증 (CI/CD 용도)
-python3 tools/verify_release.py build/sample_game_sealed \
+# (이 예제는 저장소 기본인 개발 빌드를 링크하므로 --allow-dev-build가 필요하다. 배포용 빌드에는 쓰지 않는다. 4절 참고)
+python3 tools/verify_release.py build/sample_game_sealed --allow-dev-build \
   --manifest build/sample_assets.manifest \
   --assets examples/assets
 ```
@@ -52,6 +53,8 @@ make release-demo
 ## 4. 개발 옵션과 경고
 
 - `cfg.allow_unsealed = 1`은 라이브러리를 `-DRESHIELD_ALLOW_UNSEALED`로 컴파일한 개발 빌드에서만 효과가 있다(이 저장소의 Makefile은 기본으로 켠다. 릴리스는 `make ALLOW_UNSEALED=0`). 그 매크로 없이 컴파일한 라이브러리에서 필드를 켜면 우회되지도, 조용히 무시되지도 않고 `reshield_verify()`가 `RESHIELD_ERR_INTERNAL`(설정 오류)을 반환한다. 매크로를 켠 빌드를 릴리스에 쓰면 레코드의 sealed 바이트를 0으로 바꾸는 변조만으로 코드·매니페스트 검사가 우회된다. 릴리스 금지.
+- **개발 빌드 배포 방지(도구 단계).** `make lib`/`make shared`의 기본값은 개발 빌드다. 배포는 `make release-shared` 또는 `make ALLOW_UNSEALED=0 lib`(`build/release/`)로 하거나, 자기 빌드에서 `-DRESHIELD_ALLOW_UNSEALED`를 뺀다. 개발 빌드(`RESHIELD_ALLOW_UNSEALED`로 컴파일, `src/integrity_common.c`)에는 마커 문자열 `RESHIELD-DEV-BUILD-v1`이 상수로 들어가고, 릴리스 빌드에는 들어가지 않는다. `tools/reshield_release.py`와 `tools/verify_release.py`는 대상 바이너리 바이트에서 마커를 찾으면 거부한다(종료 코드 2, `reshield_release.py`는 바이너리를 수정하기 전에 검사). `--allow-dev-build`(GitHub Action 입력 `allow-dev-build`)는 데모·CI 전용 우회이고 사용하면 경고가 나온다. `seal_binary.py`는 검사하지 않는다(테스트와 데모가 개발 빌드를 직접 봉인한다). 런타임 동작은 바뀌지 않는다. `make test`의 `guard-test`와 `windows-msvc` CI가 마커 유무(정적·공유 라이브러리, 실행 파일)와 도구의 거부·통과를 확인한다.
+  - **한계**: 마커는 실수로 개발 빌드를 배포하는 것을 막는 장치이지 방어가 아니다. 개발 빌드를 손에 넣은 공격자는 마커를 지울 수 있고(같은 길이의 0으로 덮어쓰면 도구도 통과한다. `tests/test_dev_build_guard.py`가 이 한계를 그대로 기록한다), sealed 바이트와 함께 바꾸면 검사가 우회된다. 이는 개발 빌드의 본질적 한계이고, 막는 것은 릴리스 빌드뿐이다.
 - UNSEALED 판정은 레코드가 유효(magic·version 일치, 플래그 0/1)하고 `sealed == 0`일 때만 내려진다. 유효하지 않은 레코드는 `CODE_TAMPERED`, 매니페스트 검사 경로에서 sealed이지만 매니페스트 루트가 없는 바이너리는 `MANIFEST_MISMATCH`로 처리되어 `allow_unsealed`로 통과하지 못한다.
 - `-DRESHIELD_DISABLE`에서도 `reshield_verify_buffer()`는 실제 해시 비교를 수행한다(앱 로직이며 무결성 검사가 아님).
 

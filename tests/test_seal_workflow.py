@@ -263,6 +263,16 @@ def test_gen_manifest_exclude(tmpdir: str) -> None:
     r = run_cmd([sys.executable, os.path.join(os.path.dirname(__file__), "..", "tools", "gen_manifest.py"),
                  root, "-o", os.path.join(tmpdir, "gx_cli.manifest"), "--exclude", "nul.txt", "--exclude", "*.pdb"])
     assert r.returncode == 0 and "2 excluded" in r.stdout and "3 asset(s)" in r.stdout, r
+    r = run_cmd([sys.executable, os.path.join(os.path.dirname(__file__), "..", "tools", "gen_manifest.py"),
+                 root, "-o", os.path.join(tmpdir, "gx_warn.manifest"), "--exclude", "nul.txt", "--exclude", "*.pdb", "--exclude", "./a.cfg",
+                 "--exclude", "sub\\c.cfg"])
+    assert r.returncode == 0, r  # a pattern that matches nothing never changes the exit code
+    assert "--exclude './a.cfg' matched no file" in r.stderr and "--exclude 'sub\\\\c.cfg' matched no file" in r.stderr, r
+    assert "'*.pdb' matched no file" not in r.stderr, r
+    r = run_cmd([sys.executable, os.path.join(os.path.dirname(__file__), "..", "tools", "gen_manifest.py"),
+                 root, "-o", os.path.join(tmpdir, "gx_warn2.manifest"), "--exclude", "nul.txt"])
+    assert r.returncode == 0 and "matched no file" not in r.stderr, r
+    print("PASS: gen_manifest warns on stderr about an --exclude pattern that matches no file (exit code unchanged)")
     print("PASS: gen_manifest --exclude (fnmatchcase on relative POSIX paths, repeatable, before the path checks)")
 
 
@@ -401,16 +411,16 @@ def test_seal_tool_and_release_cases(tmpdir: str, repo_root: str, assets_dir: st
     print("PASS: seal_binary exits with a clear error on fat/universal Mach-O")
 
     # verify_release exit codes
-    r = run_cmd([py, verify_tool, demo, "--manifest", manifest, "--assets", assets_dir])
+    r = run_cmd([py, verify_tool, demo, "--allow-dev-build", "--manifest", manifest, "--assets", assets_dir])
     assert r.returncode == 0, r
-    r = run_cmd([py, verify_tool, demo, "--manifest", other, "--assets", assets_dir])
+    r = run_cmd([py, verify_tool, demo, "--allow-dev-build", "--manifest", other, "--assets", assets_dir])
     assert r.returncode == 1 and "manifest_assets: FAIL" in r.stdout, r
     with open(demo, "rb") as f:
         demo_bytes = f.read()
     sentinel_off = find_symbol_file_offset(demo, demo_bytes, "reshield_checksum_sentinel")
     corrupt = os.path.join(tmpdir, "s4_corrupt")
     patch_file(demo, corrupt, sentinel_off, demo_bytes[sentinel_off] ^ 0x01)
-    r = run_cmd([py, verify_tool, corrupt, "--manifest", manifest, "--assets", assets_dir])
+    r = run_cmd([py, verify_tool, corrupt, "--allow-dev-build", "--manifest", manifest, "--assets", assets_dir])
     assert r.returncode == 1 and "code_seal:       FAIL" in r.stdout, r
     print("PASS: verify_release returns 1 on code and manifest mismatch")
 
@@ -792,12 +802,12 @@ def test_release_cli_binary_in_assets(tmpdir: str, repo_root: str) -> None:
     with open(os.path.join(dist, "game.pdb"), "wb") as f:
         f.write(b"debug symbols")
 
-    r = run_cmd([sys.executable, tool, exe, "--assets", dist, "--exclude", "*.pdb", "--build-id", "6"])
+    r = run_cmd([sys.executable, tool, exe, "--allow-dev-build", "--assets", dist, "--exclude", "*.pdb", "--build-id", "6"])
     assert r.returncode == 0 and "excluding the sealed binary from the manifest: game" in r.stdout, r
     with open(os.path.join(dist, "game.manifest")) as f:
         listed = [line.split(" ", 2)[2].strip() for line in f]
     assert listed == ["data/stage1.cfg"], f"binary, pdb and the manifest itself must not be listed: {listed}"
-    r = run_cmd([sys.executable, os.path.join(repo_root, "tools", "verify_release.py"), exe, "--manifest",
+    r = run_cmd([sys.executable, os.path.join(repo_root, "tools", "verify_release.py"), exe, "--allow-dev-build", "--manifest",
                  os.path.join(dist, "game.manifest"), "--assets", dist])
     assert r.returncode == 0 and "code_seal:       OK" in r.stdout, r
     print("PASS: reshield_release excludes a binary that sits inside --assets (and --exclude patterns); "
@@ -814,7 +824,7 @@ def test_release_cli(tmpdir: str, repo_root: str) -> None:
 
     exe = os.path.join(out, "game")
     shutil.copy2(src, exe)
-    r = run_cmd([sys.executable, tool, exe, "--assets", os.path.join(out, "assets"), "--strip", "--build-id", "5"])
+    r = run_cmd([sys.executable, tool, exe, "--allow-dev-build", "--assets", os.path.join(out, "assets"), "--strip", "--build-id", "5"])
     assert r.returncode == 0 and "ship:" in r.stdout, r
     manifest = os.path.join(out, "game.manifest")
     assert os.path.isfile(manifest), "default manifest is <binary name>.manifest next to the binary"
@@ -824,7 +834,7 @@ def test_release_cli(tmpdir: str, repo_root: str) -> None:
     # The sign command runs after sealing: --verify-only fails (rc 1) on an unsealed binary.
     exe2 = os.path.join(out, "game2")
     shutil.copy2(src, exe2)
-    r = run_cmd([sys.executable, tool, exe2, "--sign-cmd", f"{sys.executable} {seal_tool} {{}} --verify-only"])
+    r = run_cmd([sys.executable, tool, exe2, "--allow-dev-build", "--sign-cmd", f"{sys.executable} {seal_tool} {{}} --verify-only"])
     assert r.returncode == 0 and "match=True" in r.stdout, f"sign step must see a sealed binary: {r}"
     print("PASS: reshield_release strips, seals with manifest, runs the sign step after sealing, verifies")
 
@@ -834,14 +844,14 @@ def test_release_cli(tmpdir: str, repo_root: str) -> None:
     exe3 = os.path.join(out, "game3")
     shutil.copy2(src, exe3)
     before3 = open(exe3, "rb").read()
-    r = run_cmd([sys.executable, tool, exe3, "--build-id", "4294967296"])
+    r = run_cmd([sys.executable, tool, exe3, "--allow-dev-build", "--build-id", "4294967296"])
     assert r.returncode != 0 and "outside 0..4294967295" in r.stderr, r
-    r = subprocess.run([sys.executable, tool, exe3], capture_output=True, text=True,
+    r = subprocess.run([sys.executable, tool, exe3, "--allow-dev-build"], capture_output=True, text=True,
                        env={**os.environ, "BUILD_NUMBER": "12a"})
     assert r.returncode != 0 and "BUILD_NUMBER" in r.stderr, r
     assert open(exe3, "rb").read() == before3, "rejected arguments must not modify the file"
     if sys.platform != "darwin":  # a non-macOS host cannot honour --sign: it must say so
-        r = run_cmd([sys.executable, tool, exe3, "--sign", "Some Identity"])
+        r = run_cmd([sys.executable, tool, exe3, "--allow-dev-build", "--sign", "Some Identity"])
         assert r.returncode == 0 and "will NOT be signed" in r.stderr, r
     print("PASS: reshield_release rejects bad build ids and warns when --sign cannot apply")
 
@@ -852,7 +862,7 @@ def test_release_cli(tmpdir: str, repo_root: str) -> None:
     subprocess.run(["codesign", "-s", "-", "--force", "--options", "runtime", signed], check=True,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     before = open(signed, "rb").read()
-    r = run_cmd([sys.executable, tool, signed])
+    r = run_cmd([sys.executable, tool, signed, "--allow-dev-build"])
     assert r.returncode == 2 and "Seal first, then sign" in r.stderr, r
     assert open(signed, "rb").read() == before, "refused release must not modify the file"
     print("PASS: reshield_release refuses an already-signed Mach-O without touching it")
@@ -867,19 +877,19 @@ def test_verify_release_steam_appid_warning(tmpdir: str, repo_root: str) -> None
     exe = os.path.join(dist, "game")
     shutil.copy2(os.path.join(repo_root, "build", "sample_game"), exe)
     assets = os.path.join(dist, "assets")
-    r = run_cmd([sys.executable, tool, exe, "--assets", assets, "--build-id", "2"])
+    r = run_cmd([sys.executable, tool, exe, "--allow-dev-build", "--assets", assets, "--build-id", "2"])
     assert r.returncode == 0 and "steam_appid" not in r.stderr, f"no warning without the file: {r}"
 
     with open(os.path.join(assets, "Steam_AppID.TXT"), "w") as f:  # case-insensitive match
         f.write("480")
-    r = run_cmd([sys.executable, tool, exe, "--assets", assets, "--build-id", "2"])
+    r = run_cmd([sys.executable, tool, exe, "--allow-dev-build", "--assets", assets, "--build-id", "2"])
     assert r.returncode == 0 and "steam_appid.txt found in --assets" in r.stderr \
         and "in the manifest (Steam_AppID.TXT)" in r.stderr, f"warn, but still pass: {r}"
 
     os.remove(os.path.join(assets, "Steam_AppID.TXT"))
     with open(os.path.join(dist, "steam_appid.txt"), "w") as f:
         f.write("480")
-    r = run_cmd([sys.executable, verify, exe])
+    r = run_cmd([sys.executable, verify, exe, "--allow-dev-build"])
     assert r.returncode == 0 and "found next to the binary" in r.stderr, r
     print("PASS: verify_release warns about steam_appid.txt (assets, manifest, binary dir) without failing")
 
@@ -917,7 +927,7 @@ def main() -> int:
             check=True,
         )
         subprocess.run(
-            [sys.executable, verify_tool, game_sealed, "--manifest", manifest_path, "--assets", assets_dir],
+            [sys.executable, verify_tool, game_sealed, "--allow-dev-build", "--manifest", manifest_path, "--assets", assets_dir],
             check=True,
         )
         print("PASS: E2E manifest generation, binary sealing, and release verification")

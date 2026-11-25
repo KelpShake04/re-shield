@@ -17,6 +17,12 @@ jobs:
       # The sources must also compile as C++ (engines may compile them into a C++ module).
       - run: for f in src/*.c; do c++ -x c++ -std=c++11 -fsyntax-only -Wall -Wextra -Wpedantic -Werror -Iinclude "$f" || exit 1; done
       - run: python3 tests/fuzz/test_parser_regressions.py
+      # The development marker must survive the linker's dead-section removal (dev-build guard).
+      - run: |
+          cc -std=c11 -O2 -Iinclude -DRESHIELD_ALLOW_UNSEALED -ffunction-sections -fdata-sections \
+            examples/sample_game.c src/*.c -Wl,--gc-sections -o /tmp/gc_game
+          strip /tmp/gc_game
+          grep -q RESHIELD-DEV-BUILD-v1 /tmp/gc_game
       # `ld.so ./prog` makes /proc/self/exe the loader: must be an error exit, never a crash (>=128).
       - run: |
           cp build/integrity_demo /tmp/pie
@@ -68,6 +74,24 @@ jobs:
           cp -R examples/assets dist/assets
           echo "debug symbols" > dist/assets/game.pdb
 
+      # make all gives a DEVELOPMENT build: the action refuses it unless allow-dev-build is set.
+      - name: The action refuses a development build
+        id: refused
+        continue-on-error: true
+        uses: ./
+        with:
+          binary: dist/game
+          assets: dist/assets
+          strip: "true"
+
+      - name: The refusal happened and left the binary and assets alone
+        env:
+          OUTCOME: ${{ steps.refused.outcome }}
+        run: |
+          test "$OUTCOME" = "failure"
+          test ! -e dist/game.manifest
+          cmp build/sample_game dist/game
+
       - name: Seal with the action
         id: seal
         uses: ./
@@ -77,6 +101,7 @@ jobs:
           exclude: |
             *.pdb
           strip: "true"
+          allow-dev-build: "true"
 
       - name: Sealed binary runs, manifest honors exclude, build id output matches
         env:
@@ -187,6 +212,15 @@ jobs:
           Expect 2 "tampered DLL .text is TAMPERED" build\mod_tampered.dll 'status=TAMPERED'
           exit 0  # the last native call exited 2 on purpose; every real failure above throws
 
+      # Dev-build guard on MSVC output: the marker is in the development object and EXE (it survives
+      # /OPT:REF) and absent from the release object and DLL; the release tools refuse the former and
+      # accept the latter. (build\reshield.lib is the DLL's import library by now: check objects.)
+      - name: Dev-build guard (marker present in dev, absent in release, tools refuse dev)
+        shell: pwsh
+        run: |
+          python tests\test_dev_build_guard.py --dev-artifact build\lib\integrity_common.obj --dev-artifact build\integrity_demo.exe --dev-bin build\integrity_demo.exe --release-artifact build\dll\integrity_common.obj --release-artifact build\reshield.dll --release-bin build\reshield.dll
+          if ($LASTEXITCODE -ne 0) { throw "dev-build guard test failed" }
+
       - name: Seal, run, tamper, verify_release (integrity_demo)
         shell: pwsh
         run: |
@@ -208,7 +242,7 @@ jobs:
           if ($o -notmatch 'status=OK') { throw "sealed EXE did not print status=OK" }
           python tools\seal_binary.py build\demo_sealed.exe --verify-only
           if ($LASTEXITCODE -ne 0) { throw "verify-only failed" }
-          python tools\verify_release.py build\demo_sealed.exe
+          python tools\verify_release.py build\demo_sealed.exe --allow-dev-build
           if ($LASTEXITCODE -ne 0) { throw "verify_release failed" }
 
           Expect .\build\demo_sealed.exe 4 "unsigned sealed EXE: WinVerifyTrust codesign check fails" @("--check-codesign") | Out-Null
@@ -251,7 +285,7 @@ jobs:
           # seal first, sign after: the seal and the release checks still hold on the signed file
           python tools\seal_binary.py build\demo_signed.exe --verify-only
           if ($LASTEXITCODE -ne 0) { throw "verify-only on signed EXE failed" }
-          python tools\verify_release.py build\demo_signed.exe
+          python tools\verify_release.py build\demo_signed.exe --allow-dev-build
           if ($LASTEXITCODE -ne 0) { throw "verify_release on signed EXE failed" }
 
           $o = Expect .\build\demo_signed.exe 0 "signed sealed EXE: WinVerifyTrust passes" @("--check-codesign")
@@ -297,7 +331,7 @@ jobs:
           Copy-Item build\sample_game.exe build\sample_game_sealed.exe
           python tools\seal_binary.py build\sample_game_sealed.exe --manifest build\sample_assets.manifest --build-id 1
           if ($LASTEXITCODE -ne 0) { throw "seal failed" }
-          python tools\verify_release.py build\sample_game_sealed.exe --manifest build\sample_assets.manifest --assets examples\assets
+          python tools\verify_release.py build\sample_game_sealed.exe --allow-dev-build --manifest build\sample_assets.manifest --assets examples\assets
           if ($LASTEXITCODE -ne 0) { throw "verify_release failed" }
           .\build\sample_game_sealed.exe build\sample_assets.manifest examples\assets STAGE-1-CLEAR-2026
           if ($LASTEXITCODE -ne 0) { throw "sealed sample_game exit=$LASTEXITCODE" }
@@ -317,6 +351,7 @@ jobs:
           binary: build/act/game.exe
           assets: build/act/assets
           python: python
+          allow-dev-build: "true"  # the demo EXE is built with /DRESHIELD_ALLOW_UNSEALED
 
       - name: Action-sealed EXE runs, then a tampered asset is refused
         shell: pwsh

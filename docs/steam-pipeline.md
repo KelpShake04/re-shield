@@ -11,6 +11,7 @@ English summary: seal the final build with the composite action (`action.yml`, w
 - 봉인은 **steamcmd 직전**에 한다. SteamPipe에는 업로드 전에 끼울 후처리 훅이 없으므로, 업로드 폴더(depot의 `contentroot`)를 만드는 마지막 CI 단계가 봉인이어야 한다.
 - 봉인 뒤에 파일을 다시 쓰는 도구는 두지 않는다. 봉인 후 strip, UPX 같은 패커, 리소스 편집기, 버전 정보 도구, 안티 바이러스 래퍼는 코드 해시 또는 에셋 해시를 깨뜨린다. 서명은 예외로 봉인 뒤에 한다(코드 섹션만 해시하므로 서명이 해시를 바꾸지 않는다. `--sign`/`--sign-cmd`가 이 순서를 지킨다).
 - 이미 실제 서명이 들어간 Mach-O는 `reshield_release.py`가 거부한다(봉인 먼저, 서명은 나중).
+- **개발 빌드는 거부된다.** `make lib`/`make shared`의 기본값은 개발 빌드(`RESHIELD_ALLOW_UNSEALED`)이고, 그대로 배포하면 레코드의 sealed 바이트 하나를 0으로 바꾸는 것만으로 코드·매니페스트 검사가 통과한다. 배포용 re-shield는 `make release-shared` 또는 `make ALLOW_UNSEALED=0 lib`로 만들거나, 자기 빌드에서 `-DRESHIELD_ALLOW_UNSEALED`를 뺀다. 개발 빌드에만 들어 있는 마커(`RESHIELD-DEV-BUILD-v1`)가 바이너리에서 발견되면 `reshield_release.py`와 `verify_release.py`(그리고 action)는 종료 코드 2로 거부하고, `reshield_release.py`는 파일을 바꾸기 전에 멈춘다. `--allow-dev-build`(action 입력 `allow-dev-build: "true"`)는 데모·CI 전용이고 쓰면 경고가 나온다. 한계: 마커는 배포 실수를 막는 장치이지 방어가 아니다. 공격자가 마커를 지우는 것은 막지 못한다([integrity-verification.md](integrity-verification.md#4-개발-옵션과-경고)).
 - `tools/reshield_release.py`의 단계: strip, `gen_manifest.py`, `seal_binary.py`, 서명, `verify_release.py`. 어느 하나라도 실패하면 0이 아닌 종료 코드로 끝나므로 잡이 실패하고 업로드 단계로 넘어가지 않는다.
 
 ## 2. GitHub Actions 예제
@@ -44,11 +45,11 @@ jobs:
 ```
 
 - **참조 고정**: `action.yml`은 아직 릴리스(태그)에 들어 있지 않다. 그래서 위 예제는 `@main`이지만, 공급망 안전을 위해 검토한 커밋 **SHA 고정을 권장**한다. 태그가 생기기 전까지 `@v...` 형태는 쓸 수 없다.
-- 입력: `binary`(필수), `assets`, `exclude`(줄바꿈 구분 glob), `build-id`, `strip`, `sign-cmd`, `sign`(macOS identity), `python`(기본 `python3`).
+- 입력: `binary`(필수), `assets`, `exclude`(줄바꿈 구분 glob), `build-id`, `strip`, `sign-cmd`, `sign`(macOS identity), `python`(기본 `python3`), `allow-dev-build`(기본 `"false"`, 개발 빌드 거부를 푸는 데모·CI 전용 스위치. 1절 참고).
 - 출력: `manifest`(생성된 매니페스트 경로, `assets`가 없으면 빈 값), `build-id`.
 - 모든 입력은 환경 변수로 스크립트에 전달한다(`${{ inputs.* }}`를 셸 스크립트에 직접 끼우지 않는다). `sign-cmd`는 셸을 거치지 않고 POSIX 셸 규칙으로 쪼개 실행하므로 Windows 경로는 슬래시로 쓴다.
 - 매니페스트는 기본적으로 `<binary 폴더>/<binary 이름>.manifest`에 생기고, 런타임은 `reshield_verify_app("game.manifest", "data", ...)`처럼 실행 파일 폴더 기준으로 찾는다. **매니페스트도 depot에 들어가야 한다.**
-- 이 저장소의 CI(`action-test` 잡, Linux·macOS, 그리고 `windows-msvc` 잡의 한 단계)가 이 action을 `uses: ./`로 실제로 호출해 샘플 게임을 봉인하고 실행한 뒤, 에셋 1바이트 변조를 거부하는지 확인한다. 이는 sample_game 기준이며 실제 게임이나 steamcmd까지의 검증은 아니다.
+- 이 저장소의 CI(`action-test` 잡, Linux·macOS, 그리고 `windows-msvc` 잡의 한 단계)가 이 action을 `uses: ./`로 실제로 호출해 샘플 게임을 봉인하고 실행한 뒤, 에셋 1바이트 변조를 거부하는지 확인한다. 그 샘플은 개발 빌드라서 `allow-dev-build: "true"`로 봉인하고, 같은 잡이 이 입력이 없을 때 action이 실패하고 파일을 건드리지 않는지도 확인한다. 이는 sample_game 기준이며 실제 게임이나 steamcmd까지의 검증은 아니다.
 
 ## 3. steamcmd `run_app_build` 예
 
@@ -96,7 +97,7 @@ steamcmd +login "$STEAM_USER" +run_app_build "$PWD/app_build_1234.vdf" +quit
 런타임은 매니페스트에 적힌 파일이 **디스크에 있는지** 확인한다(없거나 해시가 다르면 에셋 불일치, 즉 `ASSET_TAMPERED`로 보고된다). 그래서 depot에서 `FileExclusion`으로 빠지는 파일이 매니페스트에 들어 있으면, 플레이어 PC에서 "파일 없음" 오탐이 난다. 반대로 매니페스트에 없는 추가 파일은 감지하지 않는다.
 
 - 가장 안전한 방법(권장): staging 폴더에 **실제로 올릴 파일만** 복사한 뒤 그 폴더를 `assets`와 depot `contentroot`로 쓴다. 이러면 `exclude`가 필요 없고 두 목록이 어긋날 수 없다.
-- `exclude`를 쓸 때: `gen_manifest.py`는 상대 POSIX 경로에 `fnmatch.fnmatchcase`(대소문자 구분, `*`가 `/`도 매칭)를 쓴다. Steam `FileExclusion`의 패턴 문법이 이와 같은지는 **확인하지 못했다**. 같은 문자열을 양쪽에 넣었다고 같은 파일 집합이 된다고 가정하지 말고, 첫 업로드 뒤 depot 파일 목록과 매니페스트를 대조해 본다.
+- `exclude`를 쓸 때: `gen_manifest.py`는 상대 POSIX 경로에 `fnmatch.fnmatchcase`(대소문자 구분, `*`가 `/`도 매칭)를 쓴다. Steam `FileExclusion`의 패턴 문법이 이와 같은지는 **확인하지 못했다**. 같은 문자열을 양쪽에 넣었다고 같은 파일 집합이 된다고 가정하지 말고, 첫 업로드 뒤 depot 파일 목록과 매니페스트를 대조해 본다. 어떤 파일에도 매치되지 않는 `--exclude` 패턴(오타, `./x`, 역슬래시 경로)은 `gen_manifest.py`가 stderr에 경고한다(종료 코드는 그대로이므로 CI 로그를 확인한다).
 - `steam_appid.txt`: 개발용으로 Steam이 읽는 파일이다. 배포 빌드에 넣지 않기를 **권장**한다(Steam 경유 실행 확인을 무력화할 수 있다는 것이 Valve 문서의 경고로 알려져 있다). `verify_release.py`는 이 파일이 실행 파일 폴더, `--assets`, 매니페스트 항목에 있으면 경고를 출력한다. 경고는 종료 코드를 바꾸지 않으므로, 막으려면 CI에서 로그를 보거나 staging에서 직접 제외한다.
 
 ## 4. 빌드 ID
