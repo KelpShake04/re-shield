@@ -17,6 +17,8 @@ English | [한국어](README.ko.md)
 - **Strict manifest (v2).** A strict manifest also reports files that were added next to your assets (`RESHIELD_ERR_ASSET_EXTRA`, value 9); `#allow` globs exempt paths such as saves. See [Quickstart](#quickstart) and [docs/integrity-verification.md](docs/integrity-verification.md#10-매니페스트-v2와-strict-모드).
 - **SHA-256 hardware acceleration.** The block compression runs on CPU instructions (AArch64 SHA2, x86-64 SHA-NI) when the CPU and compiler are known to support them, and falls back to portable C otherwise (`-DRESHIELD_NO_HW_SHA` compiles the hardware path out). Measured with `make bench`: 1441 MB/s on GitHub Actions `macos-latest`, 1813 on `ubuntu-latest`, 1582 on `windows-latest`; on a local Apple M1 Pro 2223 MB/s against 220 MB/s for the portable code on the same machine. Conditions and what was not verified: [docs/integrity-verification.md](docs/integrity-verification.md#9-sha-256-하드웨어-가속).
 - **Save-file seal.** `reshield_save_tag()` / `reshield_save_verify()` (`include/reshield/save_seal.h`) add an HMAC-SHA256 tag to detect casual edits and corruption of save or config files. The key lives in your binary, so it does not stop a determined attacker. See [docs/save-seal.md](docs/save-seal.md).
+- **Incremental re-verification.** `reshield_code_scan_begin()` / `reshield_code_scan_step()` (`include/reshield/integrity.h`) hash the code section in chunks of at most `max_bytes` per call, so a frame loop can re-check it without one long stall. The caller owns the 192-byte state; no `malloc`. See [docs/incremental-scan.md](docs/incremental-scan.md).
+- **Verified asset loading.** `reshield_load_verified_asset()` / `reshield_load_verified_app_asset()` read an asset once and return the exact bytes that were hashed (no check/use race); release the buffer with `reshield_free_asset()`, not `free()`. See [docs/asset-loading.md](docs/asset-loading.md).
 - **Engine bindings and CI.** `reshield_check_json()` takes and returns flat C types only; a C# P/Invoke binding (`bindings/csharp/Reshield.cs`) and an untested Unity package skeleton (`bindings/unity/com.reshield.guard`) call it. `action.yml` is a composite GitHub Action that runs `tools/reshield_release.py` (see [docs/steam-pipeline.md](docs/steam-pipeline.md)).
 - **Report only.** The library never kills the process. `reshield_verify()` returns a status and fills a `reshield_report_t`. Your app decides what to do. `reshield_report_to_json()` writes the report as one line of JSON (`"v":1`) for logs or telemetry.
 
@@ -136,7 +138,7 @@ A manifest file that cannot be opened or parsed (wrong path, missing file, malfo
 
 Strict mode catches files that were added next to your assets (a proxy DLL, a crack, a mod). Generate the manifest with `python3 tools/gen_manifest.py assets -o game.manifest --strict --allow "saves/*"` (or pass `--strict --allow` to `tools/reshield_release.py`). The manifest then starts with `#reshield-manifest v2 strict` and `#allow` lines, which are sealed with the root hash. At runtime any file, symlink or special file under the asset directory that is neither listed nor allowed gives `ASSET_EXTRA` (`RESHIELD_ERR_ASSET_EXTRA`, value 9), after the listed assets verified. Names are compared as bytes, so an NFD name on APFS can be a false positive, and a game that writes saves into the asset directory needs an `#allow`. It does not stop an attacker who re-seals the binary and manifest together. Details and limits: [docs/integrity-verification.md](docs/integrity-verification.md#10-매니페스트-v2와-strict-모드). A `#` line is now only accepted at the top of a manifest (before the first entry); it used to be skipped anywhere.
 
-If you load an asset after verifying it by path, the file can change in between (TOCTOU). Read the file into memory, check it with `reshield_verify_buffer()`, then use that buffer. See `examples/sample_game.c` for a complete program.
+If you load an asset after verifying it by path, the file can change in between (TOCTOU). Read the file into memory, check it with `reshield_verify_buffer()`, then use that buffer. `reshield_load_verified_asset()` and `reshield_load_verified_app_asset()` do this read-and-hash in one step and return the verified buffer ([docs/asset-loading.md](docs/asset-loading.md)). See `examples/sample_game.c` for a complete program.
 
 ## Development and release builds
 
@@ -151,7 +153,7 @@ If you load an asset after verifying it by path, the file can change in between 
 
 ## Shared library and C++
 
-- `make shared` builds `build/libreshield.so` (`build/libreshield.dylib` on macOS) for module mode; `make release-shared` builds the release flavor (`ALLOW_UNSEALED=0`) in `build/release/`. On Windows the DLL is built with `cl /LD ... /link /DEF:reshield.def`, which exports only the subset an engine binding needs (`reshield_verify_code_section`, `reshield_verify_code_page_wx`, `reshield_verify_app`, `reshield_check_json`, `reshield_report_to_json`, `reshield_status_name`, `reshield_platform_name`); a POSIX shared library exports the whole public API. Seal the library with `tools/seal_binary.py`.
+- `make shared` builds `build/libreshield.so` (`build/libreshield.dylib` on macOS) for module mode; `make release-shared` builds the release flavor (`ALLOW_UNSEALED=0`) in `build/release/`. On Windows the DLL is built with `cl /LD ... /link /DEF:reshield.def`, which exports only the subset an engine binding needs (`reshield_verify_code_section`, `reshield_code_scan_begin`, `reshield_code_scan_step`, `reshield_verify_code_page_wx`, `reshield_verify_app`, `reshield_check_json`, `reshield_report_to_json`, `reshield_status_name`, `reshield_platform_name`, `reshield_load_verified_app_asset`, `reshield_free_asset`); a POSIX shared library exports the whole public API. Seal the library with `tools/seal_binary.py`.
 - `src/*.c` and the public headers also compile as C++ (checked in CI as a syntax-only gate: `c++ -std=c++11 -fsyntax-only` on Linux and macOS, `cl /TP` on Windows). The gate does not link or run C++ objects.
 
 ## Known limitations
@@ -177,6 +179,8 @@ The design and verification guides are written in Korean.
 - [docs/fuzzing.md](docs/fuzzing.md): sanitizers and fuzzing, in English.
 - [docs/crackme-lab.md](docs/crackme-lab.md): crackme lab, patch your own sealed binary to see what re-shield stops and what it cannot (Korean).
 - [docs/engines-unity.md](docs/engines-unity.md): C# binding and an untested Unity package skeleton (Korean).
+- [docs/incremental-scan.md](docs/incremental-scan.md): chunked code-section re-verification for a frame loop, cost measurements and limits (Korean).
+- [docs/asset-loading.md](docs/asset-loading.md): load an asset and get back the exact bytes that were verified, in English.
 - [docs/save-seal.md](docs/save-seal.md): HMAC-SHA256 tag to detect casual edits and corruption of save/config files; not a defense against a determined attacker (Korean, English summary at the top).
 - Public API: `include/reshield/reshield.h`, `integrity.h`, `manifest.h`, `attestation.h`, `save_seal.h`.
 
