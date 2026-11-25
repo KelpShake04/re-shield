@@ -151,7 +151,7 @@ If you load an asset after verifying it by path, the file can change in between 
 
 ## Shared library and C++
 
-- `make shared` builds `build/libreshield.so` (`build/libreshield.dylib` on macOS) for module mode; `make release-shared` builds the release flavor (`ALLOW_UNSEALED=0`) in `build/release/`. On Windows the DLL is built with `cl /LD ... /link /DEF:reshield.def`, which exports only the subset an engine binding needs (`reshield_verify_code_section`, `reshield_verify_code_page_wx`, `reshield_verify_app`, `reshield_check_json`, `reshield_report_to_json`, `reshield_status_name`); a POSIX shared library exports the whole public API. Seal the library with `tools/seal_binary.py`.
+- `make shared` builds `build/libreshield.so` (`build/libreshield.dylib` on macOS) for module mode; `make release-shared` builds the release flavor (`ALLOW_UNSEALED=0`) in `build/release/`. On Windows the DLL is built with `cl /LD ... /link /DEF:reshield.def`, which exports only the subset an engine binding needs (`reshield_verify_code_section`, `reshield_verify_code_page_wx`, `reshield_verify_app`, `reshield_check_json`, `reshield_report_to_json`, `reshield_status_name`, `reshield_platform_name`); a POSIX shared library exports the whole public API. Seal the library with `tools/seal_binary.py`.
 - `src/*.c` and the public headers also compile as C++ (checked in CI as a syntax-only gate: `c++ -std=c++11 -fsyntax-only` on Linux and macOS, `cl /TP` on Windows). The gate does not link or run C++ objects.
 
 ## Known limitations

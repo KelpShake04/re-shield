@@ -29,6 +29,7 @@
 typedef reshield_integrity_status_t (*verify_code_fn)(reshield_integrity_result_t *);
 typedef reshield_attestation_status_t (*verify_wx_fn)(void);
 typedef int (*check_json_fn)(const char *, const char *, char *, size_t);
+typedef const char *(*platform_name_fn)(void);
 
 static const char *status_name(reshield_integrity_status_t st) {
     switch (st) {
@@ -55,6 +56,7 @@ int main(int argc, char **argv) {
     verify_code_fn verify_code;
     verify_wx_fn verify_wx;
     check_json_fn check_json;
+    platform_name_fn platform_name;
 #ifdef _WIN32
     wchar_t wpath[MAX_PATH];
     if (MultiByteToWideChar(CP_UTF8, 0, argv[1], -1, wpath, MAX_PATH) == 0) {
@@ -68,6 +70,7 @@ int main(int argc, char **argv) {
     verify_code = (verify_code_fn)(void *)GetProcAddress(lib, "reshield_verify_code_section");
     verify_wx = (verify_wx_fn)(void *)GetProcAddress(lib, "reshield_verify_code_page_wx");
     check_json = (check_json_fn)(void *)GetProcAddress(lib, "reshield_check_json");
+    platform_name = (platform_name_fn)(void *)GetProcAddress(lib, "reshield_platform_name");
 #else
     void *lib = dlopen(argv[1], RTLD_NOW | RTLD_LOCAL);
     if (lib == NULL) {
@@ -78,8 +81,9 @@ int main(int argc, char **argv) {
     *(void **)(&verify_code) = dlsym(lib, "reshield_verify_code_section");
     *(void **)(&verify_wx) = dlsym(lib, "reshield_verify_code_page_wx");
     *(void **)(&check_json) = dlsym(lib, "reshield_check_json");
+    *(void **)(&platform_name) = dlsym(lib, "reshield_platform_name");
 #endif
-    if (verify_code == NULL || verify_wx == NULL || check_json == NULL) {
+    if (verify_code == NULL || verify_wx == NULL || check_json == NULL || platform_name == NULL) {
         fprintf(stderr, "symbol not found in %s\n", argv[1]);
         return 11;
     }

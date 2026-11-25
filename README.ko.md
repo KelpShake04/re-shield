@@ -144,7 +144,7 @@ python3 tools/verify_release.py build/game --manifest build/game.manifest --asse
 
 ## 공유 라이브러리와 C++
 
-- `make shared`는 모듈 모드용 `build/libreshield.so`(macOS는 `build/libreshield.dylib`)를, `make release-shared`는 릴리스판(`ALLOW_UNSEALED=0`)을 `build/release/`에 만든다. Windows DLL은 `cl /LD ... /link /DEF:reshield.def`로 만들며, `reshield.def`는 엔진 바인딩에 필요한 부분집합(`reshield_verify_code_section`, `reshield_verify_code_page_wx`, `reshield_verify_app`, `reshield_check_json`, `reshield_report_to_json`, `reshield_status_name`)만 export한다. POSIX 공유 라이브러리는 공개 API 전체가 보인다. 라이브러리는 `tools/seal_binary.py`로 봉인한다.
+- `make shared`는 모듈 모드용 `build/libreshield.so`(macOS는 `build/libreshield.dylib`)를, `make release-shared`는 릴리스판(`ALLOW_UNSEALED=0`)을 `build/release/`에 만든다. Windows DLL은 `cl /LD ... /link /DEF:reshield.def`로 만들며, `reshield.def`는 엔진 바인딩에 필요한 부분집합(`reshield_verify_code_section`, `reshield_verify_code_page_wx`, `reshield_verify_app`, `reshield_check_json`, `reshield_report_to_json`, `reshield_status_name`, `reshield_platform_name`)만 export한다. POSIX 공유 라이브러리는 공개 API 전체가 보인다. 라이브러리는 `tools/seal_binary.py`로 봉인한다.
 - `src/*.c`와 공개 헤더는 C++로도 컴파일된다(CI의 구문 검사 게이트: Linux·macOS는 `c++ -std=c++11 -fsyntax-only`, Windows는 `cl /TP`). C++ 오브젝트를 링크·실행하는 검증은 하지 않는다.
 
 ## 개발·테스트 빌드 옵션

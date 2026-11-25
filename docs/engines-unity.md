@@ -74,4 +74,3 @@ Mono의 `Assembly-CSharp.dll`은 IL(관리 코드)이고 JIT가 메모리에서 
 - 시작 시 1회 검사는 이후의 메모리 패치(Cheat Engine 등)를 보지 못한다.
 - 읽기만 하는 에셋 추출·리버싱(Il2CppDumper 등)은 변조가 아니므로 막지 못한다.
 - 한 줄 요약: "정직한 사용자의 깨진 설치"와 "게으른 변조"를 본다. 의지 있는 공격자는 못 막는다. 전체 한계: [integrity-verification.md](integrity-verification.md#5-한계).
-- 알려진 빈틈: `reshield.def`에 `reshield_platform_name`이 없어 Windows DLL에서는 `Guard.PlatformName()`이 `null`을 돌려준다(`Check()`에는 영향 없음).
