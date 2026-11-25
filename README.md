@@ -14,6 +14,10 @@ English | [한국어](README.ko.md)
 - **W^X check.** The code segment must be readable and executable, never writable (`mach_vm_region` on macOS, `/proc/self/maps` on Linux, `VirtualQuery` on Windows).
 - **OS code-signature check.** `SecCodeCheckValidity` on macOS, `WinVerifyTrust` on Windows. By default any valid signer passes. Set `cfg.codesign_requirement` to pin the signer: a code requirement string on macOS, `leaf-sha256:<64 hex>` (SHA-256 of the signing certificate) on Windows.
 - **Module mode.** Link re-shield into a shared library (`.so` / `.dylib` / `.dll`) instead of the executable and the library is the sealed, checked image; the host executable (an engine, say) needs no re-shield code and is not sealed. See [Known limitations](#known-limitations).
+- **Strict manifest (v2).** A strict manifest also reports files that were added next to your assets (`RESHIELD_ERR_ASSET_EXTRA`, value 9); `#allow` globs exempt paths such as saves. See [Quickstart](#quickstart) and [docs/integrity-verification.md](docs/integrity-verification.md#10-매니페스트-v2와-strict-모드).
+- **SHA-256 hardware acceleration.** The block compression runs on CPU instructions (AArch64 SHA2, x86-64 SHA-NI) when the CPU and compiler are known to support them, and falls back to portable C otherwise (`-DRESHIELD_NO_HW_SHA` compiles the hardware path out). Measured with `make bench`: 1441 MB/s on GitHub Actions `macos-latest`, 1813 on `ubuntu-latest`, 1582 on `windows-latest`; on a local Apple M1 Pro 2223 MB/s against 220 MB/s for the portable code on the same machine. Conditions and what was not verified: [docs/integrity-verification.md](docs/integrity-verification.md#9-sha-256-하드웨어-가속).
+- **Save-file seal.** `reshield_save_tag()` / `reshield_save_verify()` (`include/reshield/save_seal.h`) add an HMAC-SHA256 tag to detect casual edits and corruption of save or config files. The key lives in your binary, so it does not stop a determined attacker. See [docs/save-seal.md](docs/save-seal.md).
+- **Engine bindings and CI.** `reshield_check_json()` takes and returns flat C types only; a C# P/Invoke binding (`bindings/csharp/Reshield.cs`) and an untested Unity package skeleton (`bindings/unity/com.reshield.guard`) call it. `action.yml` is a composite GitHub Action that runs `tools/reshield_release.py` (see [docs/steam-pipeline.md](docs/steam-pipeline.md)).
 - **Report only.** The library never kills the process. `reshield_verify()` returns a status and fills a `reshield_report_t`. Your app decides what to do. `reshield_report_to_json()` writes the report as one line of JSON (`"v":1`) for logs or telemetry.
 
 ## When to use it, and when not to
@@ -44,6 +48,8 @@ It is not anti-cheat, DRM or a kernel-level defense. It does not block debuggers
 | Windows x64, PE32+ (MSVC) | yes | `windows-latest` with `cl`: build, seal, run, flip one `.text` byte and expect `CODE_TAMPERED`, sealed-then-signed EXE with a throwaway self-signed certificate (valid signature and `leaf-sha256:` pin match, mismatch, bad format), module mode (a release `reshield.dll` built with `reshield.def`, checked by an unsealed host EXE: unsealed, sealed OK, tampered, including the `reshield_check_json` output) and a C++ compile gate (`cl /TP`) |
 | Windows with mingw-w64 | cross-compile and tool tests only | Not run in CI. The default link leaves one relocation inside `.text`, so sealing is refused. Linking with `-Wl,--disable-dynamicbase -Wl,--disable-reloc-section` allows sealing but turns ASLR off, so it is not recommended for shipping. |
 | Windows ARM64, 32-bit, fat/universal Mach-O | no | Sealing is refused or fails closed |
+
+Besides the platform jobs above, CI runs `csharp` (`make csharp-test`), `action-test` (the composite action on Ubuntu and macOS: refuses a development build, seals with `exclude`, refuses a tampered asset) and `windows-msvc-probe` (PE properties of an MSVC-linked EXE). The complete job list is in [docs/integrity-verification.md](docs/integrity-verification.md#11-도구-makefile-타깃-ci-잡).
 
 Not verified: signatures from a public CA, timestamped signatures, and revocation checks on Windows. A real macOS Team ID was not tested either; only ad-hoc negative and positive requirement tests were. Details: [Windows section](docs/integrity-verification.md#7-windows-pe32-x64).
 
@@ -165,21 +171,25 @@ Full list: [docs/integrity-verification.md](docs/integrity-verification.md#5-한
 
 The design and verification guides are written in Korean.
 
-- [docs/architecture.md](docs/architecture.md): design, the 96-byte `RSHLDCHK` v2 record, limits.
-- [docs/integrity-verification.md](docs/integrity-verification.md): sealing pipeline, runtime integration, manifest format rules, Windows details.
+- [docs/architecture.md](docs/architecture.md): design, module map and source file list, the 96-byte `RSHLDCHK` v2 record, limits.
+- [docs/integrity-verification.md](docs/integrity-verification.md): sealing pipeline, runtime integration, manifest format rules, Windows details, module mode, SHA-256 acceleration, strict manifest, tools, Makefile targets and CI jobs.
 - [docs/steam-pipeline.md](docs/steam-pipeline.md): sealing in GitHub Actions (`action.yml`) before a `steamcmd` upload; what was not tested (Korean).
 - [docs/fuzzing.md](docs/fuzzing.md): sanitizers and fuzzing, in English.
 - [docs/crackme-lab.md](docs/crackme-lab.md): crackme lab, patch your own sealed binary to see what re-shield stops and what it cannot (Korean).
 - [docs/engines-unity.md](docs/engines-unity.md): C# binding and an untested Unity package skeleton (Korean).
 - [docs/save-seal.md](docs/save-seal.md): HMAC-SHA256 tag to detect casual edits and corruption of save/config files; not a defense against a determined attacker (Korean, English summary at the top).
-- Public API: `include/reshield/reshield.h`, `integrity.h`, `manifest.h`, `attestation.h`.
+- Public API: `include/reshield/reshield.h`, `integrity.h`, `manifest.h`, `attestation.h`, `save_seal.h`.
 
 ## Testing
 
 ```bash
 make all test release-demo      # build, unit tests, sealed demo
 make sanitize                   # same tests under ASan + UBSan
+make bench                      # SHA-256 throughput, active backend vs portable
+make csharp-test                # C# binding (skips without a dotnet SDK; not part of make test)
 ```
+
+`make test` already includes the module-mode test (`module-test`), the development-build guard (`guard-test`), the SHA-256 acceleration test and the save-seal test. All Makefile targets and CI jobs: [docs/integrity-verification.md](docs/integrity-verification.md#11-도구-makefile-타깃-ci-잡).
 
 Fuzzing (libFuzzer harnesses and PE parser tests) needs clang with libFuzzer. See [docs/fuzzing.md](docs/fuzzing.md).
 

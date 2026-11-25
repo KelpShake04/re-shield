@@ -48,7 +48,13 @@ make all test
 make release-demo
 ```
 
-`make test`는 SHA-256 NIST 테스트 벡터, 매니페스트/에셋 변조 탐지, W^X 페이지 권한 검증, macOS 코드 서명 검증, 코드 섹션 1바이트 손상 탐지, `-DRESHIELD_DISABLE` 개발 빌드를 모두 검증한다.
+`make test`는 SHA-256 NIST 테스트 벡터, 매니페스트/에셋 변조 탐지, W^X 페이지 권한 검증, macOS 코드 서명 검증, 코드 섹션 1바이트 손상 탐지, `-DRESHIELD_DISABLE` 개발 빌드를 모두 검증한다. 이 밖에 다음도 실행한다(mingw 타깃은 `crackme`·`module-test`·`guard-test` 제외).
+
+- `crackme`(`tests/test_crackme_lab.py`), `module-test`(§8), `guard-test`(§4의 개발 빌드 마커)
+- SHA-256 가속 경로와 이식성 경로의 비트 단위 일치(`tests/test_sha256_accel.c`, §9), save seal(`tests/test_save_seal.c`, HMAC-SHA256 RFC 4231 벡터 등), `RESHIELD_ALLOW_UNSEALED` 없이 컴파일한 라이브러리의 설정 오류 처리(`tests/test_no_allow_unsealed.c`)
+- `tests/test_seal_workflow.py`: 봉인·검증 도구와 `reshield_verify_app()`(`tests/test_verify_app.c`)·매니페스트 규칙·strict 시나리오를 묶은 E2E
+
+`make test`에 들어 있지 않은 타깃: `make bench`(SHA-256 처리량), `make csharp-test`(§11), `make sanitize`, `make fuzz*`([fuzzing.md](fuzzing.md)). 전체 Makefile 타깃과 CI 잡은 §11에 정리했다.
 
 ## 4. 개발 옵션과 경고
 
@@ -63,11 +69,11 @@ make release-demo
 - 로컬 바이너리의 자체 무결성 검증은 바이너리와 매니페스트가 동시에 재봉인되거나 런타임 API가 교체될 경우 우회될 수 있다.
 - macOS 코드 서명 검증(`RESHIELD_CHECK_CODESIGN`)은 `SecCodeCheckValidity`를 requirement `NULL`로 호출해 서명 유효성만 확인하며, 서명 주체(Developer ID/Team ID)는 고정하지 않는다. ad-hoc 서명이나 다른 주체의 유효한 서명으로 재서명한 바이너리도 이 검사는 통과한다. 서명자를 고정하려면 `cfg.codesign_requirement`(또는 `reshield_verify_os_codesign_req()`)에 requirement 문자열을 준다(예: `anchor apple generic and certificate leaf[subject.OU] = "TEAMID"`). 문자열이 파싱되지 않으면 통과시키지 않고 `CODESIGN_INVALID`로 처리한다. 이 저장소에서는 Developer ID 인증서가 없어 ad-hoc 바이너리에 대한 음성·양성 테스트(`anchor apple` 실패, `!anchor apple` 통과, 잘못된 문법 실패)만 검증했고, 실제 Team ID 문자열은 검증하지 못했다. 검증 함수 자체를 패치하는 공격은 이 옵션으로도 막지 못한다.
 - 검증 대상은 메인 EXE가 아니라 봉인 레코드가 들어 있는 이미지다(§8). re-shield를 공유 라이브러리에 넣었다면 그 라이브러리를 봉인해야 하고, 호스트 EXE는 봉인하지 않아도 되며 검사되지도 않는다. 코드 서명 검사는 모듈 모드에서도 프로세스 EXE 기준이다.
-- Linux 런타임은 `.text` 위치를 레코드가 들어 있는 이미지의 파일(메인이면 `/proc/self/exe`, 공유 라이브러리면 절대경로 `dlpi_name`)의 디스크 section header에서 읽는다(로더는 이 헤더를 쓰지 않으므로 파일을 고칠 수 있는 공격자가 바꿀 수 있다). 그래서 범위가 그 이미지(`dl_iterate_phdr` 항목 중 레코드 주소를 포함하는 것)의 실행 가능·쓰기 불가 `PT_LOAD` 안에 완전히 들어가는지 검증하고 아니면 `INTERNAL_ERROR`로 처리한다. 같은 세그먼트 안의 다른 구간으로 돌리는 공격(코드 케이브에 원본 바이트 복사)은 막지 못한다. `ld.so ./prog`로 직접 실행하면 glibc에서는 프로그램 이미지의 `dlpi_name`이 비어 있어 `INTERNAL_ERROR`(fail-closed, 크래시 아님)다(musl에서 프로그램을 절대경로로 주면 그 파일이 맞으므로 정상 판정이 나올 수 있다). 공유 라이브러리를 상대경로(`dlopen("./x.so")`)로 열면 `dlpi_name`이 상대경로라 현재 디렉터리가 바뀌었을 수 있으므로 믿지 않고, `/proc/self/maps`에서 레코드 주소를 포함하는 매핑 줄의 절대경로를 쓴다(`dl_iterate_phdr` 콜백 밖에서 읽는다). 줄은 직접 파싱한다(경로에 공백 가능, 줄 길이 상한 `PATH_MAX+128`, 정적 상태 없음). 주소 범위(`lo <= 앵커 < hi`)가 앵커를 포함하는 매핑만 쓰고, 그 줄이 비정상·과장이거나 경로가 없거나(`[heap]`·익명) `/`로 시작하지 않거나 끝이 ` (deleted)`(로드 뒤 파일이 지워지거나 교체됨)이면 `INTERNAL_ERROR`(fail-closed)다. `/proc`이 없는 환경도 마찬가지다. 이름이 빈 비메인 이미지(`ld.so ./prog`의 프로그램 맵)는 이 폴백을 쓰지 않고 그대로 `INTERNAL_ERROR`다. 파일 내용을 읽는 위치는 절대경로 `dlpi_name`일 때와 같고(디스크 section header, 범위 검증 동일), 테스트가 상대경로의 정상·변조·공백 경로·삭제·교체를 확인한다. musl(dynamic, static, static-pie)과 glibc를 CI에서 확인하고, 같은 검사를 네이티브 aarch64 러너(`ubuntu-24.04-arm`, glibc와 Alpine arm64 musl)에서도 돌린다(`make sanitize`와 퍼저 회귀는 x86-64 러너에서만). `seal_binary.py`의 ELF 경로는 `e_machine`을 검사하지 않는 아키텍처 무관 코드이며, aarch64 바이너리의 봉인·검증은 이 CI로 확인했다. `seal_binary.py`는 `DT_TEXTREL`/`DF_TEXTREL`이 있는 ELF(로더가 `.text`를 패치)를 거부한다.
+- Linux 런타임은 `.text` 위치를 레코드가 들어 있는 이미지의 파일(메인이면 `/proc/self/exe`, 공유 라이브러리면 절대경로 `dlpi_name`, 상대경로면 아래의 `/proc/self/maps`로 얻은 절대경로)의 디스크 section header에서 읽는다(로더는 이 헤더를 쓰지 않으므로 파일을 고칠 수 있는 공격자가 바꿀 수 있다). 그래서 범위가 그 이미지(`dl_iterate_phdr` 항목 중 레코드 주소를 포함하는 것)의 실행 가능·쓰기 불가 `PT_LOAD` 안에 완전히 들어가는지 검증하고 아니면 `INTERNAL_ERROR`로 처리한다. 같은 세그먼트 안의 다른 구간으로 돌리는 공격(코드 케이브에 원본 바이트 복사)은 막지 못한다. `ld.so ./prog`로 직접 실행하면 glibc에서는 프로그램 이미지의 `dlpi_name`이 비어 있어 `INTERNAL_ERROR`(fail-closed, 크래시 아님)다(musl에서 프로그램을 절대경로로 주면 그 파일이 맞으므로 정상 판정이 나올 수 있다). 공유 라이브러리를 상대경로(`dlopen("./x.so")`)로 열면 `dlpi_name`이 상대경로라 현재 디렉터리가 바뀌었을 수 있으므로 믿지 않고, `/proc/self/maps`에서 레코드 주소를 포함하는 매핑 줄의 절대경로를 쓴다(`dl_iterate_phdr` 콜백 밖에서 읽는다). 줄은 직접 파싱한다(경로에 공백 가능, 줄 길이 상한 `PATH_MAX+128`, 정적 상태 없음). 주소 범위(`lo <= 앵커 < hi`)가 앵커를 포함하는 매핑만 쓰고, 그 줄이 비정상·과장이거나 경로가 없거나(`[heap]`·익명) `/`로 시작하지 않거나 끝이 ` (deleted)`(로드 뒤 파일이 지워지거나 교체됨)이면 `INTERNAL_ERROR`(fail-closed)다. `/proc`이 없는 환경도 마찬가지다. 이름이 빈 비메인 이미지(`ld.so ./prog`의 프로그램 맵)는 이 폴백을 쓰지 않고 그대로 `INTERNAL_ERROR`다. 파일 내용을 읽는 위치는 절대경로 `dlpi_name`일 때와 같고(디스크 section header, 범위 검증 동일), 테스트가 상대경로의 정상·변조·공백 경로·삭제·교체를 확인한다. musl(dynamic, static, static-pie)과 glibc를 CI에서 확인하고, 같은 검사를 네이티브 aarch64 러너(`ubuntu-24.04-arm`, glibc와 Alpine arm64 musl)에서도 돌린다(`make sanitize`와 퍼저 회귀는 x86-64 러너에서만). `seal_binary.py`의 ELF 경로는 `e_machine`을 검사하지 않는 아키텍처 무관 코드이며, aarch64 바이너리의 봉인·검증은 이 CI로 확인했다. `seal_binary.py`는 `DT_TEXTREL`/`DF_TEXTREL`이 있는 ELF(로더가 `.text`를 패치)를 거부한다.
 - 해시 대상은 `__TEXT,__text`(macOS) 또는 `.text`(Linux)뿐이다. `__stubs`, `.plt`, `__const`, 그리고 레코드가 놓이는 `__DATA`는 해시 대상이 아니다.
 - 레코드는 평문 `RSHLDCHK` 매직으로 시작하므로 바이너리에서 문자열 검색만으로 수정 지점이 드러난다(`seal_binary.py`도 같은 방식으로 찾는다).
 - 소프트웨어 breakpoint는 코드 바이트를 패치하므로, 설치된 상태에서 검사하면 `CODE_TAMPERED`로 보고된다.
-- 기본(v1) 매니페스트는 목록에 있는 파일만 검증한다. 매니페스트에 없는 추가 파일은 감지하지 못한다. 매니페스트 v2 `strict` 모드는 이를 감지한다([8. 매니페스트 v2와 strict 모드](#8-매니페스트-v2와-strict-모드)). 한계는 그 절에 있다.
+- 기본(v1) 매니페스트는 목록에 있는 파일만 검증한다. 매니페스트에 없는 추가 파일은 감지하지 못한다. 매니페스트 v2 `strict` 모드는 이를 감지한다([10. 매니페스트 v2와 strict 모드](#10-매니페스트-v2와-strict-모드)). 한계는 그 절에 있다.
 - fat/universal Mach-O는 `seal_binary.py`가 지원하지 않는다(오류로 종료). 슬라이스별로 봉인해야 한다.
 - `verify_release.py`의 `defined_symbols`는 `nm` 결과를 보고할 뿐 검증하지 않는다.
 
@@ -75,7 +81,7 @@ make release-demo
 
 - 매니페스트는 한 번만 읽어(최대 4 MiB, 일반 파일만) 같은 버퍼로 루트 해시를 계산하고 파싱한다. 해시 후 재오픈하지 않는다.
 - 1023자를 넘는 줄, CR(`\r`, CRLF 포함)·NUL이 있는 매니페스트, 잘못된 줄은 `IO_ERROR`다. 항목이 하나도 없는 매니페스트도 `IO_ERROR`다.
-- `#` 줄은 파일 맨 앞(첫 항목 줄 앞)에서만 허용한다. `# ...` 주석과 v2 지시어만 쓸 수 있고([8절](#8-매니페스트-v2와-strict-모드)), 첫 항목 줄 뒤의 `#` 줄은 주석이어도 `IO_ERROR`다. **동작 변경**: 이전 C 런타임과 `verify_release.py`는 `#` 줄을 어디서든 건너뛰었다(설계 메모가 "C는 거부"라고 쓴 것은 틀렸다). 이제 C 런타임, `verify_release.py`가 같은 규칙으로 파싱하고 두 구현이 일치한다(`tests/test_seal_workflow.py`가 같은 케이스를 둘 다에 넣어 확인). `gen_manifest.py`는 첫 항목 뒤 `#` 줄을 만든 적이 없으므로 생성기로 만든 기존 매니페스트는 영향이 없다.
+- `#` 줄은 파일 맨 앞(첫 항목 줄 앞)에서만 허용한다. `# ...` 주석과 v2 지시어만 쓸 수 있고([10절](#10-매니페스트-v2와-strict-모드)), 첫 항목 줄 뒤의 `#` 줄은 주석이어도 `IO_ERROR`다. **동작 변경**: 이전 C 런타임과 `verify_release.py`는 `#` 줄을 어디서든 건너뛰었다(설계 메모가 "C는 거부"라고 쓴 것은 틀렸다). 이제 C 런타임, `verify_release.py`가 같은 규칙으로 파싱하고 두 구현이 일치한다(`tests/test_seal_workflow.py`가 같은 케이스를 둘 다에 넣어 확인). `gen_manifest.py`는 첫 항목 뒤 `#` 줄을 만든 적이 없으므로 생성기로 만든 기존 매니페스트는 영향이 없다.
 - `reshield_verify()`는 이 `IO_ERROR`(경로 오류, 파일 없음, 형식 오류)를 `RESHIELD_ERR_MANIFEST_IO`(값 8, `MANIFEST_IO_ERROR`)로 보고한다. 이전에는 `RESHIELD_ERR_INTERNAL`이었다. 변조 판정이 아니므로 현장 텔레메트리에서 경로 문제와 진짜 내부 오류를 구분할 수 있다. 값은 열거형 끝에 추가했고 기존 값은 그대로다.
 - 경로 규칙은 모든 플랫폼에서 같다(C: `src/manifest.c`의 `is_safe_relative_path`, Python: `tools/manifest_path.py`). 구분자는 `/`만 허용하고 구성요소 단위로 검사한다. 다음은 거부한다.
   - 선행 `/`(절대경로)와 빈 구성요소
@@ -125,7 +131,7 @@ make release-demo
 
 `reshield_verify_code_section()`과 W^X 검사는 "프로세스의 메인 이미지"가 아니라 "봉인 레코드가 들어 있는 이미지"를 본다. 레코드는 re-shield를 링크한 모듈의 `.data`에 있으므로, 정적 링크한 EXE에서는 두 이미지가 같고(동작 변화 없음) re-shield를 `.so`/`.dylib`/`.dll`에 넣으면 그 라이브러리가 검증 대상이 된다. 공개 함수 시그니처는 바뀌지 않는다.
 
-- 이미지를 찾는 기준은 레코드 변수의 주소(내부 함수 `reshield_internal_record_anchor()`)다. macOS는 `dladdr`의 `dli_fbase`, Linux는 `dl_iterate_phdr`에서 그 주소를 포함하는 `PT_LOAD`를 가진 항목, Windows는 `GetModuleHandleExW(FROM_ADDRESS)`다.
+- 이미지를 찾는 기준은 레코드 변수의 주소(내부 함수 `reshield_internal_record_anchor()`, `src/integrity_common.c`. 레코드는 `static`이라 re-shield를 링크한 모듈마다 하나다)다. macOS는 `dladdr`의 `dli_fbase`(그 이미지의 Mach-O 헤더, 이어서 `getsectiondata`), Linux는 `dl_iterate_phdr`에서 그 주소를 포함하는 `PT_LOAD`를 가진 항목, Windows는 `GetModuleHandleExW(FROM_ADDRESS | UNCHANGED_REFCOUNT)`다. Linux에서 그 이미지의 파일을 고르는 규칙(메인은 `/proc/self/exe`, 절대경로 `dlpi_name`, 상대경로는 `/proc/self/maps`)은 §5의 Linux 항목에 있다.
 - 봉인은 그 라이브러리 파일에 한다: `python3 tools/seal_binary.py libfoo.so --build-id N`. `seal_binary.py`는 형식(ELF·Mach-O·PE)만 보고 EXE인지 라이브러리인지 구분하지 않는다. 호스트 EXE는 봉인하지 않아도 된다.
 - 엔진 바인딩(C#, GDScript 등)은 구조체 없이 `int`와 문자열만 주고받는 `reshield_check_json()`을 부르면 된다(`reshield_verify_app()` + `reshield_report_to_json()` 한 번에). 매니페스트·에셋 경로는 라이브러리가 아니라 프로세스 EXE의 디렉터리 기준이다. 라이브러리에서는 `reshield.def`(Windows)나 기본 가시성(POSIX)으로 내보낸다.
 - 코드 서명 검사(`RESHIELD_CHECK_CODESIGN`)는 모듈 모드에서도 프로세스 EXE를 본다. 라이브러리 자체의 서명은 검사하지 않는다(엔진 DLL은 대개 서명이 없다).
@@ -204,3 +210,51 @@ make release-demo
 - 열거 시점 이후에 생기거나 사라지는 파일, 에셋 폴더 밖에 놓는 DLL(검색 경로가 다른 폴더인 경우)은 이 검사가 보지 못한다.
 - 안티바이러스 격리 파일, 사용자가 둔 파일, 설치 도구가 남긴 파일도 extra다. 현장 텔레메트리로 오탐률을 먼저 재고 나서 종료 같은 조치를 붙인다.
 - 검증 범위: macOS·Linux(glibc, musl)는 CI가 `tests/test_manifest.c`(`strict` 시나리오, 항목 상한 100000, 깊이 32/33, 심볼릭 링크·FIFO)와 `tests/test_seal_workflow.py`로 확인한다. Windows는 CI `windows-msvc` 잡의 단위 테스트와 pwsh 단계(드롭인 DLL, 중첩 폴더, 한글 이름, dotfile, junction)로 확인한다. Windows에서 항목 상한 100000과 심볼릭 링크 케이스는 돌리지 않는다. mingw 빌드는 컴파일·실행 모두 확인하지 않았다.
+
+## 11. 도구, Makefile 타깃, CI 잡
+
+### 도구와 GitHub Action
+
+| 도구 | 주요 인자 | 비고 |
+|---|---|---|
+| `tools/gen_manifest.py <dir> -o <out>` | `--exclude GLOB`(반복), `--strict`, `--allow GLOB`(반복, `--strict` 필요) | §6, §10 |
+| `tools/seal_binary.py <binary>` | `--manifest FILE`, `--build-id N`(기본 1), `--verify-only`, `--no-codesign`(Mach-O) | Mach-O·ELF·PE32+ x64, 실행 파일과 공유 라이브러리 모두. 개발 빌드 마커는 검사하지 않는다(§4) |
+| `tools/verify_release.py <binary>` | `--manifest FILE`, `--assets DIR`, `--allow-dev-build` | 개발 빌드 마커가 있으면 종료 코드 2(§4). `steam_appid.txt`가 바이너리 옆·`--assets`·매니페스트에 있으면 경고만 한다(종료 코드 그대로, [steam-pipeline.md](steam-pipeline.md)) |
+| `tools/reshield_release.py <binary>` | `--assets DIR`, `--exclude GLOB`, `--strict`, `--allow GLOB`, `--manifest-out PATH`, `--build-id N`, `--strip`, `--sign ID`, `--entitlements PLIST`, `--sign-cmd CMD`, `--allow-dev-build` | strip, 매니페스트, 봉인, 서명, 검증을 이 순서로 제자리 실행. 매니페스트 기본 위치는 `<바이너리 폴더>/<확장자 뺀 이름>.manifest`, 빌드 번호 기본값은 `$BUILD_NUMBER` 또는 1. 개발 빌드는 바이너리를 고치기 전에 거부(종료 코드 2) |
+| `tools/pe_probe.py <exe>` | - | PE의 `.text` 배치와 base relocation 수, 봉인 가능 여부를 임시 사본으로 측정(입력 파일은 수정하지 않음). CI `windows-msvc-probe`가 사용 |
+| `action.yml` (`uses: ./`) | 입력 `binary`, `assets`, `exclude`(줄바꿈 구분), `build-id`(기본 실행 번호), `strip`, `sign-cmd`, `sign`, `python`, `allow-dev-build`. 출력 `manifest`, `build-id` | `reshield_release.py`를 실행한다. `--strict`/`--allow`에 해당하는 입력은 없으므로 strict 매니페스트는 `reshield_release.py`를 직접 부른다. [steam-pipeline.md](steam-pipeline.md) |
+
+### Makefile 타깃
+
+| 타깃 | 하는 일 |
+|---|---|
+| `make all` | 라이브러리(`build/libreshield.a`), 데모·샘플, 봉인된 `sample_game_sealed`, 단위 테스트 바이너리를 만든다 |
+| `make lib` | 정적 라이브러리만. 기본은 개발 빌드(`build/`), `ALLOW_UNSEALED=0`이면 `build/release/` |
+| `make shared` | 모듈 모드용 공유 라이브러리 `build/libreshield.so`(macOS `.dylib`). mingw는 지원하지 않는다(Windows DLL은 `cl`과 `reshield.def`) |
+| `make release-shared` | 릴리스판 공유 라이브러리를 `build/release/`에 만든다(`ALLOW_UNSEALED=0`) |
+| `make test` | §3 |
+| `make module-test` | 모듈 모드 호스트 테스트(§8). `make test`에 포함 |
+| `make guard-test` | 개발 빌드 마커와 릴리스 도구의 거부·통과(§4). `make test`에 포함. 입력으로 `make release-sample`(릴리스 라이브러리를 링크한 `build/release/sample_game`)을 만든다 |
+| `make csharp-test` | `bindings/csharp/Reshield.cs`와 Unity 패키지의 사본이 같은지 `cmp`로 확인하고, dotnet SDK가 있으면 `make shared release-shared` 뒤 `bindings/csharp/tests/run.py`를 실행한다. SDK가 없으면 성공으로 건너뛴다. `make test`에 포함되지 않는다 |
+| `make crackme` | crackme 랩 바이너리를 봉인하고 `tests/test_crackme_lab.py`를 실행한다([crackme-lab.md](crackme-lab.md)). `make test`에 포함 |
+| `make release-demo` | 봉인한 `sample_game_sealed`를 `verify_release.py`로 검증하고 실행한다 |
+| `make bench` | SHA-256 처리량(§9) |
+| `make sanitize` | ASan+UBSan 빌드로 `make test` 흐름을 `build/san/`에서 실행([fuzzing.md](fuzzing.md)) |
+| `make fuzz-build`, `fuzz-pe`, `fuzz` | libFuzzer 하니스와 PE 변이 퍼저([fuzzing.md](fuzzing.md)) |
+| `make clean` | `$(BUILD_DIR)` 삭제 |
+
+### CI 잡 (`.github/workflows/ci.yml`)
+
+| 잡 | 러너 | 실행하는 것 |
+|---|---|---|
+| `linux` | `ubuntu-latest` | `make clean && make all test release-demo`, `make sanitize`, `make bench`(CPU 모델 출력), `-DRESHIELD_NO_HW_SHA`로 컴파일한 `test_sha256_accel`·`test_save_seal`, `src/*.c`의 C++11 구문 검사, `tests/fuzz/test_parser_regressions.py`, 개발 빌드 마커가 `--gc-sections`·`strip` 뒤에도 남는지, `ld.so ./prog`가 크래시가 아닌 오류 종료인지 |
+| `linux-arm64` | `ubuntu-24.04-arm` | `uname -m`이 aarch64인지, `make clean && make all test release-demo`, `ld.so ./prog` 검사 |
+| `linux-musl` | `ubuntu-latest`의 Alpine 3.22 컨테이너 | `make clean && make all test release-demo`, 그리고 `integrity_demo`를 `-pie -fPIE`·`-no-pie`·`-static`·`-static-pie`로 링크·봉인·실행해 `status=OK` 확인 |
+| `linux-musl-arm64` | `ubuntu-24.04-arm`의 Alpine 3.22 컨테이너 | `linux-musl`과 같은 순서 |
+| `macos` | `macos-latest` | `make clean && make all test release-demo`, `src/*.c`의 C++11 구문 검사, `make bench`(CPU 출력) |
+| `windows-msvc` | `windows-latest` | `cl`로 라이브러리·예제·테스트 빌드와 단위 테스트, SHA-256 처리량, `cl /TP` C++ 게이트, `reshield.def`로 만든 DLL의 모듈 모드 검사, 개발 빌드 마커 검사, 봉인·실행·변조·`verify_release.py`, 서명(§7), `reshield_verify_app()` 경로 해석, strict 매니페스트(§10), 액션 사용 |
+| `windows-msvc-probe` | `windows-latest` | `cl`로 `integrity_demo`를 빌드해 `tools/pe_probe.py`와 `dumpbin` 결과를 아티팩트로 남김(§7 지원 정책) |
+| `csharp` | `ubuntu-latest` | `dotnet --version && make csharp-test` |
+| `action-test` | `ubuntu-latest`, `macos-latest` | `make all`로 만든 샘플을 `dist/`에 두고 `uses: ./`로 실행: 개발 빌드 거부(바이너리와 에셋이 그대로인지), `allow-dev-build`와 `exclude`로 봉인한 뒤 매니페스트 확인·실행, 에셋 1바이트 변조 거부 |
+
+Windows 잡에서 실제로 돌리는 항목의 범위와 건너뛴 것은 §7·§10에 있다. aarch64 잡에서 돌리지 않는 것(`make sanitize`, 퍼저 회귀)은 §5에 있다.

@@ -17,7 +17,12 @@
   - Linux: `/proc/self/maps`에서 `.text` 범위 전체가 `r-x` 매핑으로 덮이는지 확인.
 - **구조화된 진단 리포트 (`include/reshield/reshield.h`)**: 라이브러리가 프로세스를 임의 강제 종료하지 않고 `reshield_report_t`와 콜백을 반환해 호스트 앱이 안내·로깅·안전 종료를 결정. `reshield_report_to_json()`은 리포트를 한 줄 JSON(`"v":1`)으로 직렬화한다(텔레메트리용. 클라이언트가 보낸 리포트는 위조될 수 있어 서버가 진본 증거로 쓰면 안 된다).
 - **모듈 모드**: re-shield를 실행 파일 대신 공유 라이브러리(`.so`/`.dylib`/`.dll`)에 링크하면 그 라이브러리가 봉인·검사 대상 이미지가 된다. 호스트 실행 파일(엔진 등)은 re-shield 코드가 없어도 되고 봉인하지 않는다(아래 [알려진 한계](#알려진-한계)와 [docs/integrity-verification.md](docs/integrity-verification.md#8-자기-모듈-모드-공유-라이브러리) 참고).
-- **릴리스 검증 CLI (`tools/verify_release.py`)**: CI/CD 단계에서 바이너리 봉인과 매니페스트 일치를 검증하고, 정의 심볼 수는 보고만 한다(검증하지 않음).
+- **strict 매니페스트 (v2)**: 에셋 폴더에 끼워 넣은 파일을 `RESHIELD_ERR_ASSET_EXTRA`(값 9)로 보고한다. `#allow` 글롭으로 세이브·로그 경로를 허용한다(아래 [strict 모드](#내-프로젝트에-적용하기)와 [docs/integrity-verification.md](docs/integrity-verification.md#10-매니페스트-v2와-strict-모드) 참고).
+- **SHA-256 하드웨어 가속**: 코드 섹션·에셋 해시의 블록 압축을 CPU 명령(AArch64 SHA2, x86-64 SHA-NI)으로 처리하고, 명령이 없거나 확인하지 않은 조합이면 이식성 C로 폴백한다. 라이브러리를 `-DRESHIELD_NO_HW_SHA`로 컴파일하면 끈다. 처리량은 `make bench`로 잰다(GitHub Actions 러너: macos 1441, ubuntu 1813, windows 1582 MB/s. 로컬 Apple M1 Pro: 가속 2223 MB/s, 같은 기계의 이식성 C 220 MB/s). 조건과 측정 환경은 [docs/integrity-verification.md](docs/integrity-verification.md#9-sha-256-하드웨어-가속).
+- **세이브·설정 파일 seal (`include/reshield/save_seal.h`)**: `reshield_save_tag()`/`reshield_save_verify()`가 HMAC-SHA256 태그로 캐주얼 편집·손상을 탐지한다. 키가 바이너리에 있어야 하므로 전문 공격자는 막지 못한다([docs/save-seal.md](docs/save-seal.md)).
+- **엔진 바인딩**: 평면 C 함수 `reshield_check_json()`을 부르는 C# P/Invoke 바인딩(`bindings/csharp/Reshield.cs`)과 Unity 패키지 골격(`bindings/unity/com.reshield.guard`, Unity 미검증)이 있다([docs/engines-unity.md](docs/engines-unity.md)).
+- **릴리스 검증 CLI (`tools/verify_release.py`)**: CI/CD 단계에서 바이너리 봉인과 매니페스트 일치를 검증하고, 정의 심볼 수는 보고만 한다(검증하지 않음). 개발 빌드 마커가 든 바이너리는 거부한다.
+- **GitHub Action (`action.yml`)**: `tools/reshield_release.py`(strip, 매니페스트, 봉인, 서명, 검증)를 한 단계로 실행한다([docs/steam-pipeline.md](docs/steam-pipeline.md)).
 
 ## Non-goals / Anti-goals
 
@@ -28,7 +33,7 @@
 
 ## 알려진 한계
 
-자세한 목록은 [docs/integrity-verification.md](docs/integrity-verification.md#5-한계)를 따른다. 요약: 코드 검사는 봉인 레코드가 들어 있는 이미지를 본다(정적 링크면 메인 실행 파일, re-shield를 공유 라이브러리 `.so`/`.dylib`/`.dll`에 링크했으면 그 라이브러리이며 호스트 EXE는 검사하지 않고 봉인할 필요도 없다. 다른 모듈은 보지 않고, 코드 서명 검사는 항상 프로세스 EXE 기준이다. Linux에서는 라이브러리를 절대경로로 열어야 한다), 해시 대상은 `__TEXT,__text`/`.text`뿐이고(`__stubs`, `.plt`, `__const`, 레코드가 있는 `__DATA`는 제외), 레코드의 평문 `RSHLDCHK` 매직이 수정 지점을 노출하며, 매니페스트에 없는 추가 파일은 기본으로는 감지하지 않고(v2 strict 모드를 켜면 감지), fat/universal Mach-O는 `seal_binary.py`가 지원하지 않는다.
+자세한 목록은 [docs/integrity-verification.md](docs/integrity-verification.md#5-한계)를 따른다. 요약: 코드 검사는 봉인 레코드가 들어 있는 이미지를 본다(정적 링크면 메인 실행 파일, re-shield를 공유 라이브러리 `.so`/`.dylib`/`.dll`에 링크했으면 그 라이브러리이며 호스트 EXE는 검사하지 않고 봉인할 필요도 없다. 다른 모듈은 보지 않고, 코드 서명 검사는 항상 프로세스 EXE 기준이다. Linux에서는 라이브러리를 상대경로로 열어도 `/proc/self/maps`로 절대경로를 얻어 검증하며, `/proc`이 없거나 로드 뒤 라이브러리 파일이 지워지거나 교체되면 fail-closed다), 해시 대상은 `__TEXT,__text`/`.text`뿐이고(`__stubs`, `.plt`, `__const`, 레코드가 있는 `__DATA`는 제외), 레코드의 평문 `RSHLDCHK` 매직이 수정 지점을 노출하며, 매니페스트에 없는 추가 파일은 기본으로는 감지하지 않고(v2 strict 모드를 켜면 감지), fat/universal Mach-O는 `seal_binary.py`가 지원하지 않는다.
 
 ## 언제 쓰고, 언제 쓰지 말아야 하나
 
@@ -51,6 +56,8 @@ make all
 make test
 make release-demo
 ```
+
+그 밖의 타깃: `make shared`·`make release-shared`(모듈 모드용 공유 라이브러리), `make module-test`·`make guard-test`(둘 다 `make test`에 포함), `make csharp-test`(dotnet SDK가 있을 때), `make bench`(SHA-256 처리량), `make sanitize`(ASan+UBSan). 전체 Makefile 타깃과 CI 잡 목록: [docs/integrity-verification.md](docs/integrity-verification.md#11-도구-makefile-타깃-ci-잡).
 
 - 아키텍처 설계 및 한계: [docs/architecture.md](docs/architecture.md)
 - 코드 섹션·에셋 매니페스트 봉인 및 검증 가이드: [docs/integrity-verification.md](docs/integrity-verification.md)
