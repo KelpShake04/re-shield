@@ -49,8 +49,8 @@ def main() -> int:
     p.add_argument("--assets", help="Asset directory to bind (a manifest is generated from it)")
     p.add_argument("--manifest-out",
                    help="Manifest output path (default: <binary dir>/<binary name without extension>.manifest)")
-    p.add_argument("--build-id", type=int, default=int(os.environ.get("BUILD_NUMBER") or 1),
-                   help="Build identifier (default: $BUILD_NUMBER or 1)")
+    p.add_argument("--build-id", type=int,
+                   help="Build identifier, 0..4294967295 (default: $BUILD_NUMBER or 1)")
     p.add_argument("--strip", action="store_true", help="Run $STRIP (default 'strip') first (ELF and Mach-O)")
     p.add_argument("--sign", default="-",
                    help="macOS codesign identity after sealing ('-' = ad-hoc, the default). "
@@ -60,6 +60,15 @@ def main() -> int:
                                       "{} is replaced by the binary path (e.g. signtool)")
     args = p.parse_args()
 
+    build_id = args.build_id
+    if build_id is None:
+        raw = os.environ.get("BUILD_NUMBER") or "1"
+        if not raw.isdigit():
+            raise SystemExit(f"[reshield_release] $BUILD_NUMBER must be a non-negative integer, got {raw!r}")
+        build_id = int(raw)
+    if not 0 <= build_id <= 0xFFFFFFFF:  # seal_binary.py would silently truncate to 32 bits
+        raise SystemExit(f"[reshield_release] build id {build_id} is outside 0..4294967295")
+
     binary = args.binary
     if os.path.isdir(binary):
         raise SystemExit("[reshield_release] pass the executable inside the bundle "
@@ -68,6 +77,9 @@ def main() -> int:
     if kind == "unknown":
         raise SystemExit(f"[reshield_release] {binary}: not a Mach-O, ELF or PE executable")
     macos = kind == "macho" and sys.platform == "darwin"
+    if not macos and not args.sign_cmd and (args.sign != "-" or args.entitlements):
+        print("[reshield_release] warning: --sign/--entitlements only apply to a Mach-O on macOS; "
+              "this binary will NOT be signed. Use --sign-cmd.", file=sys.stderr)
     if macos:
         seal_binary.check_macho_resignable(binary)  # refuses a real signature: seal first, sign last
 
@@ -82,7 +94,7 @@ def main() -> int:
         run([sys.executable, os.path.join(TOOLS, "gen_manifest.py"), args.assets, "-o", manifest])
 
     seal = [sys.executable, os.path.join(TOOLS, "seal_binary.py"), binary,
-            "--build-id", str(args.build_id), "--no-codesign"]
+            "--build-id", str(build_id), "--no-codesign"]
     if manifest:
         seal += ["--manifest", manifest]
     run(seal)
