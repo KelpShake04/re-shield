@@ -153,6 +153,7 @@ The design and verification guides are written in Korean.
 
 - [docs/architecture.md](docs/architecture.md): design, the 96-byte `RSHLDCHK` v2 record, limits.
 - [docs/integrity-verification.md](docs/integrity-verification.md): sealing pipeline, runtime integration, manifest format rules, Windows details.
+- [docs/steam-pipeline.md](docs/steam-pipeline.md): sealing in GitHub Actions (`action.yml`) before a `steamcmd` upload; what was not tested (Korean).
 - [docs/fuzzing.md](docs/fuzzing.md): sanitizers and fuzzing, in English.
 - [docs/crackme-lab.md](docs/crackme-lab.md): crackme lab, patch your own sealed binary to see what re-shield stops and what it cannot (Korean).
 - Public API: `include/reshield/reshield.h`, `integrity.h`, `manifest.h`, `attestation.h`.

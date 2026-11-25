@@ -858,6 +858,32 @@ def test_release_cli(tmpdir: str, repo_root: str) -> None:
     print("PASS: reshield_release refuses an already-signed Mach-O without touching it")
 
 
+def test_verify_release_steam_appid_warning(tmpdir: str, repo_root: str) -> None:
+    """steam_appid.txt in the shipped set only warns: verify_release keeps rc 0."""
+    tool = os.path.join(repo_root, "tools", "reshield_release.py")
+    verify = os.path.join(repo_root, "tools", "verify_release.py")
+    dist = os.path.join(tmpdir, "steam")
+    shutil.copytree(os.path.join(repo_root, "examples", "assets"), os.path.join(dist, "assets"))
+    exe = os.path.join(dist, "game")
+    shutil.copy2(os.path.join(repo_root, "build", "sample_game"), exe)
+    assets = os.path.join(dist, "assets")
+    r = run_cmd([sys.executable, tool, exe, "--assets", assets, "--build-id", "2"])
+    assert r.returncode == 0 and "steam_appid" not in r.stderr, f"no warning without the file: {r}"
+
+    with open(os.path.join(assets, "Steam_AppID.TXT"), "w") as f:  # case-insensitive match
+        f.write("480")
+    r = run_cmd([sys.executable, tool, exe, "--assets", assets, "--build-id", "2"])
+    assert r.returncode == 0 and "steam_appid.txt found in --assets" in r.stderr \
+        and "in the manifest (Steam_AppID.TXT)" in r.stderr, f"warn, but still pass: {r}"
+
+    os.remove(os.path.join(assets, "Steam_AppID.TXT"))
+    with open(os.path.join(dist, "steam_appid.txt"), "w") as f:
+        f.write("480")
+    r = run_cmd([sys.executable, verify, exe])
+    assert r.returncode == 0 and "found next to the binary" in r.stderr, r
+    print("PASS: verify_release warns about steam_appid.txt (assets, manifest, binary dir) without failing")
+
+
 def main() -> int:
     repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     integrity_demo = os.path.join(repo_root, "build", "integrity_demo")
@@ -965,6 +991,7 @@ def main() -> int:
         test_verify_app(tmp2, repo_root)
         test_release_cli(tmp2, repo_root)
         test_release_cli_binary_in_assets(tmp2, repo_root)
+        test_verify_release_steam_appid_warning(tmp2, repo_root)
     with tempfile.TemporaryDirectory(prefix="reshield_pe_") as tmp3:
         test_pe_support(tmp3, repo_root)
 
