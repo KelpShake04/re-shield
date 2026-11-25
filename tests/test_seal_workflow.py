@@ -799,6 +799,18 @@ def test_verify_app(tmpdir: str, repo_root: str) -> None:
     print("PASS: load_verified_app_asset returns the verified bytes; unsafe/unlisted paths and an unsealed binary are refused")
 
     stage_cfg = os.path.join(app_dir, "assets", "stage1.cfg")
+    # An asset that cannot be opened is ASSET_UNREADABLE (10 + 10 = 20), not a tamper verdict.
+    os.chmod(stage_cfg, 0)
+    if os.access(stage_cfg, os.R_OK):
+        print("SKIP: verify_app unreadable asset (still readable after chmod 0, running as root?)")
+    else:
+        r = run_app(exe, "vapp.manifest", "assets")
+        assert r.returncode == 20 and "status=ASSET_UNREADABLE" in r.stdout and "asset=stage1.cfg" in r.stdout \
+            and "check_json=same" in r.stdout, f"unreadable asset: {r}"
+        r = run_app(exe, "vapp.manifest", "assets", "stage1.cfg")
+        assert "load=ASSET_UNREADABLE len=0" in r.stdout, f"unreadable asset must not load: {r}"
+        print("PASS: verify_app and load_verified_app_asset report ASSET_UNREADABLE (not ASSET_TAMPERED) for an unreadable asset")
+    os.chmod(stage_cfg, 0o644)
     with open(stage_cfg, "ab") as f:
         f.write(b"x")
     r = run_app(exe, "vapp.manifest", "assets", "stage1.cfg")

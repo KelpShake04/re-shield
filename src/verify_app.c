@@ -130,11 +130,12 @@ reshield_status_t reshield_load_verified_app_asset(const char *manifest_rel, con
     }
     switch (reshield_load_verified_asset(manifest_rel != NULL ? manifest : NULL, assets, asset_rel,
                                          NULL, max_size, out_buf, out_len)) {
-        case RESHIELD_MANIFEST_OK:             return RESHIELD_OK;
-        case RESHIELD_MANIFEST_UNSEALED:       return RESHIELD_ERR_UNSEALED;
-        case RESHIELD_MANIFEST_ROOT_MISMATCH:  return RESHIELD_ERR_MANIFEST_MISMATCH;
-        case RESHIELD_MANIFEST_ASSET_MISMATCH: return RESHIELD_ERR_ASSET_TAMPERED;
-        case RESHIELD_MANIFEST_IO_ERROR:       return RESHIELD_ERR_MANIFEST_IO;
-        default:                               return RESHIELD_ERR_INTERNAL;
+        case RESHIELD_MANIFEST_OK:               return RESHIELD_OK;
+        case RESHIELD_MANIFEST_UNSEALED:         return RESHIELD_ERR_UNSEALED;
+        case RESHIELD_MANIFEST_ROOT_MISMATCH:    return RESHIELD_ERR_MANIFEST_MISMATCH;
+        case RESHIELD_MANIFEST_ASSET_MISMATCH:   return RESHIELD_ERR_ASSET_TAMPERED;
+        case RESHIELD_MANIFEST_IO_ERROR:         return RESHIELD_ERR_MANIFEST_IO;
+        case RESHIELD_MANIFEST_ASSET_UNREADABLE: return RESHIELD_ERR_ASSET_UNREADABLE;
+        default:                                 return RESHIELD_ERR_INTERNAL;
     }
 }

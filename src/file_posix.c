@@ -14,6 +14,14 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+/* errno values that mean "could not read it" rather than "it is not what the manifest says".
+ * Anything not listed (ENOENT, ENOTDIR, ELOOP, ...) is a plain failure, so an unknown cause
+ * stays a tamper verdict. */
+static int errno_is_unreadable(int e) {
+    return e == EACCES || e == EPERM || e == EBUSY || e == EIO ||
+           e == EMFILE || e == ENFILE || e == ENOMEM;
+}
+
 /* O_NONBLOCK keeps open() from blocking on a FIFO; non-regular files are rejected. */
 int reshield_file_open_regular(const char *path, reshield_file_t *handle_out, uint64_t *size_out) {
     if (path == NULL || handle_out == NULL) {
@@ -21,7 +29,7 @@ int reshield_file_open_regular(const char *path, reshield_file_t *handle_out, ui
     }
     int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
     if (fd < 0) {
-        return -1;
+        return errno_is_unreadable(errno) ? RESHIELD_FILE_UNREADABLE : -1;
     }
     struct stat st;
     if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 0) {
@@ -40,6 +48,9 @@ intptr_t reshield_file_read(reshield_file_t handle, void *buf, size_t n) {
         ssize_t r = read((int)handle, buf, n);
         if (r < 0 && errno == EINTR) {
             continue;
+        }
+        if (r < 0) {
+            return errno_is_unreadable(errno) ? RESHIELD_FILE_UNREADABLE : -1;
         }
         return (intptr_t)r;
     }

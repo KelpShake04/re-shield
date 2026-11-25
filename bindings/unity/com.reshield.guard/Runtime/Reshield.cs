@@ -119,8 +119,10 @@ namespace Reshield
         /// MANIFEST_IO_ERROR). The asset is in memory twice while it is copied, so for multi-GB packs
         /// use Check() instead. A missing module does not throw (ModuleNotFound, Data null): the
         /// caller cannot load without the module either, so decide there whether to fall back to an
-        /// unverified read. Any other non-zero status means: do not use the file. Call from a worker
-        /// thread for large assets.
+        /// unverified read. Any other non-zero status means: do not use the file. Status 10
+        /// (ASSET_UNREADABLE) means the file could not be opened or read (permission, lock, antivirus,
+        /// I/O error): not evidence of tampering, so log it apart from ASSET_TAMPERED (6) and choose
+        /// retry or fail-open. Call from a worker thread for large assets.
         /// </summary>
         public static AssetResult LoadAsset(string manifestRel, string assetsRel, string assetRel,
                                             int maxBytes)

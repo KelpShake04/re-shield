@@ -347,6 +347,153 @@ static void test_manifest_edge_cases(void) {
     remove(MPATH);
 }
 
+/* ---- ASSET_UNREADABLE: an asset that cannot be opened is not a tamper verdict ---- */
+#define UDIR "build/mt_unread"
+#define UMPATH "build/mt_unread_manifest.txt"
+
+static int refused(reshield_manifest_status_t st, void **pbuf, size_t *plen, reshield_manifest_status_t want);
+
+#ifdef _WIN32
+static HANDLE g_lock = INVALID_HANDLE_VALUE;
+
+/* Holds the file open with no sharing: every other open fails with ERROR_SHARING_VIOLATION. */
+static int make_unreadable(const char *path) {
+    wchar_t wp[512];
+    if (!utf8_to_wide(path, wp, 512)) {
+        return 0;
+    }
+    g_lock = CreateFileW(wp, GENERIC_READ, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    return g_lock != INVALID_HANDLE_VALUE;
+}
+
+static void make_readable(const char *path) {
+    (void)path;
+    if (g_lock != INVALID_HANDLE_VALUE) {
+        CloseHandle(g_lock);
+        g_lock = INVALID_HANDLE_VALUE;
+    }
+}
+#else
+static int make_unreadable(const char *path) {
+    if (chmod(path, 0) != 0) {
+        return 0;
+    }
+    FILE *f = fopen(path, "rb"); /* still readable: running as root, the scenario cannot be made */
+    if (f != NULL) {
+        fclose(f);
+        chmod(path, 0644);
+        return 0;
+    }
+    return 1;
+}
+
+static void make_readable(const char *path) {
+    chmod(path, 0644);
+}
+#endif
+
+/* Manifest = a.cfg, b.cfg (both "abc") plus `extra`; own SHA-256 as the root. */
+static reshield_manifest_status_t uverify(const char *header, const char *extra, char *failed, size_t cap) {
+    char hex[65], buf[1024];
+    sha_hex("abc", 3, hex);
+    int n = snprintf(buf, sizeof(buf), "%s%s 3 a.cfg\n%s 3 b.cfg\n%s", header, hex, hex, extra);
+    write_file(UMPATH, buf, (size_t)n);
+    uint8_t root[RESHIELD_SHA256_SIZE];
+    reshield_sha256_file(UMPATH, root, NULL);
+    return reshield_verify_manifest_files(UMPATH, UDIR, root, failed, cap);
+}
+
+static void test_asset_unreadable(void) {
+    char failed[128];
+    char hex[65];
+    mkdir("build", 0755);
+    mkdir(UDIR, 0755);
+    write_file(UDIR "/a.cfg", "abc", 3);
+    write_file(UDIR "/b.cfg", "abc", 3);
+    sha_hex("abc", 3, hex);
+    ASSERT_TRUE(uverify("", "", NULL, 0) == RESHIELD_MANIFEST_OK, "unreadable: baseline passes");
+
+    if (!make_unreadable(UDIR "/a.cfg")) {
+        printf("SKIP: unreadable-asset tests (cannot make a file unreadable, running as root?)\n");
+    } else {
+        failed[0] = 'X';
+        ASSERT_TRUE(uverify("", "", failed, sizeof(failed)) == RESHIELD_MANIFEST_ASSET_UNREADABLE &&
+                        strcmp(failed, "a.cfg") == 0,
+                    "unreadable: locked/chmod 0 asset is ASSET_UNREADABLE and named");
+
+        char text[512];
+        snprintf(text, sizeof(text), "%s 3 a.cfg\n%s 3 b.cfg\n", hex, hex);
+        write_file(UMPATH, text, strlen(text));
+        uint8_t root[RESHIELD_SHA256_SIZE];
+        reshield_sha256_file(UMPATH, root, NULL);
+        ASSERT_TRUE(reshield_verify_single_asset(UMPATH, UDIR, "a.cfg", root) == RESHIELD_MANIFEST_ASSET_UNREADABLE,
+                    "unreadable: single_asset is ASSET_UNREADABLE");
+        ASSERT_TRUE(reshield_verify_single_asset(UMPATH, UDIR, "b.cfg", root) == RESHIELD_MANIFEST_OK,
+                    "unreadable: single_asset of a readable sibling still passes");
+        void *buf = (void *)1;
+        size_t len = 99;
+        ASSERT_TRUE(refused(reshield_load_verified_asset(UMPATH, UDIR, "a.cfg", root, 16, &buf, &len), &buf, &len,
+                            RESHIELD_MANIFEST_ASSET_UNREADABLE),
+                    "unreadable: load_verified_asset is ASSET_UNREADABLE, no buffer");
+        ASSERT_TRUE(reshield_sha256_file(UDIR "/a.cfg", root, NULL) == -1,
+                    "unreadable: public reshield_sha256_file() still returns -1");
+
+        /* A tampered asset anywhere in the manifest wins over an unreadable one. */
+        write_file(UDIR "/b.cfg", "abd", 3);
+        failed[0] = 'X';
+        ASSERT_TRUE(uverify("", "", failed, sizeof(failed)) == RESHIELD_MANIFEST_ASSET_MISMATCH &&
+                        strcmp(failed, "b.cfg") == 0,
+                    "unreadable: a later tampered asset is ASSET_MISMATCH, not hidden by the unreadable one");
+        write_file(UDIR "/b.cfg", "abc", 3);
+
+        /* Strict manifest: an unlisted file wins; otherwise the unreadable asset is reported. */
+        failed[0] = 'X';
+        ASSERT_TRUE(uverify("#reshield-manifest v2 strict\n", "", failed, sizeof(failed)) ==
+                            RESHIELD_MANIFEST_ASSET_UNREADABLE && strcmp(failed, "a.cfg") == 0,
+                    "unreadable: strict manifest with nothing extra is ASSET_UNREADABLE and named");
+        write_file(UDIR "/evil.dll", "x", 1);
+        failed[0] = 'X';
+        ASSERT_TRUE(uverify("#reshield-manifest v2 strict\n", "", failed, sizeof(failed)) ==
+                            RESHIELD_MANIFEST_ASSET_EXTRA && strcmp(failed, "evil.dll") == 0,
+                    "unreadable: strict ASSET_EXTRA takes precedence over ASSET_UNREADABLE");
+        remove_utf8(UDIR "/evil.dll");
+
+        make_readable(UDIR "/a.cfg");
+        ASSERT_TRUE(uverify("", "", NULL, 0) == RESHIELD_MANIFEST_OK, "unreadable: passes again once readable");
+    }
+
+    /* Rule violations and absence stay tamper verdicts. */
+    char text[512];
+    mkdir(UDIR "/dir.cfg", 0755);
+    snprintf(text, sizeof(text), "%s 3 a.cfg\n%s 3 dir.cfg\n", hex, hex);
+    write_file(UMPATH, text, strlen(text));
+    uint8_t root[RESHIELD_SHA256_SIZE];
+    reshield_sha256_file(UMPATH, root, NULL);
+    failed[0] = 'X';
+    ASSERT_TRUE(reshield_verify_manifest_files(UMPATH, UDIR, root, failed, sizeof(failed)) ==
+                        RESHIELD_MANIFEST_ASSET_MISMATCH && strcmp(failed, "dir.cfg") == 0,
+                "unreadable: a directory listed as an asset is ASSET_MISMATCH");
+    void *buf = (void *)1;
+    size_t len = 99;
+    ASSERT_TRUE(refused(reshield_load_verified_asset(UMPATH, UDIR, "dir.cfg", root, 16, &buf, &len), &buf, &len,
+                        RESHIELD_MANIFEST_ASSET_MISMATCH),
+                "unreadable: load of a directory is ASSET_MISMATCH");
+    rmdir(UDIR "/dir.cfg");
+    remove_utf8(UDIR "/b.cfg");
+    failed[0] = 'X';
+    ASSERT_TRUE(uverify("", "", failed, sizeof(failed)) == RESHIELD_MANIFEST_ASSET_MISMATCH &&
+                    strcmp(failed, "b.cfg") == 0,
+                "unreadable: a missing asset is still ASSET_MISMATCH");
+    write_file(UDIR "/b.cfg", "abd", 3);
+    ASSERT_TRUE(uverify("", "", NULL, 0) == RESHIELD_MANIFEST_ASSET_MISMATCH,
+                "unreadable: a hash mismatch is still ASSET_MISMATCH");
+
+    remove_utf8(UDIR "/a.cfg");
+    remove_utf8(UDIR "/b.cfg");
+    rmdir(UDIR);
+    remove_utf8(UMPATH);
+}
+
 /* ---- Strict (allowlist) manifest v2: tests for the "#reshield-manifest v2 strict" header ---- */
 #define SDIR "build/mt_strict"
 #define SMPATH "build/mt_strict_manifest.txt"
@@ -935,6 +1082,7 @@ int main(void) {
 
 #ifndef RESHIELD_DISABLE
     test_manifest_edge_cases();
+    test_asset_unreadable();
     test_strict_manifest();
 #endif
     test_load_verified_asset();

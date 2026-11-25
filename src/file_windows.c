@@ -7,6 +7,30 @@
 #include <wchar.h>
 #include <windows.h>
 
+/* GetLastError() values that mean "could not read it" rather than "it is not what the manifest
+ * says": access denied, sharing or lock violation (another process, an antivirus scan), antivirus
+ * verdicts, I/O or media errors, out of handles or memory. Anything not listed (file or path not
+ * found, bad name, ...) is a plain failure, so an unknown cause stays a tamper verdict. */
+static int error_is_unreadable(DWORD e) {
+    switch (e) {
+        case ERROR_ACCESS_DENIED:
+        case ERROR_NETWORK_ACCESS_DENIED:
+        case ERROR_SHARING_VIOLATION:
+        case ERROR_LOCK_VIOLATION:
+        case ERROR_VIRUS_INFECTED:
+        case ERROR_VIRUS_DELETED:
+        case ERROR_IO_DEVICE:
+        case ERROR_CRC:
+        case ERROR_NOT_READY:
+        case ERROR_TOO_MANY_OPEN_FILES:
+        case ERROR_NOT_ENOUGH_MEMORY:
+        case ERROR_OUTOFMEMORY:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
 /* Regular files only: UTF-8 path -> UTF-16, reparse points (symlinks, junctions) are
  * followed. Paths longer than MAX_PATH are not given a \\?\ prefix. */
 int reshield_file_open_regular(const char *path, reshield_file_t *handle_out, uint64_t *size_out) {
@@ -28,10 +52,20 @@ int reshield_file_open_regular(const char *path, reshield_file_t *handle_out, ui
     HANDLE h = CreateFileW(wpath, GENERIC_READ,
                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                            NULL, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, NULL);
-    free(wpath);
     if (h == INVALID_HANDLE_VALUE) {
-        return -1;
+        int unreadable = error_is_unreadable(GetLastError());
+        if (unreadable) {
+            /* Opening a directory without FILE_FLAG_BACKUP_SEMANTICS also gives ACCESS_DENIED:
+             * that is a rule violation (not a file), not an unreadable file. */
+            DWORD attrs = GetFileAttributesW(wpath);
+            if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+                unreadable = 0;
+            }
+        }
+        free(wpath);
+        return unreadable ? RESHIELD_FILE_UNREADABLE : -1;
     }
+    free(wpath);
     FILE_STANDARD_INFO info;
     if (GetFileType(h) != FILE_TYPE_DISK ||
         !GetFileInformationByHandleEx(h, FileStandardInfo, &info, sizeof(info)) ||
@@ -50,7 +84,11 @@ intptr_t reshield_file_read(reshield_file_t handle, void *buf, size_t n) {
     DWORD want = n > 0x40000000u ? 0x40000000u : (DWORD)n;
     DWORD got = 0;
     if (!ReadFile((HANDLE)handle, buf, want, &got, NULL)) {
-        return GetLastError() == ERROR_HANDLE_EOF ? 0 : -1;
+        DWORD e = GetLastError();
+        if (e == ERROR_HANDLE_EOF) {
+            return 0;
+        }
+        return error_is_unreadable(e) ? RESHIELD_FILE_UNREADABLE : -1;
     }
     return (intptr_t)got;
 }

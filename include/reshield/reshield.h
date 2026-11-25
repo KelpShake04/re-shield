@@ -19,14 +19,20 @@ typedef enum reshield_status {
     RESHIELD_ERR_PAGE_PERMISSIONS  = 3, /* Code section violates W^X (writable) */
     RESHIELD_ERR_CODESIGN_INVALID  = 4, /* OS code signature verification failed */
     RESHIELD_ERR_MANIFEST_MISMATCH = 5, /* Manifest file SHA-256 does not match sealed root */
-    RESHIELD_ERR_ASSET_TAMPERED    = 6, /* Asset file missing, resized, or hash mismatch */
+    RESHIELD_ERR_ASSET_TAMPERED    = 6, /* Asset file missing, resized, or hash mismatch (an asset that
+                                         * cannot be opened or read is ASSET_UNREADABLE instead) */
     RESHIELD_ERR_INTERNAL          = 7, /* Internal section/file lookup error */
     RESHIELD_ERR_MANIFEST_IO       = 8, /* Manifest file could not be opened or parsed (wrong path, missing
                                          * file, malformed or empty manifest, unsafe asset path in it);
                                          * not a tamper verdict, not INTERNAL. A missing, resized or
                                          * altered asset file is ASSET_TAMPERED instead. */
-    RESHIELD_ERR_ASSET_EXTRA       = 9  /* Strict manifest: unlisted, non-allowed file under the asset dir
+    RESHIELD_ERR_ASSET_EXTRA       = 9, /* Strict manifest: unlisted, non-allowed file under the asset dir
                                          * (or the scan could not finish); failed_asset_path names it */
+    RESHIELD_ERR_ASSET_UNREADABLE  = 10 /* An asset could not be opened or read (permission, lock or
+                                         * sharing violation, antivirus, I/O error); failed_asset_path
+                                         * names it. Not evidence of tampering and not a pass: the
+                                         * library only reports; the caller logs it apart from
+                                         * ASSET_TAMPERED and picks the policy (retry, fail open) */
 } reshield_status_t;
 
 typedef enum reshield_check_flags {
@@ -139,8 +145,9 @@ int reshield_check_json(const char *manifest_rel, const char *assets_rel, char *
  * *out_buf / *out_len (free with reshield_free_asset()); on failure *out_buf is NULL.
  * Returns RESHIELD_OK, ERR_UNSEALED (also in a development library: unlike reshield_verify_app()
  * there is no allow_unsealed pass, because this call hands back data), ERR_MANIFEST_MISMATCH,
- * ERR_ASSET_TAMPERED (asset not listed, missing, resized, altered), or ERR_MANIFEST_IO (manifest_rel
- * NULL, manifest unreadable, unsafe asset_rel, asset larger than max_size, NULL outputs).
+ * ERR_ASSET_TAMPERED (asset not listed, missing, resized, altered), ERR_ASSET_UNREADABLE (asset
+ * cannot be opened or read), or ERR_MANIFEST_IO (manifest_rel NULL, manifest unreadable, unsafe
+ * asset_rel, asset larger than max_size, NULL outputs).
  * A path that does not fit the 4096-byte buffers, or an unresolvable executable path, is
  * ERR_INTERNAL (fail closed). No callback or report. Under -DRESHIELD_DISABLE the file is read
  * without verification and manifest_rel may be NULL.

@@ -83,6 +83,11 @@ make release-demo
 - 1023자를 넘는 줄, CR(`\r`, CRLF 포함)·NUL이 있는 매니페스트, 잘못된 줄은 `IO_ERROR`다. 항목이 하나도 없는 매니페스트도 `IO_ERROR`다.
 - `#` 줄은 파일 맨 앞(첫 항목 줄 앞)에서만 허용한다. `# ...` 주석과 v2 지시어만 쓸 수 있고([10절](#10-매니페스트-v2와-strict-모드)), 첫 항목 줄 뒤의 `#` 줄은 주석이어도 `IO_ERROR`다. **동작 변경**: 이전 C 런타임과 `verify_release.py`는 `#` 줄을 어디서든 건너뛰었다(설계 메모가 "C는 거부"라고 쓴 것은 틀렸다). 이제 C 런타임, `verify_release.py`가 같은 규칙으로 파싱하고 두 구현이 일치한다(`tests/test_seal_workflow.py`가 같은 케이스를 둘 다에 넣어 확인). `gen_manifest.py`는 첫 항목 뒤 `#` 줄을 만든 적이 없으므로 생성기로 만든 기존 매니페스트는 영향이 없다.
 - `reshield_verify()`는 이 `IO_ERROR`(경로 오류, 파일 없음, 형식 오류)를 `RESHIELD_ERR_MANIFEST_IO`(값 8, `MANIFEST_IO_ERROR`)로 보고한다. 이전에는 `RESHIELD_ERR_INTERNAL`이었다. 변조 판정이 아니므로 현장 텔레메트리에서 경로 문제와 진짜 내부 오류를 구분할 수 있다. 값은 열거형 끝에 추가했고 기존 값은 그대로다.
+- 목록의 에셋이 존재하지만 열거나 읽을 수 없으면(권한 거부, 공유·잠금 위반, 백신 차단, I/O 오류) `RESHIELD_ERR_ASSET_UNREADABLE`(값 10, `ASSET_UNREADABLE`, manifest 쪽 `RESHIELD_MANIFEST_ASSET_UNREADABLE` = 6)이다. 열거형 끝에 추가했고 기존 값은 그대로다(ABI 가산 변경). 변조 증거도 통과도 아니며, 라이브러리는 보고만 한다. 호출자는 `ASSET_TAMPERED`와 구분해 로그를 남기고 정책(재시도, `MANIFEST_IO_ERROR`처럼 fail-open)을 고른다. 에셋이 없거나(ENOENT, `ERROR_FILE_NOT_FOUND`), 디렉터리·특수 파일이거나, 크기·해시가 다르면 기존대로 `ASSET_TAMPERED`이고, **원인을 모르는 열기 실패도 `ASSET_TAMPERED`다(fail-closed)**.
+  - POSIX에서 `UNREADABLE`인 원인: `open`/`read`의 `EACCES`, `EPERM`, `EBUSY`, `EIO`, `EMFILE`, `ENFILE`, `ENOMEM`.
+  - Windows에서 `UNREADABLE`인 원인: `ERROR_ACCESS_DENIED`(대상이 디렉터리면 제외), `ERROR_NETWORK_ACCESS_DENIED`, `ERROR_SHARING_VIOLATION`, `ERROR_LOCK_VIOLATION`, `ERROR_VIRUS_INFECTED`, `ERROR_VIRUS_DELETED`, `ERROR_IO_DEVICE`, `ERROR_CRC`, `ERROR_NOT_READY`, `ERROR_TOO_MANY_OPEN_FILES`, `ERROR_NOT_ENOUGH_MEMORY`, `ERROR_OUTOFMEMORY`(열기와 읽기 모두).
+  - 목록의 에셋을 모두 검사한다. 읽을 수 없는 에셋이 있어도 뒤의 변조된 에셋이 있으면 `ASSET_TAMPERED`가, strict 매니페스트에서 목록 밖 파일이 있으면 `ASSET_EXTRA`가 우선한다. 그 외에는 `ASSET_UNREADABLE`이고 `failed_asset_path`는 처음 읽지 못한 에셋이다.
+  - fail-open 대상 여부: 이 상태는 `MANIFEST_IO_ERROR`와 같은 쪽(환경 문제일 수 있음)으로 안내한다. 다만 로컬에서 파일 권한이나 잠금을 바꿀 수 있는 공격자는 에셋도 바꿀 수 있으므로, 이 상태를 통과로 처리하는 것은 호출자의 정책 선택이다. 라이브러리는 통과시키지 않고(`reshield_load_verified_asset()`은 버퍼를 주지 않는다) 상태만 보고한다.
 - 경로 규칙은 모든 플랫폼에서 같다(C: `src/manifest.c`의 `is_safe_relative_path`, Python: `tools/manifest_path.py`). 구분자는 `/`만 허용하고 구성요소 단위로 검사한다. 다음은 거부한다.
   - 선행 `/`(절대경로)와 빈 구성요소
   - `\`, `:`, 제어문자(0x00–0x1F, CR/LF 포함), `< > " | ? *`
@@ -189,7 +194,7 @@ make release-demo
 ### 런타임 동작
 
 - 공통 코드 한 곳(`reshield_verify_manifest_files`)이므로 `reshield_verify(RESHIELD_CHECK_MANIFEST)`와 `reshield_verify_app()` 양쪽에서 같다. `reshield_verify_single_asset()`은 스캔하지 않는다(에셋 하나만 보는 호출).
-- 순서와 우선순위: 먼저 매니페스트 루트 해시와 목록의 모든 에셋을 검증하고, 전부 통과했을 때만 스캔한다. 그래서 순서는 루트 검증(`UNSEALED`/`MANIFEST_MISMATCH`), 헤더와 항목 줄을 읽으며 목록 에셋 검증(먼저 만난 `MANIFEST_IO` 형식 오류 또는 `ASSET_TAMPERED`), 마지막으로 스캔(`ASSET_EXTRA`)이다. 앞 단계가 실패하면 `ASSET_EXTRA`는 보고되지 않는다. `reshield_verify()` 안에서는 코드 섹션·W^X·코드 서명 상태가 있으면 그 상태가 우선하고, `failed_checks`에 `RESHIELD_CHECK_MANIFEST` 비트가 같이 켜진다.
+- 순서와 우선순위: 먼저 매니페스트 루트 해시와 목록의 모든 에셋을 검증하고, 전부 통과했을 때만 스캔한다. 그래서 순서는 루트 검증(`UNSEALED`/`MANIFEST_MISMATCH`), 헤더와 항목 줄을 읽으며 목록 에셋 검증(먼저 만난 `MANIFEST_IO` 형식 오류 또는 `ASSET_TAMPERED`; 읽을 수 없는 에셋은 기록만 하고 계속 검사), 마지막으로 스캔(`ASSET_EXTRA`), 그 뒤에야 `ASSET_UNREADABLE`이다. 앞 단계가 실패하면 `ASSET_EXTRA`는 보고되지 않는다. `reshield_verify()` 안에서는 코드 섹션·W^X·코드 서명 상태가 있으면 그 상태가 우선하고, `failed_checks`에 `RESHIELD_CHECK_MANIFEST` 비트가 같이 켜진다.
 - `asset_base_dir`(NULL 또는 `""`은 `.`) 아래를 재귀로 열거한다. POSIX는 `opendir`/`readdir`/`lstat`, Windows는 `FindFirstFileExW`와 UTF-16→UTF-8 변환이다. **심볼릭 링크와 Windows 재분석 지점(junction 포함)은 따라가지 않고 "항목"으로 본다.** 일반 파일, 심볼릭 링크, FIFO·장치 같은 특수 파일이 목록에도 `#allow`에도 없으면 extra다. 디렉터리 자체는 무시하므로 빈 디렉터리는 문제없다. 열거 중에는 파일을 열지 않고(`lstat`만), 목록의 에셋은 기존대로 해시 검증한다. 열거 후 파일이 바뀌는 TOCTOU는 에셋 해시 검증이 이미 덮는다(목록 밖 파일은 열거 시점에 이미 extra다).
 - 상한: 중첩 깊이 32, 항목 수 100000(디렉터리 포함), 전체 경로 4096자. 초과하거나 디렉터리를 읽지 못하면 검증할 수 없으므로 `ASSET_EXTRA`로 fail-closed이며 `failed_asset_path`는 빈 문자열이다(extra 파일을 찾았을 때는 그 상대 경로). Windows에서 MAX_PATH(260자)를 넘는 경로는 `\\?\` 접두어를 쓰지 않으므로 열거에 실패해 같은 결과가 된다.
 - 이름은 **바이트 단위**로 비교한다(NFC/대소문자 정규화 없음). 그래서 오탐이 날 수 있다. APFS에서 NFD로 저장된 이름(`gen_manifest.py`는 NFC만 허용), 대소문자 비구분 파일시스템에서 파일시스템이 돌려주는 이름의 대소문자가 목록과 다른 경우, 유효한 UTF-16이 아닌 Windows 파일명이 그렇다. NTFS 대체 데이터 스트림은 열거되지 않는다.

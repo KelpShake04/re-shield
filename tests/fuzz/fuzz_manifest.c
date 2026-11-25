@@ -12,7 +12,7 @@ int LLVMFuzzerInitialize(int *argc, char ***argv) {
 }
 
 static void check_status(reshield_manifest_status_t st) {
-    if ((int)st < RESHIELD_MANIFEST_OK || (int)st > RESHIELD_MANIFEST_ASSET_EXTRA) {
+    if ((int)st < RESHIELD_MANIFEST_OK || (int)st > RESHIELD_MANIFEST_ASSET_UNREADABLE) {
         abort();
     }
 }
@@ -28,7 +28,8 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     reshield_manifest_status_t st =
         reshield_verify_manifest_files(g_fz_manifest, g_fz_assets, root, failed, sizeof(failed));
     check_status(st);
-    if ((st == RESHIELD_MANIFEST_ASSET_MISMATCH || st == RESHIELD_MANIFEST_ASSET_EXTRA) && memchr(failed, '\0', sizeof(failed)) == NULL) {
+    if ((st == RESHIELD_MANIFEST_ASSET_MISMATCH || st == RESHIELD_MANIFEST_ASSET_EXTRA ||
+         st == RESHIELD_MANIFEST_ASSET_UNREADABLE) && memchr(failed, '\0', sizeof(failed)) == NULL) {
         abort(); /* failed_path_buf must stay NUL-terminated */
     }
     check_status(reshield_verify_manifest_files(g_fz_manifest, g_fz_assets, root, NULL, 0));

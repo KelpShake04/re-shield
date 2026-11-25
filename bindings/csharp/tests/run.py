@@ -16,6 +16,7 @@ LoadAsset (release library sealed with a manifest; the dotnet host's directory i
 manifest and assets are addressed with a relative path from there):
   good asset -> OK + exact bytes; 1 byte changed -> ASSET_TAMPERED; unlisted -> ASSET_TAMPERED;
   '..' asset path -> MANIFEST_IO_ERROR; asset over the byte cap -> MANIFEST_IO_ERROR;
+  file cannot be opened (chmod 0, POSIX, not root) -> ASSET_UNREADABLE (10);
   unsealed library -> UNSEALED; no library -> -1, no exception
 """
 
@@ -121,6 +122,18 @@ def main() -> int:
             r = subprocess.run([dotnet, test_dll, lib, str(status), name, *extra], capture_output=True, text=True)
             assert r.returncode == 0, f"{label}: rc={r.returncode}\n{r.stdout}{r.stderr}"
             print(f"PASS: {label}")
+        # Unreadable: the file exists but cannot be opened -> ASSET_UNREADABLE (10), not ASSET_TAMPERED.
+        stage = os.path.join(assets, "stage1.cfg")
+        os.chmod(stage, 0)
+        if os.access(stage, os.R_OK):
+            print("SKIP: LoadAsset unreadable (still readable after chmod 0, running as root?)")
+        else:
+            r = subprocess.run([dotnet, test_dll, rel_assets_sealed, "0", "OK", *asset("stage1.cfg", 4096, 10, "-")],
+                               capture_output=True, text=True)
+            assert r.returncode == 0, f"LoadAsset unreadable: rc={r.returncode}\n{r.stdout}{r.stderr}"
+            assert "name=ASSET_UNREADABLE" in r.stdout, f"LoadAsset unreadable: status name missing\n{r.stdout}"
+            print("PASS: LoadAsset unreadable -> ASSET_UNREADABLE")
+        os.chmod(stage, 0o644)
         # Tampered: same size, one byte changed after the manifest was made and the library sealed.
         with open(os.path.join(assets, "stage1.cfg"), "r+b") as f:
             f.write(b"S")
