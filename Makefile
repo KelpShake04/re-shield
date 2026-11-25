@@ -92,6 +92,10 @@ TEST_WX                 = $(BUILD_DIR)/test_wx$(EXE)
 TEST_VERIFY_APP         = $(BUILD_DIR)/test_verify_app$(EXE)
 TEST_NO_ALLOW           = $(BUILD_DIR)/test_no_allow_unsealed$(EXE)
 TEST_SHA256_ACCEL       = $(BUILD_DIR)/test_sha256_accel$(EXE)
+TEST_INCREMENTAL        = $(BUILD_DIR)/test_incremental$(EXE)
+TEST_INCREMENTAL_DISABLED = $(BUILD_DIR)/test_incremental_disabled$(EXE)
+TEST_INCREMENTAL_REAL   = $(BUILD_DIR)/test_incremental_real$(EXE)
+TEST_INCREMENTAL_REAL_DISABLED = $(BUILD_DIR)/test_incremental_real_disabled$(EXE)
 BENCH_SHA256            = $(BUILD_DIR)/bench_sha256$(EXE)
 TEST_SAVE_SEAL          = $(BUILD_DIR)/test_save_seal$(EXE)
 TEST_MODULE_HOST        = $(BUILD_DIR)/test_module_host$(EXE)
@@ -169,6 +173,18 @@ $(TEST_MANIFEST_DISABLED): tests/test_manifest.c $(LIB_SRCS) | $(BUILD_DIR)
 
 $(TEST_WX): tests/test_wx.c $(LIB_TARGET)
 	$(CC) $(CFLAGS) $(RS_CFLAGS) $< $(LIB_TARGET) $(LDFLAGS) -o $@
+
+$(TEST_INCREMENTAL): tests/test_incremental.c src/sha256_accel.h $(LIB_TARGET)
+	$(CC) $(CFLAGS) $(RS_CFLAGS) $< $(LIB_TARGET) $(LDFLAGS) -o $@
+
+$(TEST_INCREMENTAL_DISABLED): tests/test_incremental.c $(LIB_SRCS) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(RS_CFLAGS) -DRESHIELD_DISABLE $^ $(LDFLAGS) -o $@
+
+$(TEST_INCREMENTAL_REAL): tests/test_incremental_real.c $(LIB_TARGET)
+	$(CC) $(CFLAGS) $(RS_CFLAGS) $< $(LIB_TARGET) $(LDFLAGS) -o $@
+
+$(TEST_INCREMENTAL_REAL_DISABLED): tests/test_incremental_real.c $(LIB_SRCS) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(RS_CFLAGS) -DRESHIELD_DISABLE $^ $(LDFLAGS) -o $@
 
 $(TEST_VERIFY_APP): tests/test_verify_app.c $(LIB_TARGET)
 	$(CC) $(CFLAGS) $(RS_CFLAGS) $< $(LIB_TARGET) $(LDFLAGS) -o $@
@@ -257,6 +273,7 @@ test: $(CRACKME_TEST) $(MODULE_TEST_TARGET) $(GUARD_TEST_TARGET) \
       $(TEST_INTEGRITY) $(TEST_INTEGRITY_DISABLED) \
       $(TEST_MANIFEST) $(TEST_MANIFEST_DISABLED) \
       $(TEST_RUNTIME) $(TEST_RUNTIME_DISABLED) $(TEST_WX) $(TEST_NO_ALLOW) $(TEST_VERIFY_APP) $(TEST_SHA256_ACCEL) $(TEST_SAVE_SEAL) \
+      $(TEST_INCREMENTAL) $(TEST_INCREMENTAL_DISABLED) $(TEST_INCREMENTAL_REAL) $(TEST_INCREMENTAL_REAL_DISABLED) \
       $(DEMO_INTEGRITY) $(DEMO_INTEGRITY_DISABLED) \
       $(SAMPLE_GAME) $(SAMPLE_GAME_SEALED) $(SAMPLE_GAME_DISABLED) $(SAMPLE_MANIFEST)
 	$(RUN) ./$(TEST_INTEGRITY)
@@ -269,6 +286,10 @@ test: $(CRACKME_TEST) $(MODULE_TEST_TARGET) $(GUARD_TEST_TARGET) \
 	$(RUN) ./$(TEST_SHA256_ACCEL)
 	$(RUN) ./$(TEST_WX)
 	$(RUN) ./$(TEST_SAVE_SEAL)
+	$(RUN) ./$(TEST_INCREMENTAL)
+	$(RUN) ./$(TEST_INCREMENTAL_DISABLED)
+	$(RUN) ./$(TEST_INCREMENTAL_REAL)
+	$(RUN) ./$(TEST_INCREMENTAL_REAL_DISABLED)
 	$(SEAL_WORKFLOW_TEST)
 	$(PYTHON3) tools/verify_release.py $(SAMPLE_GAME_SEALED) --allow-dev-build --manifest $(SAMPLE_MANIFEST) --assets examples/assets
 

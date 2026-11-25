@@ -1259,6 +1259,35 @@ def test_verify_release_steam_appid_warning(tmpdir: str, repo_root: str) -> None
     print("PASS: verify_release warns about steam_appid.txt (assets, manifest, binary dir) without failing")
 
 
+def test_incremental_scan(tmpdir: str, repo_root: str) -> None:
+    """Incremental scan on a sealed binary: OK, then TAMPERED after a 1-byte .text patch.
+    tests/test_incremental_real.c checks that every chunk size matches the one-shot result."""
+    src = os.path.join(repo_root, "build", "test_incremental_real")
+    seal_tool = os.path.join(repo_root, "tools", "seal_binary.py")
+    sealed = os.path.join(tmpdir, "incr_sealed")
+    shutil.copy2(src, sealed)
+    subprocess.run([sys.executable, seal_tool, sealed, "--build-id", "9"], check=True,
+                   stdout=subprocess.DEVNULL)
+    r = run_cmd([sealed])
+    assert r.returncode == 0 and "status=OK" in r.stdout, f"sealed incremental scan not OK: {r}"
+    if sys.platform.startswith("linux"):
+        assert "patch behind the cursor: TAMPERED in the next pass" in r.stdout, f"mid-scan patch test did not run: {r}"
+    print("PASS: incremental scan of a sealed binary matches the one-shot check (OK)")
+
+    with open(sealed, "rb") as f:
+        buf = bytearray(f.read())
+    off = find_symbol_file_offset(sealed, bytes(buf), "reshield_incr_sentinel")
+    buf[off] ^= 0x01
+    tampered = os.path.join(tmpdir, "incr_tampered")
+    with open(tampered, "wb") as f:
+        f.write(buf)
+    os.chmod(tampered, 0o755)
+    resign(tampered)
+    r = run_cmd([tampered])
+    assert r.returncode == 0 and "status=TAMPERED" in r.stdout, f"tampered incremental scan not TAMPERED: {r}"
+    print("PASS: incremental scan of a 1-byte-patched sealed binary matches the one-shot check (TAMPERED)")
+
+
 def main() -> int:
     repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     integrity_demo = os.path.join(repo_root, "build", "integrity_demo")
@@ -1369,6 +1398,7 @@ def main() -> int:
         test_release_cli_binary_in_assets(tmp2, repo_root)
         test_release_cli_edges(tmp2, repo_root)
         test_verify_release_steam_appid_warning(tmp2, repo_root)
+        test_incremental_scan(tmp2, repo_root)
     with tempfile.TemporaryDirectory(prefix="reshield_pe_") as tmp3:
         test_pe_support(tmp3, repo_root)
 
