@@ -20,9 +20,11 @@ jobs:
           grep -m1 "model name" /proc/cpuinfo
           make bench
       - run: |
-          make BUILD_DIR=build/nohw CFLAGS="-Wall -Wextra -Wpedantic -Werror -O2 -DRESHIELD_NO_HW_SHA" build/nohw/test_sha256_accel build/nohw/test_save_seal
+          make BUILD_DIR=build/nohw CFLAGS="-Wall -Wextra -Wpedantic -Werror -O2 -DRESHIELD_NO_HW_SHA" build/nohw/test_sha256_accel build/nohw/test_save_seal build/nohw/test_incremental build/nohw/test_incremental_real
           ./build/nohw/test_sha256_accel
           ./build/nohw/test_save_seal
+          ./build/nohw/test_incremental
+          ./build/nohw/test_incremental_real
       # The sources must also compile as C++ (engines may compile them into a C++ module).
       - run: for f in src/*.c; do c++ -x c++ -std=c++11 -fsyntax-only -Wall -Wextra -Wpedantic -Werror -Iinclude "$f" || exit 1; done
       - run: python3 tests/fuzz/test_parser_regressions.py
@@ -41,6 +43,23 @@ jobs:
           echo "ld.so rc=$rc"
           test "$rc" -ne 0 && test "$rc" -lt 128
 
+  # Linux aarch64 (GitHub-hosted arm64 runner, public repo): same build/test/release-demo and ld.so check.
+  linux-arm64:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          uname -m
+          test "$(uname -m)" = aarch64
+      - run: make clean && make all test release-demo
+      - run: |
+          cp build/integrity_demo /tmp/pie
+          python3 tools/seal_binary.py /tmp/pie --build-id 5
+          /tmp/pie
+          rc=0; /lib/ld-linux-aarch64.so.1 /tmp/pie || rc=$?
+          echo "ld.so rc=$rc"
+          test "$rc" -ne 0 && test "$rc" -lt 128
+
   # C# binding: dotnet console test loads the real shared libraries (the ubuntu runner ships the SDK).
   csharp:
     runs-on: ubuntu-latest
@@ -55,6 +74,23 @@ jobs:
       - uses: actions/checkout@v4
       - run: |
           docker run --rm -v "$PWD":/src -w /src alpine:3.22 sh -c '
+            apk add --no-cache gcc musl-dev make python3 binutils &&
+            make clean && make all test release-demo &&
+            for mode in "-pie -fPIE" "-no-pie" "-static" "-static-pie"; do
+              gcc -std=c11 -O2 -Iinclude examples/integrity_demo.c src/sha256.c src/sha256_accel.c src/integrity_common.c src/integrity_linux.c src/file_posix.c src/manifest.c src/attestation_linux.c src/reshield.c $mode -o /tmp/p &&
+              python3 tools/seal_binary.py /tmp/p --build-id 3 >/dev/null &&
+              /tmp/p | grep -q "status=OK" || { echo "FAILED: $mode"; exit 1; }
+              echo "OK: $mode"
+            done'
+
+  # Same musl matrix on aarch64 (native arm64 Alpine container).
+  linux-musl-arm64:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          docker run --rm -v "$PWD":/src -w /src alpine:3.22 sh -c '
+            uname -m && test "$(uname -m)" = aarch64 &&
             apk add --no-cache gcc musl-dev make python3 binutils &&
             make clean && make all test release-demo &&
             for mode in "-pie -fPIE" "-no-pie" "-static" "-static-pie"; do
@@ -178,6 +214,8 @@ jobs:
           cl %TFLAGS% /Fo:build\ tests\test_sha256_accel.c build\reshield.lib /Fe:build\test_sha256_accel.exe /link /INCREMENTAL:NO || set FAIL=1
           cl %TFLAGS% /Fo:build\ tests\bench_sha256.c build\reshield.lib /Fe:build\bench_sha256.exe /link /INCREMENTAL:NO || set FAIL=1
           cl %TFLAGS% /Fo:build\ tests\test_save_seal.c build\reshield.lib /Fe:build\test_save_seal.exe /link /INCREMENTAL:NO || set FAIL=1
+          cl %TFLAGS% /Fo:build\ tests\test_incremental.c build\reshield.lib /Fe:build\test_incremental.exe /link /INCREMENTAL:NO || set FAIL=1
+          cl %TFLAGS% /Fo:build\ tests\test_incremental_real.c build\reshield.lib /Fe:build\test_incremental_real.exe /link /INCREMENTAL:NO || set FAIL=1
           cl %TFLAGS% /Fo:build\ tests\test_codesign_toctou_windows.c build\reshield.lib /Fe:build\test_codesign_toctou_windows.exe /link /INCREMENTAL:NO || set FAIL=1
           if defined FAIL exit /b 1
 
@@ -185,7 +223,7 @@ jobs:
         shell: pwsh
         run: |
           $bad = 0
-          foreach ($t in 'test_integrity', 'test_manifest', 'test_runtime', 'test_wx', 'test_sha256_accel', 'test_save_seal') {
+          foreach ($t in 'test_integrity', 'test_manifest', 'test_runtime', 'test_wx', 'test_sha256_accel', 'test_save_seal', 'test_incremental', 'test_incremental_real') {
             "=== $t ==="
             & ".\build\$t.exe"
             if ($LASTEXITCODE -ne 0) { "FAILED: $t exit=$LASTEXITCODE"; $bad = 1 }
@@ -422,6 +460,56 @@ jobs:
           Run 16 "tampered asset"
           Remove-Item ..\va\vapp.manifest
           Run 18 "missing manifest"
+          Pop-Location
+          exit 0  # the last native call exited non-zero on purpose; every real failure above throws
+
+      # Strict (allowlist) manifest: the runtime walks the asset dir with FindFirstFileExW and
+      # reports files that are neither listed nor #allow'ed. Exit code = 10 + status: OK=0 ASSET_EXTRA=9.
+      - name: Strict manifest reports a dropped-in DLL (ASSET_EXTRA)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          New-Item -ItemType Directory -Force build\st, build\st_cwd | Out-Null
+          Copy-Item -Recurse examples\assets build\st\assets
+          python tools\gen_manifest.py build\st\assets -o build\st\sapp.manifest --strict --allow "saves/*"
+          if ($LASTEXITCODE -ne 0) { throw "gen_manifest --strict failed" }
+          Copy-Item build\test_verify_app.exe build\st\sapp.exe
+          python tools\seal_binary.py build\st\sapp.exe --manifest build\st\sapp.manifest --build-id 9
+          if ($LASTEXITCODE -ne 0) { throw "seal failed" }
+          python tools\verify_release.py build\st\sapp.exe --allow-dev-build --manifest build\st\sapp.manifest --assets build\st\assets
+          if ($LASTEXITCODE -ne 0) { throw "verify_release (strict) failed" }
+          $exe = Resolve-Path build\st\sapp.exe
+          $assets = Resolve-Path build\st\assets
+          Push-Location build\st_cwd
+          function Run([int]$want, [string]$what, [string]$needle = '') {
+            $out = & $exe sapp.manifest assets 2>&1 | Out-String
+            Write-Host $out
+            if ($LASTEXITCODE -ne $want) { throw "$what : expected exit $want, got $LASTEXITCODE" }
+            if ($needle -and -not $out.Contains($needle)) { throw "$what : output lacks '$needle'" }
+          }
+          Run 10 "clean strict directory"
+          New-Item -ItemType Directory -Force "$assets\saves" | Out-Null
+          Set-Content -Path "$assets\saves\slot1.sav" -Value "x" -NoNewline
+          Run 10 "file matched by #allow saves/*"
+          Set-Content -Path "$assets\evil.dll" -Value "MZ" -NoNewline
+          Run 19 "dropped-in evil.dll" "asset=evil.dll"
+          Remove-Item "$assets\evil.dll"
+          Run 10 "extra file removed"
+          New-Item -ItemType Directory -Force "$assets\sub\dir" | Out-Null
+          Set-Content -Path "$assets\sub\dir\proxy.dll" -Value "MZ" -NoNewline
+          Run 19 "extra file in a nested folder" "asset=sub/dir/proxy.dll"
+          Remove-Item -Recurse "$assets\sub"
+          Set-Content -Path "$assets\$([char]0xD55C)$([char]0xAE00).dll" -Value "MZ" -NoNewline
+          Run 19 "non-ASCII extra file name (UTF-16 to UTF-8)"
+          Remove-Item "$assets\$([char]0xD55C)$([char]0xAE00).dll"
+          Set-Content -Path "$assets\.hidden.dll" -Value "MZ" -NoNewline
+          Run 19 "dotfile is extra too" "asset=.hidden.dll"
+          Remove-Item "$assets\.hidden.dll"
+          # A junction is an item, never followed (its target holds only an allowed file).
+          New-Item -ItemType Junction -Path "$assets\jct" -Target "$assets\saves" | Out-Null
+          Run 19 "junction (reparse point) is an extra item" "asset=jct"
+          (Get-Item "$assets\jct").Delete()
+          Run 10 "junction removed"
           Pop-Location
           exit 0  # the last native call exited non-zero on purpose; every real failure above throws
 

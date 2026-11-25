@@ -17,7 +17,12 @@
   - Linux: `/proc/self/maps`에서 `.text` 범위 전체가 `r-x` 매핑으로 덮이는지 확인.
 - **구조화된 진단 리포트 (`include/reshield/reshield.h`)**: 라이브러리가 프로세스를 임의 강제 종료하지 않고 `reshield_report_t`와 콜백을 반환해 호스트 앱이 안내·로깅·안전 종료를 결정. `reshield_report_to_json()`은 리포트를 한 줄 JSON(`"v":1`)으로 직렬화한다(텔레메트리용. 클라이언트가 보낸 리포트는 위조될 수 있어 서버가 진본 증거로 쓰면 안 된다).
 - **모듈 모드**: re-shield를 실행 파일 대신 공유 라이브러리(`.so`/`.dylib`/`.dll`)에 링크하면 그 라이브러리가 봉인·검사 대상 이미지가 된다. 호스트 실행 파일(엔진 등)은 re-shield 코드가 없어도 되고 봉인하지 않는다(아래 [알려진 한계](#알려진-한계)와 [docs/integrity-verification.md](docs/integrity-verification.md#8-자기-모듈-모드-공유-라이브러리) 참고).
-- **릴리스 검증 CLI (`tools/verify_release.py`)**: CI/CD 단계에서 바이너리 봉인과 매니페스트 일치를 검증하고, 정의 심볼 수는 보고만 한다(검증하지 않음).
+- **strict 매니페스트 (v2)**: 에셋 폴더에 끼워 넣은 파일을 `RESHIELD_ERR_ASSET_EXTRA`(값 9)로 보고한다. `#allow` 글롭으로 세이브·로그 경로를 허용한다(아래 [strict 모드](#내-프로젝트에-적용하기)와 [docs/integrity-verification.md](docs/integrity-verification.md#10-매니페스트-v2와-strict-모드) 참고).
+- **SHA-256 하드웨어 가속**: 코드 섹션·에셋 해시의 블록 압축을 CPU 명령(AArch64 SHA2, x86-64 SHA-NI)으로 처리하고, 명령이 없거나 확인하지 않은 조합이면 이식성 C로 폴백한다. 라이브러리를 `-DRESHIELD_NO_HW_SHA`로 컴파일하면 끈다. 처리량은 `make bench`로 잰다(GitHub Actions 러너: macos 1441, ubuntu 1813, windows 1582 MB/s. 로컬 Apple M1 Pro: 가속 2223 MB/s, 같은 기계의 이식성 C 220 MB/s). 조건과 측정 환경은 [docs/integrity-verification.md](docs/integrity-verification.md#9-sha-256-하드웨어-가속).
+- **세이브·설정 파일 seal (`include/reshield/save_seal.h`)**: `reshield_save_tag()`/`reshield_save_verify()`가 HMAC-SHA256 태그로 캐주얼 편집·손상을 탐지한다. 키가 바이너리에 있어야 하므로 전문 공격자는 막지 못한다([docs/save-seal.md](docs/save-seal.md)).
+- **엔진 바인딩**: 평면 C 함수 `reshield_check_json()`을 부르는 C# P/Invoke 바인딩(`bindings/csharp/Reshield.cs`)과 Unity 패키지 골격(`bindings/unity/com.reshield.guard`, Unity 미검증)이 있다([docs/engines-unity.md](docs/engines-unity.md)).
+- **릴리스 검증 CLI (`tools/verify_release.py`)**: CI/CD 단계에서 바이너리 봉인과 매니페스트 일치를 검증하고, 정의 심볼 수는 보고만 한다(검증하지 않음). 개발 빌드 마커가 든 바이너리는 거부한다.
+- **GitHub Action (`action.yml`)**: `tools/reshield_release.py`(strip, 매니페스트, 봉인, 서명, 검증)를 한 단계로 실행한다([docs/steam-pipeline.md](docs/steam-pipeline.md)).
 
 ## Non-goals / Anti-goals
 
@@ -28,7 +33,7 @@
 
 ## 알려진 한계
 
-자세한 목록은 [docs/integrity-verification.md](docs/integrity-verification.md#5-한계)를 따른다. 요약: 코드 검사는 봉인 레코드가 들어 있는 이미지를 본다(정적 링크면 메인 실행 파일, re-shield를 공유 라이브러리 `.so`/`.dylib`/`.dll`에 링크했으면 그 라이브러리이며 호스트 EXE는 검사하지 않고 봉인할 필요도 없다. 다른 모듈은 보지 않고, 코드 서명 검사는 항상 프로세스 EXE 기준이다. Linux에서는 라이브러리를 절대경로로 열어야 한다), 해시 대상은 `__TEXT,__text`/`.text`뿐이고(`__stubs`, `.plt`, `__const`, 레코드가 있는 `__DATA`는 제외), 레코드의 평문 `RSHLDCHK` 매직이 수정 지점을 노출하며, 매니페스트에 없는 추가 파일은 감지하지 않고, fat/universal Mach-O는 `seal_binary.py`가 지원하지 않는다.
+자세한 목록은 [docs/integrity-verification.md](docs/integrity-verification.md#5-한계)를 따른다. 요약: 코드 검사는 봉인 레코드가 들어 있는 이미지를 본다(정적 링크면 메인 실행 파일, re-shield를 공유 라이브러리 `.so`/`.dylib`/`.dll`에 링크했으면 그 라이브러리이며 호스트 EXE는 검사하지 않고 봉인할 필요도 없다. 다른 모듈은 보지 않고, 코드 서명 검사는 항상 프로세스 EXE 기준이다. Linux에서는 라이브러리를 상대경로로 열어도 `/proc/self/maps`로 절대경로를 얻어 검증하며, `/proc`이 없거나 로드 뒤 라이브러리 파일이 지워지거나 교체되면 fail-closed다), 해시 대상은 `__TEXT,__text`/`.text`뿐이고(`__stubs`, `.plt`, `__const`, 레코드가 있는 `__DATA`는 제외), 레코드의 평문 `RSHLDCHK` 매직이 수정 지점을 노출하며, 매니페스트에 없는 추가 파일은 기본으로는 감지하지 않고(v2 strict 모드를 켜면 감지), fat/universal Mach-O는 `seal_binary.py`가 지원하지 않는다.
 
 ## 언제 쓰고, 언제 쓰지 말아야 하나
 
@@ -52,6 +57,8 @@ make test
 make release-demo
 ```
 
+그 밖의 타깃: `make shared`·`make release-shared`(모듈 모드용 공유 라이브러리), `make module-test`·`make guard-test`(둘 다 `make test`에 포함), `make csharp-test`(dotnet SDK가 있을 때), `make bench`(SHA-256 처리량), `make sanitize`(ASan+UBSan). 전체 Makefile 타깃과 CI 잡 목록: [docs/integrity-verification.md](docs/integrity-verification.md#11-도구-makefile-타깃-ci-잡).
+
 - 아키텍처 설계 및 한계: [docs/architecture.md](docs/architecture.md)
 - 코드 섹션·에셋 매니페스트 봉인 및 검증 가이드: [docs/integrity-verification.md](docs/integrity-verification.md)
 - 무엇을 막고 무엇을 못 막는지 직접 실험하는 crackme 랩(자기 바이너리만 대상): [docs/crackme-lab.md](docs/crackme-lab.md)
@@ -61,7 +68,7 @@ make release-demo
 
 ## 내 프로젝트에 적용하기
 
-지원 플랫폼은 macOS(Mach-O 64), Linux(ELF64), Windows x64(PE32+, MSVC)다. Windows는 런타임 백엔드(코드 섹션 해시, `VirtualQuery` W^X 순회, `WinVerifyTrust` 코드 서명 검사)와 봉인 도구(`seal_binary.py`/`verify_release.py`의 PE 지원)가 구현되어 있다. CI(GitHub Actions `windows-latest`)의 `windows-msvc` 잡이 `cl`로 빌드한 EXE를 봉인해 실행하고, `.text` 1바이트를 바꾼 복사본이 `CODE_TAMPERED`로 탐지되는 것까지 확인한다. 코드 서명 검사는 `WinVerifyTrust` 결과에 더해 `cfg.codesign_requirement`로 서명자 leaf 인증서를 고정할 수 있다. 형식은 `leaf-sha256:<64자리 hex>`(서명 인증서 DER의 SHA-256, 대소문자 무관)이고, 다른 문자열은 `FAILED`(fail-closed)다. 서명 안 된 EXE도 `FAILED`다. CI는 일회용 자체 서명 인증서로 봉인 뒤 서명한 EXE에서 `OK`, leaf pin 일치/불일치/형식 오류를 실제로 확인한다(공인 CA·타임스탬프 서명은 검증하지 못했다). macOS와 Windows의 requirement 문법이 달라 플랫폼별로 `#ifdef` 안에서 설정한다(Linux는 코드 서명 검사가 UNSUPPORTED지만 requirement가 있으면 통과시키지 않는다). CI는 `reshield.def`로 만든 릴리스 `reshield.dll`(모듈 모드)을 미봉인 호스트 EXE가 검사하는 테스트(미봉인, 봉인 후 `OK`, 변조 탐지, `reshield_check_json` 출력 단언)와 소스의 C++ 컴파일 게이트(`cl /TP`)도 실행한다. CI는 POSIX 전용인 `tests/test_seal_workflow.py`와 `RESHIELD_DISABLE` 변형 테스트를 Windows에서 돌리지 않는다. mingw-w64는 맥/Linux에서의 크로스 컴파일·도구 테스트 전용이며, 기본 링크 EXE는 `.text` 안 relocation 1개 때문에 봉인되지 않는다(`-Wl,--disable-dynamicbase -Wl,--disable-reloc-section`으로 봉인은 되지만 ASLR이 꺼지므로 배포용으로 권장하지 않는다). mingw 빌드는 컴파일·링크만 보고 Windows에서 실행해 검증하지 않았다. Windows ARM64와 fat/universal Mach-O는 지원하지 않는다. 자세한 내용은 [docs/integrity-verification.md](docs/integrity-verification.md#7-windows-pe32-x64).
+지원 플랫폼은 macOS(Mach-O 64), Linux(ELF64, x86-64와 aarch64), Windows x64(PE32+, MSVC)다. Linux aarch64는 CI의 네이티브 arm64 러너(`ubuntu-24.04-arm`, `uname -m`=aarch64 확인)에서 glibc(`make all test release-demo`, `ld.so ./prog` 검사)와 Alpine arm64 musl(dynamic, `-no-pie`, static, static-pie 봉인·실행)을 확인한다. aarch64에서는 `make sanitize`와 퍼저 회귀 테스트를 돌리지 않는다. Windows는 런타임 백엔드(코드 섹션 해시, `VirtualQuery` W^X 순회, `WinVerifyTrust` 코드 서명 검사)와 봉인 도구(`seal_binary.py`/`verify_release.py`의 PE 지원)가 구현되어 있다. CI(GitHub Actions `windows-latest`)의 `windows-msvc` 잡이 `cl`로 빌드한 EXE를 봉인해 실행하고, `.text` 1바이트를 바꾼 복사본이 `CODE_TAMPERED`로 탐지되는 것까지 확인한다. 코드 서명 검사는 `WinVerifyTrust` 결과에 더해 `cfg.codesign_requirement`로 서명자 leaf 인증서를 고정할 수 있다. 형식은 `leaf-sha256:<64자리 hex>`(서명 인증서 DER의 SHA-256, 대소문자 무관)이고, 다른 문자열은 `FAILED`(fail-closed)다. 서명 안 된 EXE도 `FAILED`다. CI는 일회용 자체 서명 인증서로 봉인 뒤 서명한 EXE에서 `OK`, leaf pin 일치/불일치/형식 오류를 실제로 확인한다(공인 CA·타임스탬프 서명은 검증하지 못했다). macOS와 Windows의 requirement 문법이 달라 플랫폼별로 `#ifdef` 안에서 설정한다(Linux는 코드 서명 검사가 UNSUPPORTED지만 requirement가 있으면 통과시키지 않는다). CI는 `reshield.def`로 만든 릴리스 `reshield.dll`(모듈 모드)을 미봉인 호스트 EXE가 검사하는 테스트(미봉인, 봉인 후 `OK`, 변조 탐지, `reshield_check_json` 출력 단언)와 소스의 C++ 컴파일 게이트(`cl /TP`)도 실행한다. CI는 POSIX 전용인 `tests/test_seal_workflow.py`와 `RESHIELD_DISABLE` 변형 테스트를 Windows에서 돌리지 않는다. mingw-w64는 맥/Linux에서의 크로스 컴파일·도구 테스트 전용이며, 기본 링크 EXE는 `.text` 안 relocation 1개 때문에 봉인되지 않는다(`-Wl,--disable-dynamicbase -Wl,--disable-reloc-section`으로 봉인은 되지만 ASLR이 꺼지므로 배포용으로 권장하지 않는다). mingw 빌드는 컴파일·링크만 보고 Windows에서 실행해 검증하지 않았다. Windows ARM64와 fat/universal Mach-O는 지원하지 않는다. 자세한 내용은 [docs/integrity-verification.md](docs/integrity-verification.md#7-windows-pe32-x64).
 
 **1. 링크.** `libreshield.a`를 링크하고 `-Iinclude`를 추가한다. macOS는 `-framework Security -framework CoreFoundation`도 필요하다. `RSHLDCHK` 레코드는 `libreshield.a` 안에 있으며, 앱이 `reshield_verify()`를 호출하면 바이너리에 함께 링크된다.
 
@@ -102,9 +109,11 @@ int status = reshield_check_json("game.manifest", "assets", json, sizeof json); 
 
 두 함수 모두 경로를 라이브러리가 아니라 **프로세스 실행 파일**의 디렉터리 기준으로 해석한다. re-shield를 공유 라이브러리에 링크한 모듈 모드에서도 매니페스트와 에셋은 호스트 EXE 옆에서 찾는다. 개발용 라이브러리(`make lib`/`make shared`, `-DRESHIELD_ALLOW_UNSEALED`로 컴파일)에서는 봉인되지 않은 바이너리도 `OK`로 나오고, 릴리스 라이브러리(`ALLOW_UNSEALED=0`)는 봉인된 바이너리를 요구한다.
 
-에셋 폴더 안의 바이너리나 빌드 부산물은 매니페스트에서 뺄 수 있다: `python3 tools/gen_manifest.py dist -o dist/game.manifest --exclude "*.pdb" --exclude "cache/*"`(상대 POSIX 경로에 대한 glob, 반복 가능). `reshield_release.py`도 같은 `--exclude`를 받고, 봉인하는 바이너리 자신은 항상 매니페스트에서 뺀다. 에셋 폴더 안의 바이너리나 빌드 부산물은 매니페스트에서 뺄 수 있다: `python3 tools/gen_manifest.py dist -o dist/game.manifest --exclude "*.pdb" --exclude "cache/*"`(상대 POSIX 경로에 대한 glob, 반복 가능). `reshield_release.py`도 같은 `--exclude`를 받고, 봉인하는 바이너리 자신은 항상 매니페스트에서 뺀다. 그래서 `reshield_release.py dist/game --assets dist`가 동작한다. 어떤 파일에도 매치되지 않는 패턴(오타, `./x`, 역슬래시 경로)은 `gen_manifest.py`가 stderr에 경고한다(종료 코드는 그대로).
+에셋 폴더 안의 바이너리나 빌드 부산물은 매니페스트에서 뺄 수 있다: `python3 tools/gen_manifest.py dist -o dist/game.manifest --exclude "*.pdb" --exclude "cache/*"`(상대 POSIX 경로에 대한 glob, 반복 가능). `reshield_release.py`도 같은 `--exclude`를 받고, 봉인하는 바이너리 자신은 항상 매니페스트에서 뺀다. 그래서 `reshield_release.py dist/game --assets dist`가 동작한다. 어떤 파일에도 매치되지 않는 패턴(오타, `./x`, 역슬래시 경로)은 `gen_manifest.py`가 stderr에 경고한다(종료 코드는 그대로).
 
 매니페스트 파일을 열거나 파싱할 수 없으면(경로 오류, 파일 없음, 형식이 잘못되었거나 빈 매니페스트, 그 안의 안전하지 않은 에셋 경로) `INTERNAL_ERROR`가 아니라 `MANIFEST_IO_ERROR`(`RESHIELD_ERR_MANIFEST_IO`, 값 8)로 보고한다(경로 실수가 내부 오류로 오인되지 않도록. 이전에는 `INTERNAL_ERROR`였다). 에셋 파일이 없거나 크기·해시가 다르면 변조 판정인 `ASSET_TAMPERED`(6)다.
+
+**strict(allowlist) 모드.** 에셋 폴더에 끼워 넣은 파일(프록시 DLL, 크랙, 모드)을 잡으려면 매니페스트를 `python3 tools/gen_manifest.py assets -o game.manifest --strict --allow "saves/*"`로 만든다(`tools/reshield_release.py`에는 `--strict --allow`를 준다). 매니페스트 맨 앞에 `#reshield-manifest v2 strict`와 `#allow` 줄이 들어가고 루트 해시와 함께 봉인된다. 런타임은 목록의 에셋을 모두 검증한 뒤 에셋 폴더를 열거해 목록에도 `#allow`에도 없는 파일·심볼릭 링크·특수 파일이 있으면 `ASSET_EXTRA`(`RESHIELD_ERR_ASSET_EXTRA`, 값 9)로 보고한다. 이름은 바이트로 비교하므로 APFS의 NFD 이름은 오탐이 될 수 있고, 에셋 폴더에 세이브를 쓰는 게임은 `#allow`가 필요하다. 바이너리와 매니페스트를 함께 재봉인하는 공격은 막지 못한다. 자세한 내용과 한계: [docs/integrity-verification.md](docs/integrity-verification.md#10-매니페스트-v2와-strict-모드). 이제 `#` 줄은 매니페스트 맨 앞(첫 항목 앞)에서만 허용된다(이전에는 어디서든 건너뛰었다).
 
 **3. 릴리스 파이프라인(CI).** 순서가 중요하다(링크, `strip`, 봉인, 서명, 검증). 최종 실행 파일에 한 명령으로 이 순서를 실행한다(제자리 수정).
 

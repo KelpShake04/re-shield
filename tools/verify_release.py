@@ -4,7 +4,8 @@ CI / release verification CLI for re-shield sealed binaries.
 
 Checks:
 1. Binary has a valid, matching RSHLDCHK v2 seal (code section SHA-256).
-2. If --manifest and --assets are provided, verifies manifest root binding and all assets.
+2. If --manifest and --assets are provided, verifies manifest root binding and all assets
+   (and, for a strict v2 manifest, that no unlisted, non-#allow file exists under --assets).
 3. Reports defined symbol count via nm (helpful to confirm release strip).
 4. Refuses (exit code 2) a binary that was linked against a development build of re-shield
    (the RESHIELD-DEV-BUILD-v1 marker, present only with -DRESHIELD_ALLOW_UNSEALED); --allow-dev-build
@@ -25,7 +26,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(__file__))
 import seal_binary  # noqa: E402
-from manifest_path import is_safe_relative_path  # noqa: E402
+from manifest_path import is_safe_relative_path  # noqa: E402,F401 (re-exported: tests compare it)
+from manifest_policy import ManifestError, find_extra, parse_manifest  # noqa: E402
 
 
 def count_defined_symbols(binary: str) -> int | str:
@@ -73,31 +75,28 @@ def steam_appid_warnings(binary: str, asset_dir: str | None, manifest: str | Non
 
 
 def verify_manifest_entries(manifest_path: str, asset_dir: str) -> tuple[bool, int, str]:
+    """Same rules as the C runtime (tools/manifest_policy.py mirrors src/manifest.c), including
+    the manifest v2 header and, for a strict manifest, the scan for unlisted files."""
     count = 0
     with open(manifest_path, "rb") as f:
         raw_all = f.read()
-    # Same as the C runtime: CRLF / NUL manifests are rejected, not silently normalized.
-    if b"\r" in raw_all or b"\0" in raw_all:
-        return False, count, "manifest contains CR or NUL"
-    for raw in raw_all.decode("utf-8").split("\n"):
-        if not raw or raw.startswith("#"):
-            continue
-        parts = raw.split(" ", 2)
-        if len(parts) != 3:
-            return False, count, f"malformed line: {raw}"
-        exp_hex, exp_size_s, rel = parts
-        if not (exp_size_s.isascii() and exp_size_s.isdigit()):
-            return False, count, f"malformed line: {raw}"
-        if not is_safe_relative_path(rel):
-            return False, count, f"unsafe path: {rel!r}"
+    try:
+        policy, entries = parse_manifest(raw_all)
+    except ManifestError as exc:
+        return False, count, str(exc)
+    for exp_hex, exp_size, rel in entries:
         full = os.path.join(asset_dir, rel)
         if not os.path.isfile(full):
             return False, count, f"missing asset: {rel}"
         with open(full, "rb") as af:
             data = af.read()
-        if len(data) != int(exp_size_s) or hashlib.sha256(data).hexdigest() != exp_hex:
+        if len(data) != exp_size or hashlib.sha256(data).hexdigest() != exp_hex:
             return False, count, f"hash/size mismatch: {rel}"
         count += 1
+    if policy.strict:
+        extra = find_extra(asset_dir, {rel for _h, _s, rel in entries}, policy.allow)
+        if extra is not None:
+            return False, count, f"extra file not in manifest or #allow: {extra}"
     return count > 0, count, "ok"
 
 

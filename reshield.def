@@ -4,9 +4,16 @@
 LIBRARY reshield
 EXPORTS
     reshield_verify_code_section
+    reshield_code_scan_begin
+    reshield_code_scan_step
     reshield_verify_code_page_wx
     reshield_verify_app
     reshield_check_json
     reshield_report_to_json
     reshield_status_name
+<<<<<<< HEAD
     reshield_platform_name
+=======
+    reshield_load_verified_app_asset
+    reshield_free_asset
+>>>>>>> origin/main

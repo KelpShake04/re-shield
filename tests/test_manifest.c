@@ -4,6 +4,8 @@
 
 #include "reshield/manifest.h"
 
+#include "../src/file_platform.h" /* reshield_dir_walk() is internal; unit-tested here directly */
+
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -344,7 +346,529 @@ static void test_manifest_edge_cases(void) {
     rmdir(ADIR);
     remove(MPATH);
 }
+
+/* ---- Strict (allowlist) manifest v2: tests for the "#reshield-manifest v2 strict" header ---- */
+#define SDIR "build/mt_strict"
+#define SMPATH "build/mt_strict_manifest.txt"
+#define STRICT_HDR "#reshield-manifest v2 strict\n"
+
+/* Manifest = header + the two entries a.cfg and sub/b.cfg (both "abc"). */
+static reshield_manifest_status_t sverify(const char *header, char *failed, size_t cap) {
+    char hex[65];
+    char buf[8192];
+    sha_hex("abc", 3, hex);
+    int n = snprintf(buf, sizeof(buf), "%s%s 3 a.cfg\n%s 3 sub/b.cfg\n", header, hex, hex);
+    write_file(SMPATH, buf, (size_t)n);
+    uint8_t root[RESHIELD_SHA256_SIZE];
+    reshield_sha256_file(SMPATH, root, NULL);
+    return reshield_verify_manifest_files(SMPATH, SDIR, root, failed, cap);
+}
+
+static int strict_ok(const char *header) {
+    return sverify(header, NULL, 0) == RESHIELD_MANIFEST_OK;
+}
+
+static int strict_extra(const char *header, const char *want_path) {
+    char failed[128] = { 'X', 0 };
+    reshield_manifest_status_t st = sverify(header, failed, sizeof(failed));
+    return st == RESHIELD_MANIFEST_ASSET_EXTRA && strcmp(failed, want_path) == 0;
+}
+
+static int strict_io(const char *header) {
+    return sverify(header, NULL, 0) == RESHIELD_MANIFEST_IO_ERROR;
+}
+
+/* Verifies an arbitrary manifest text against SDIR with its own SHA-256 as the root. */
+static reshield_manifest_status_t sverify_text(const char *text, char *failed, size_t cap) {
+    write_file(SMPATH, text, strlen(text));
+    uint8_t root[RESHIELD_SHA256_SIZE];
+    reshield_sha256_file(SMPATH, root, NULL);
+    return reshield_verify_manifest_files(SMPATH, SDIR, root, failed, cap);
+}
+
+typedef struct {
+    int n, found_a, found_b, absolute;
+} walk_seen_t;
+
+static int walk_record(const char *rel, void *ctx) {
+    walk_seen_t *w = (walk_seen_t *)ctx;
+    w->n++;
+    w->found_a += strcmp(rel, "a.cfg") == 0;
+    w->found_b += strcmp(rel, "sub/b.cfg") == 0;
+    w->absolute += rel[0] == '/' || rel[0] == '\\';
+    return 0;
+}
+
+static int walk_stop(const char *rel, void *ctx) {
+    (void)rel;
+    (void)ctx;
+    return 1;
+}
+
+static void test_dir_walk(void) {
+    walk_seen_t w;
+    memset(&w, 0, sizeof(w));
+    ASSERT_TRUE(reshield_dir_walk(SDIR, 32, 100, walk_record, &w) == 0 && w.n == 2 &&
+                    w.found_a == 1 && w.found_b == 1,
+                "dir_walk: lists files with '/' relative paths, directories are not reported");
+    memset(&w, 0, sizeof(w));
+    ASSERT_TRUE(reshield_dir_walk(SDIR "/", 32, 100, walk_record, &w) == 0 && w.n == 2 && !w.absolute,
+                "dir_walk: trailing '/' on the base does not leak into relative paths");
+    ASSERT_TRUE(reshield_dir_walk(SDIR, 32, 3, walk_record, &w) == 0,
+                "dir_walk: exactly max_entries entries (a.cfg, sub, sub/b.cfg) is fine");
+    ASSERT_TRUE(reshield_dir_walk(SDIR, 32, 2, walk_record, &w) == -1,
+                "dir_walk: more than max_entries entries (directories count) fails closed");
+    ASSERT_TRUE(reshield_dir_walk(SDIR, 1, 100, walk_record, &w) == 0 &&
+                    reshield_dir_walk(SDIR, 0, 100, walk_record, &w) == -1,
+                "dir_walk: nesting deeper than max_depth fails closed");
+    ASSERT_TRUE(reshield_dir_walk(SDIR, 32, 100, walk_stop, NULL) == 1,
+                "dir_walk: a non-zero visitor result stops the walk (returns 1)");
+    ASSERT_TRUE(reshield_dir_walk("build/mt_strict_nonexistent", 32, 100, walk_record, &w) == -1,
+                "dir_walk: missing base directory fails closed");
+    ASSERT_TRUE(reshield_dir_walk(SDIR "/a.cfg", 32, 100, walk_record, &w) == -1,
+                "dir_walk: a file as base fails closed");
+}
+
+/* Chain of n nested directories d/d/.../d below SDIR. */
+static void make_chain(int n) {
+    char p[512] = SDIR;
+    for (int i = 0; i < n; i++) {
+        strcat(p, "/d");
+        mkdir(p, 0755);
+    }
+}
+
+static void remove_chain(int n) {
+    for (int i = n; i > 0; i--) {
+        char p[512] = SDIR;
+        for (int j = 0; j < i; j++) {
+            strcat(p, "/d");
+        }
+        rmdir(p);
+    }
+}
+
+static void test_strict_manifest(void) {
+    char hdr[8192];
+    char failed[128];
+    char hex[65];
+    char buf[1024];
+    sha_hex("abc", 3, hex);
+
+    mkdir("build", 0755);
+    mkdir(SDIR, 0755);
+    mkdir(SDIR "/sub", 0755);
+    write_file(SDIR "/a.cfg", "abc", 3);
+    write_file(SDIR "/sub/b.cfg", "abc", 3);
+
+    ASSERT_TRUE(strict_ok(STRICT_HDR), "strict: exactly the listed files passes");
+    test_dir_walk();
+
+    /* Extra files. */
+    write_file(SDIR "/evil.dll", "MZ", 2);
+    ASSERT_TRUE(strict_extra(STRICT_HDR, "evil.dll"), "strict: dropped-in evil.dll is ASSET_EXTRA and named");
+    remove(SDIR "/evil.dll");
+    write_file(SDIR "/sub/proxy.dll", "MZ", 2);
+    ASSERT_TRUE(strict_extra(STRICT_HDR, "sub/proxy.dll"), "strict: new file in a subfolder is ASSET_EXTRA");
+    remove(SDIR "/sub/proxy.dll");
+    write_file(SDIR "/.hidden.dll", "MZ", 2);
+    ASSERT_TRUE(strict_extra(STRICT_HDR, ".hidden.dll"), "strict: dotfiles are extra too");
+    remove(SDIR "/.hidden.dll");
+    write_file(SDIR "/\xed\x95\x9c.dll", "MZ", 2); /* UTF-8 hangul */
+    ASSERT_TRUE(strict_extra(STRICT_HDR, "\xed\x95\x9c.dll"), "strict: non-ASCII extra name is reported as UTF-8");
+    remove_utf8(SDIR "/\xed\x95\x9c.dll");
+    ASSERT_TRUE(strict_ok(STRICT_HDR), "strict: passes again once the extra files are gone");
+
+    /* Empty directories are ignored. */
+    mkdir(SDIR "/emptydir", 0755);
+    ASSERT_TRUE(strict_ok(STRICT_HDR), "strict: an empty directory is ignored");
+    rmdir(SDIR "/emptydir");
+
+    /* Priority: a tampered listed asset beats an extra file; its path is the one reported. */
+    write_file(SDIR "/evil.dll", "MZ", 2);
+    write_file(SDIR "/a.cfg", "abd", 3);
+    ASSERT_TRUE(sverify(STRICT_HDR, failed, sizeof(failed)) == RESHIELD_MANIFEST_ASSET_MISMATCH &&
+                    strcmp(failed, "a.cfg") == 0,
+                "strict: ASSET_MISMATCH takes precedence over ASSET_EXTRA");
+    write_file(SDIR "/a.cfg", "abc", 3);
+    remove(SDIR "/evil.dll");
+
+    /* Allow globs. */
+    write_file(SDIR "/x.log", "l", 1);
+    ASSERT_TRUE(strict_extra(STRICT_HDR, "x.log"), "strict: unlisted x.log is extra without #allow");
+    ASSERT_TRUE(strict_ok(STRICT_HDR "#allow *.log\n"), "strict: '#allow *.log' admits x.log");
+    ASSERT_TRUE(strict_extra(STRICT_HDR "#allow *.LOG\n", "x.log"), "strict: globs are case-sensitive");
+    ASSERT_TRUE(strict_ok(STRICT_HDR "# a comment\n#allow nomatch\n#allow x.log\n"),
+                "strict: comments and several #allow lines mix");
+    remove(SDIR "/x.log");
+    mkdir(SDIR "/saves", 0755);
+    mkdir(SDIR "/saves/deep", 0755);
+    write_file(SDIR "/saves/deep/slot1.sav", "s", 1);
+    ASSERT_TRUE(strict_extra(STRICT_HDR, "saves/deep/slot1.sav"), "strict: nested unlisted file is extra");
+    ASSERT_TRUE(strict_ok(STRICT_HDR "#allow saves/*\n"),
+                "strict: '*' crosses '/' ('saves/*' admits saves/deep/slot1.sav)");
+    ASSERT_TRUE(strict_extra(STRICT_HDR "#allow saves/?\n", "saves/deep/slot1.sav"),
+                "strict: '?' is exactly one byte");
+    ASSERT_TRUE(strict_ok(STRICT_HDR "#allow saves/d?ep/slot?.sav\n"), "strict: '?' matches one byte");
+    ASSERT_TRUE(strict_extra(STRICT_HDR "#allow saves\n", "saves/deep/slot1.sav"),
+                "strict: a directory name alone does not admit its contents");
+    remove(SDIR "/saves/deep/slot1.sav");
+    rmdir(SDIR "/saves/deep");
+    rmdir(SDIR "/saves");
+    write_file(SDIR "/sub/.DS_Store", "d", 1);
+    ASSERT_TRUE(strict_ok(STRICT_HDR "#allow */.DS_Store\n"), "strict: '*/.DS_Store' admits a nested .DS_Store");
+    ASSERT_TRUE(strict_extra(STRICT_HDR "#allow .DS_Store\n", "sub/.DS_Store"),
+                "strict: '.DS_Store' alone does not admit a nested one");
+    remove(SDIR "/sub/.DS_Store");
+
+    /* 64 allow lines are fine, 65 are not; a 255-byte glob is fine, 256 is not. */
+    snprintf(hdr, sizeof(hdr), "%s", STRICT_HDR);
+    for (int i = 0; i < 64; i++) {
+        char l[32];
+        snprintf(l, sizeof(l), "#allow g%d\n", i);
+        strcat(hdr, l);
+    }
+    ASSERT_TRUE(strict_ok(hdr), "strict: 64 #allow lines accepted");
+    strcat(hdr, "#allow g64\n");
+    ASSERT_TRUE(strict_io(hdr), "strict: 65 #allow lines is IO_ERROR");
+    {
+        char glob[300];
+        memset(glob, 'g', sizeof(glob));
+        glob[255] = '\0';
+        snprintf(hdr, sizeof(hdr), "%s#allow %s\n", STRICT_HDR, glob);
+        ASSERT_TRUE(strict_ok(hdr), "strict: 255-byte glob accepted");
+        glob[255] = 'g';
+        glob[256] = '\0';
+        snprintf(hdr, sizeof(hdr), "%s#allow %s\n", STRICT_HDR, glob);
+        ASSERT_TRUE(strict_io(hdr), "strict: 256-byte glob is IO_ERROR");
+    }
+
+    /* Header errors fail closed. */
+    ASSERT_TRUE(strict_io("#reshield-manifest v3 strict\n"), "header: unknown version is IO_ERROR");
+    ASSERT_TRUE(strict_io("#reshield-manifest v2 loose\n"), "header: unknown mode is IO_ERROR");
+    ASSERT_TRUE(strict_io("#reshield-manifest v2 strict \n"), "header: trailing space is IO_ERROR");
+    ASSERT_TRUE(strict_io("#reshield-manifest v2\n#reshield-manifest v2 strict\n"),
+                "header: duplicate version directive is IO_ERROR");
+    ASSERT_TRUE(strict_io("#reshield-manifest\n"), "header: bare '#reshield-manifest' is IO_ERROR");
+    ASSERT_TRUE(strict_io(STRICT_HDR "#frobnicate yes\n"), "header: unknown directive is IO_ERROR");
+    ASSERT_TRUE(strict_io(STRICT_HDR "#Allow x\n"), "header: directive names are case-sensitive");
+    ASSERT_TRUE(strict_io("#allow *.log\n" STRICT_HDR), "header: #allow before the version line is IO_ERROR");
+    ASSERT_TRUE(strict_io("#allow *.log\n"), "header: #allow without a version line is IO_ERROR");
+    ASSERT_TRUE(strict_io(STRICT_HDR "#allow \n"), "header: empty glob is IO_ERROR");
+    ASSERT_TRUE(strict_io(STRICT_HDR "#allow /abs\n"), "header: absolute glob is IO_ERROR");
+    ASSERT_TRUE(strict_io(STRICT_HDR "#allow ../x\n"), "header: '..' glob is IO_ERROR");
+    ASSERT_TRUE(strict_io(STRICT_HDR "#allow a/../x\n"), "header: glob with '..' component is IO_ERROR");
+    ASSERT_TRUE(strict_io(STRICT_HDR "#allow a\\b\n"), "header: backslash glob is IO_ERROR");
+    ASSERT_TRUE(strict_io(STRICT_HDR "#allow a\tb\n"), "header: control character in glob is IO_ERROR");
+    ASSERT_TRUE(strict_ok(STRICT_HDR "#allow v1..2*\n"), "header: '..' inside a name is fine");
+    ASSERT_TRUE(strict_ok("#reshield-manifest v2\n"), "header: v2 without strict passes");
+    ASSERT_TRUE(strict_ok("#reshield-manifest v2\n#allow x\n"), "header: #allow in a non-strict v2 manifest is accepted");
+    ASSERT_TRUE(strict_ok("# plain comment\n#\n" STRICT_HDR), "header: comments before the directive are fine");
+    ASSERT_TRUE(strict_ok("\n" STRICT_HDR "\n"), "header: blank lines are skipped");
+    snprintf(buf, sizeof(buf), "%s 3 a.cfg\n%s 3 sub/b.cfg\n#reshield-manifest v2 strict\n", hex, hex);
+    ASSERT_TRUE(sverify_text(buf, NULL, 0) == RESHIELD_MANIFEST_IO_ERROR,
+                "header: a directive after the first entry is IO_ERROR");
+    snprintf(buf, sizeof(buf), "%s 3 a.cfg\n%s 3 sub/b.cfg\n# late comment\n", hex, hex);
+    ASSERT_TRUE(sverify_text(buf, NULL, 0) == RESHIELD_MANIFEST_IO_ERROR,
+                "header: even a plain comment after the first entry is IO_ERROR");
+
+    /* Non-strict manifests do not scan: v1 (no header) and v2 without 'strict' ignore extra files. */
+    write_file(SDIR "/evil.dll", "MZ", 2);
+    ASSERT_TRUE(strict_ok(""), "v1 manifest (no header): extra file is not detected (unchanged)");
+    ASSERT_TRUE(strict_ok("# just a comment\n"), "v1 manifest with a leading comment still works");
+    ASSERT_TRUE(strict_ok("#reshield-manifest v2\n"), "v2 non-strict: extra file is not detected");
+    snprintf(buf, sizeof(buf), "%s%s 3 a.cfg\n", STRICT_HDR, hex);
+    write_file(SMPATH, buf, strlen(buf));
+    {
+        uint8_t root[RESHIELD_SHA256_SIZE];
+        reshield_sha256_file(SMPATH, root, NULL);
+        ASSERT_TRUE(reshield_verify_single_asset(SMPATH, SDIR, "a.cfg", root) == RESHIELD_MANIFEST_OK,
+                    "strict: reshield_verify_single_asset does not scan (per-asset call)");
+        ASSERT_TRUE(reshield_verify_manifest_files(SMPATH, SDIR, root, failed, sizeof(failed)) ==
+                            RESHIELD_MANIFEST_ASSET_EXTRA && failed[0] != '\0',
+                    "strict: manifest listing only a.cfg reports an unlisted file (sub/b.cfg or evil.dll)");
+        root[0] ^= 1u;
+        ASSERT_TRUE(reshield_verify_manifest_files(SMPATH, SDIR, root, NULL, 0) == RESHIELD_MANIFEST_ROOT_MISMATCH,
+                    "strict: ROOT_MISMATCH takes precedence over ASSET_EXTRA");
+    }
+    remove(SDIR "/evil.dll");
+
+    /* Depth limit: 32 nested directories pass, 33 cannot be verified (ASSET_EXTRA, empty path). */
+    make_chain(32);
+    ASSERT_TRUE(strict_ok(STRICT_HDR), "strict: 32 nested (empty) directories pass");
+    remove_chain(32);
+    make_chain(33);
+    {
+        char f2[16] = { 'X', 0 };
+        ASSERT_TRUE(sverify(STRICT_HDR, f2, sizeof(f2)) == RESHIELD_MANIFEST_ASSET_EXTRA && f2[0] == '\0',
+                    "strict: 33 nested directories is ASSET_EXTRA with an empty path (scan incomplete)");
+    }
+    remove_chain(33);
+    ASSERT_TRUE(strict_ok(STRICT_HDR), "strict: passes again after the limit tests");
+
+#ifndef _WIN32
+    ASSERT_TRUE(symlink("a.cfg", SDIR "/link.cfg") == 0, "strict: create symlink to a listed file");
+    ASSERT_TRUE(strict_extra(STRICT_HDR, "link.cfg"), "strict: an unlisted symlink is ASSET_EXTRA (not followed)");
+    ASSERT_TRUE(strict_ok(STRICT_HDR "#allow link.cfg\n"), "strict: an #allow'ed symlink passes");
+    remove(SDIR "/link.cfg");
+    ASSERT_TRUE(symlink("does_not_exist", SDIR "/dangling") == 0, "strict: create dangling symlink");
+    ASSERT_TRUE(strict_extra(STRICT_HDR, "dangling"), "strict: a dangling symlink is ASSET_EXTRA");
+    remove(SDIR "/dangling");
+    ASSERT_TRUE(symlink("sub", SDIR "/sublink") == 0, "strict: create symlink to a directory");
+    ASSERT_TRUE(strict_extra(STRICT_HDR, "sublink"),
+                "strict: a symlinked directory is one item, not traversed");
+    remove(SDIR "/sublink");
+    ASSERT_TRUE(symlink("..", SDIR "/sub/loop") == 0, "strict: create symlink loop");
+    ASSERT_TRUE(strict_extra(STRICT_HDR, "sub/loop"), "strict: a symlink loop does not hang the scan");
+    remove(SDIR "/sub/loop");
+    ASSERT_TRUE(mkfifo(SDIR "/pipe", 0600) == 0, "strict: create FIFO");
+    ASSERT_TRUE(strict_extra(STRICT_HDR, "pipe"), "strict: a FIFO is ASSET_EXTRA (never opened)");
+    remove(SDIR "/pipe");
+    /* A listed path that is a symlink to a listed target verifies by content, as before. */
+    ASSERT_TRUE(symlink("../a.cfg", SDIR "/sub/via_link.cfg") == 0, "strict: create listed symlink");
+    snprintf(buf, sizeof(buf), "%s%s 3 a.cfg\n%s 3 sub/b.cfg\n%s 3 sub/via_link.cfg\n",
+             STRICT_HDR, hex, hex, hex);
+    ASSERT_TRUE(sverify_text(buf, NULL, 0) == RESHIELD_MANIFEST_OK,
+                "strict: a listed symlink whose target hashes right passes");
+    remove(SDIR "/sub/via_link.cfg");
+
+    /* Entry limit: a.cfg, sub, sub/b.cfg, many/ and N files = 100000 entries is the maximum. */
+    {
+        enum { LIMIT_FILES = 100000 - 4 };
+        char p[64];
+        mkdir(SDIR "/many", 0755);
+        for (int i = 0; i < LIMIT_FILES; i++) {
+            snprintf(p, sizeof(p), SDIR "/many/f%06d", i);
+            write_file(p, "", 0);
+        }
+        ASSERT_TRUE(strict_ok(STRICT_HDR "#allow many/*\n"), "strict: exactly 100000 entries passes");
+        write_file(SDIR "/many/one_more", "", 0);
+        char f2[16] = { 'X', 0 };
+        ASSERT_TRUE(sverify(STRICT_HDR "#allow many/*\n", f2, sizeof(f2)) == RESHIELD_MANIFEST_ASSET_EXTRA &&
+                        f2[0] == '\0',
+                    "strict: 100001 entries is ASSET_EXTRA with an empty path (scan incomplete)");
+        remove(SDIR "/many/one_more");
+        for (int i = 0; i < LIMIT_FILES; i++) {
+            snprintf(p, sizeof(p), SDIR "/many/f%06d", i);
+            remove(p);
+        }
+        rmdir(SDIR "/many");
+    }
 #endif
+
+    remove(SDIR "/a.cfg");
+    remove(SDIR "/sub/b.cfg");
+    rmdir(SDIR "/sub");
+    rmdir(SDIR);
+    remove(SMPATH);
+}
+#endif
+
+/* reshield_load_verified_asset(): the verified bytes are the returned bytes. Runs in the
+ * RESHIELD_DISABLE build too (there it only reads: no manifest, same path and size rules). */
+#define LDIR "build/mt_load"
+#define LMPATH "build/mt_load_manifest.txt"
+
+static void put_file(const char *path, const char *data, size_t len) {
+    FILE *f = fopen(path, "wb");
+    if (f != NULL) {
+        fwrite(data, 1, len, f);
+        fclose(f);
+    }
+}
+
+static void lhex(const char *data, size_t len, char out[65]) {
+    uint8_t h[RESHIELD_SHA256_SIZE];
+    reshield_sha256(data, len, h);
+    hash_to_hex(h, out);
+}
+
+/* The outputs are passed by address: C leaves the evaluation order of the call that fills them
+ * and of these arguments unspecified, so they are only read here, after the call returned. */
+static int loaded(reshield_manifest_status_t st, void **pbuf, size_t *plen, const char *want, size_t want_len) {
+    int ok = st == RESHIELD_MANIFEST_OK && *pbuf != NULL && *plen == want_len &&
+             (want_len == 0 || memcmp(*pbuf, want, want_len) == 0);
+    reshield_free_asset(*pbuf);
+    return ok;
+}
+
+static int refused(reshield_manifest_status_t st, void **pbuf, size_t *plen, reshield_manifest_status_t want) {
+    int ok = st == want && *pbuf == NULL && *plen == 0;
+    reshield_free_asset(*pbuf);
+    return ok;
+}
+
+static void test_load_verified_asset(void) {
+    void *buf = (void *)1;
+    size_t len = 99;
+    mkdir("build", 0755);
+    mkdir(LDIR, 0755);
+    mkdir(LDIR "/sub", 0755);
+    put_file(LDIR "/a.cfg", "abc", 3);
+    put_file(LDIR "/sub/b.cfg", "hello", 5);
+    put_file(LDIR "/empty.cfg", "", 0);
+    put_file("build/mt_load_outside.txt", "abc", 3);
+
+    char ha[65], hb[65], he[65], text[512];
+    lhex("abc", 3, ha);
+    lhex("hello", 5, hb);
+    lhex("", 0, he);
+    snprintf(text, sizeof(text), "%s 3 a.cfg\n%s 5 sub/b.cfg\n%s 0 empty.cfg\n", ha, hb, he);
+    put_file(LMPATH, text, strlen(text));
+    uint8_t root[RESHIELD_SHA256_SIZE];
+    reshield_sha256(text, strlen(text), root);
+
+#ifdef RESHIELD_DISABLE
+    ASSERT_TRUE(loaded(reshield_load_verified_asset(NULL, LDIR, "a.cfg", NULL, 16, &buf, &len), &buf, &len, "abc", 3),
+                "load (disabled): reads the file without a manifest");
+    put_file(LDIR "/a.cfg", "xyz", 3);
+    buf = (void *)1;
+    ASSERT_TRUE(loaded(reshield_load_verified_asset(LMPATH, LDIR, "a.cfg", root, 16, &buf, &len), &buf, &len, "xyz", 3),
+                "load (disabled): a modified file is not verified");
+    ASSERT_TRUE(refused(reshield_load_verified_asset(LMPATH, LDIR, "../mt_load_outside.txt", root, 16, &buf, &len),
+                        &buf, &len, RESHIELD_MANIFEST_IO_ERROR), "load (disabled): '..' path rejected");
+    ASSERT_TRUE(refused(reshield_load_verified_asset(LMPATH, LDIR, "a.cfg", root, 2, &buf, &len),
+                        &buf, &len, RESHIELD_MANIFEST_IO_ERROR), "load (disabled): over max_size is IO_ERROR");
+    ASSERT_TRUE(refused(reshield_load_verified_asset(LMPATH, LDIR, "nope.cfg", root, 16, &buf, &len),
+                        &buf, &len, RESHIELD_MANIFEST_IO_ERROR), "load (disabled): missing file is IO_ERROR");
+    ASSERT_TRUE(reshield_load_verified_asset(LMPATH, LDIR, "a.cfg", root, 16, NULL, &len) ==
+                    RESHIELD_MANIFEST_IO_ERROR, "load (disabled): NULL out_buf is IO_ERROR");
+#else
+    ASSERT_TRUE(loaded(reshield_load_verified_asset(LMPATH, LDIR, "a.cfg", root, 16, &buf, &len), &buf, &len, "abc", 3),
+                "load: valid asset returns its bytes");
+    buf = (void *)1;
+    ASSERT_TRUE(loaded(reshield_load_verified_asset(LMPATH, LDIR, "sub/b.cfg", root, 5, &buf, &len), &buf, &len, "hello", 5),
+                "load: nested asset, size exactly max_size, passes");
+    buf = (void *)1;
+    ASSERT_TRUE(loaded(reshield_load_verified_asset(LMPATH, LDIR, "empty.cfg", root, 0, &buf, &len), &buf, &len, "", 0),
+                "load: empty asset returns a non-NULL empty buffer");
+
+    /* The buffer is a copy: changing the file afterwards does not change it. */
+    buf = (void *)1;
+    reshield_manifest_status_t st = reshield_load_verified_asset(LMPATH, LDIR, "a.cfg", root, 16, &buf, &len);
+    put_file(LDIR "/a.cfg", "xyz", 3);
+    ASSERT_TRUE(st == RESHIELD_MANIFEST_OK && buf != NULL && len == 3 && memcmp(buf, "abc", 3) == 0,
+                "load: bytes stay the verified ones after the file is replaced");
+    reshield_free_asset(buf);
+
+    buf = (void *)1;
+    ASSERT_TRUE(refused(reshield_load_verified_asset(LMPATH, LDIR, "a.cfg", root, 16, &buf, &len), &buf, &len,
+                        RESHIELD_MANIFEST_ASSET_MISMATCH), "load: 1-byte change (same size) is ASSET_MISMATCH, no buffer");
+    put_file(LDIR "/a.cfg", "abcd", 4);
+    buf = (void *)1;
+    ASSERT_TRUE(refused(reshield_load_verified_asset(LMPATH, LDIR, "a.cfg", root, 16, &buf, &len), &buf, &len,
+                        RESHIELD_MANIFEST_ASSET_MISMATCH), "load: longer file is ASSET_MISMATCH");
+    put_file(LDIR "/a.cfg", "ab", 2);
+    buf = (void *)1;
+    ASSERT_TRUE(refused(reshield_load_verified_asset(LMPATH, LDIR, "a.cfg", root, 16, &buf, &len), &buf, &len,
+                        RESHIELD_MANIFEST_ASSET_MISMATCH), "load: shorter file is ASSET_MISMATCH");
+    put_file(LDIR "/a.cfg", "abc", 3);
+    remove(LDIR "/sub/b.cfg");
+    buf = (void *)1;
+    ASSERT_TRUE(refused(reshield_load_verified_asset(LMPATH, LDIR, "sub/b.cfg", root, 16, &buf, &len), &buf, &len,
+                        RESHIELD_MANIFEST_ASSET_MISMATCH), "load: missing file is ASSET_MISMATCH");
+    put_file(LDIR "/sub/b.cfg", "hello", 5);
+    put_file(LDIR "/unlisted.cfg", "abc", 3);
+    buf = (void *)1;
+    ASSERT_TRUE(refused(reshield_load_verified_asset(LMPATH, LDIR, "unlisted.cfg", root, 16, &buf, &len), &buf, &len,
+                        RESHIELD_MANIFEST_ASSET_MISMATCH), "load: a file the manifest does not list is ASSET_MISMATCH");
+
+    buf = (void *)1;
+    ASSERT_TRUE(refused(reshield_load_verified_asset(LMPATH, LDIR, "a.cfg", root, 2, &buf, &len), &buf, &len,
+                        RESHIELD_MANIFEST_IO_ERROR), "load: asset larger than max_size is IO_ERROR");
+    buf = (void *)1;
+    ASSERT_TRUE(refused(reshield_load_verified_asset(LMPATH, LDIR, "a.cfg", root, 0, &buf, &len), &buf, &len,
+                        RESHIELD_MANIFEST_IO_ERROR), "load: max_size 0 only admits an empty asset");
+
+    static const char *const bad_paths[] = { "../mt_load_outside.txt", "sub/../a.cfg", "/etc/passwd",
+                                             "sub//b.cfg", "sub\\b.cfg", "a.cfg/", "", "." };
+    for (size_t i = 0; i < sizeof(bad_paths) / sizeof(bad_paths[0]); i++) {
+        buf = (void *)1;
+        len = 99;
+        char msg[96];
+        snprintf(msg, sizeof(msg), "load: unsafe path '%s' is IO_ERROR", bad_paths[i]);
+        ASSERT_TRUE(refused(reshield_load_verified_asset(LMPATH, LDIR, bad_paths[i], root, 16, &buf, &len), &buf, &len,
+                            RESHIELD_MANIFEST_IO_ERROR), msg);
+    }
+    /* A manifest cannot list a '..' entry either, so even a file that exists outside is unreachable. */
+    snprintf(text, sizeof(text), "%s 3 ../mt_load_outside.txt\n", ha);
+    put_file("build/mt_load_m2.txt", text, strlen(text));
+    uint8_t root2[RESHIELD_SHA256_SIZE];
+    reshield_sha256(text, strlen(text), root2);
+    buf = (void *)1;
+    ASSERT_TRUE(refused(reshield_load_verified_asset("build/mt_load_m2.txt", LDIR, "../mt_load_outside.txt", root2, 16,
+                                                     &buf, &len), &buf, &len, RESHIELD_MANIFEST_IO_ERROR),
+                "load: manifest listing a '..' entry does not reach the outside file");
+    remove("build/mt_load_m2.txt");
+
+    char longbase[1100];
+    memset(longbase, 'd', sizeof(longbase) - 1);
+    longbase[sizeof(longbase) - 1] = '\0';
+    buf = (void *)1;
+    ASSERT_TRUE(refused(reshield_load_verified_asset(LMPATH, longbase, "a.cfg", root, 16, &buf, &len), &buf, &len,
+                        RESHIELD_MANIFEST_ASSET_MISMATCH), "load: a path that does not fit fails closed");
+
+    uint8_t bad_root[RESHIELD_SHA256_SIZE];
+    memcpy(bad_root, root, sizeof(bad_root));
+    bad_root[0] ^= 1u;
+    buf = (void *)1;
+    ASSERT_TRUE(refused(reshield_load_verified_asset(LMPATH, LDIR, "a.cfg", bad_root, 16, &buf, &len), &buf, &len,
+                        RESHIELD_MANIFEST_ROOT_MISMATCH), "load: wrong root is ROOT_MISMATCH, no buffer");
+    buf = (void *)1;
+    ASSERT_TRUE(refused(reshield_load_verified_asset(LMPATH, LDIR, "a.cfg", NULL, 16, &buf, &len), &buf, &len,
+                        RESHIELD_MANIFEST_UNSEALED), "load: unsealed test binary with no root is UNSEALED");
+    buf = (void *)1;
+    ASSERT_TRUE(refused(reshield_load_verified_asset("build/does_not_exist.txt", LDIR, "a.cfg", root, 16, &buf, &len),
+                        &buf, &len, RESHIELD_MANIFEST_IO_ERROR), "load: missing manifest is IO_ERROR");
+    ASSERT_TRUE(reshield_load_verified_asset(LMPATH, LDIR, "a.cfg", root, 16, NULL, &len) ==
+                        RESHIELD_MANIFEST_IO_ERROR &&
+                    reshield_load_verified_asset(LMPATH, LDIR, "a.cfg", root, 16, &buf, NULL) ==
+                        RESHIELD_MANIFEST_IO_ERROR &&
+                    reshield_load_verified_asset(NULL, LDIR, "a.cfg", root, 16, &buf, &len) ==
+                        RESHIELD_MANIFEST_IO_ERROR,
+                "load: NULL output or NULL manifest path is IO_ERROR");
+    reshield_free_asset(NULL);
+
+#ifndef _WIN32
+    /* A symlink to a regular file is read through (content stays bound to the hash); a link to a
+     * device, a dangling link and a link to different bytes are not accepted. */
+    ASSERT_TRUE(symlink("a.cfg", LDIR "/link.cfg") == 0, "load: create symlink to a regular file");
+    ASSERT_TRUE(symlink("/dev/zero", LDIR "/zero.bin") == 0, "load: create /dev/zero symlink");
+    ASSERT_TRUE(symlink("nowhere", LDIR "/dangling.cfg") == 0, "load: create dangling symlink");
+    ASSERT_TRUE(symlink("sub/b.cfg", LDIR "/bytes.cfg") == 0, "load: create symlink to other bytes");
+    snprintf(text, sizeof(text), "%s 3 link.cfg\n%s 3 zero.bin\n%s 3 dangling.cfg\n%s 3 bytes.cfg\n", ha, ha, ha, ha);
+    put_file("build/mt_load_m3.txt", text, strlen(text));
+    uint8_t root3[RESHIELD_SHA256_SIZE];
+    reshield_sha256(text, strlen(text), root3);
+    buf = (void *)1;
+    ASSERT_TRUE(loaded(reshield_load_verified_asset("build/mt_load_m3.txt", LDIR, "link.cfg", root3, 16, &buf, &len),
+                       &buf, &len, "abc", 3), "load: symlink to a matching regular file passes");
+    buf = (void *)1;
+    ASSERT_TRUE(refused(reshield_load_verified_asset("build/mt_load_m3.txt", LDIR, "zero.bin", root3, 16, &buf, &len),
+                        &buf, &len, RESHIELD_MANIFEST_ASSET_MISMATCH), "load: symlink to /dev/zero is ASSET_MISMATCH");
+    buf = (void *)1;
+    ASSERT_TRUE(refused(reshield_load_verified_asset("build/mt_load_m3.txt", LDIR, "dangling.cfg", root3, 16, &buf, &len),
+                        &buf, &len, RESHIELD_MANIFEST_ASSET_MISMATCH), "load: dangling symlink is ASSET_MISMATCH");
+    buf = (void *)1;
+    ASSERT_TRUE(refused(reshield_load_verified_asset("build/mt_load_m3.txt", LDIR, "bytes.cfg", root3, 16, &buf, &len),
+                        &buf, &len, RESHIELD_MANIFEST_ASSET_MISMATCH), "load: symlink to other bytes is ASSET_MISMATCH");
+    remove(LDIR "/link.cfg");
+    remove(LDIR "/zero.bin");
+    remove(LDIR "/dangling.cfg");
+    remove(LDIR "/bytes.cfg");
+    remove("build/mt_load_m3.txt");
+#endif
+#endif
+
+    remove(LDIR "/a.cfg");
+    remove(LDIR "/sub/b.cfg");
+    remove(LDIR "/empty.cfg");
+    remove(LDIR "/unlisted.cfg");
+    rmdir(LDIR "/sub");
+    rmdir(LDIR);
+    remove(LMPATH);
+    remove("build/mt_load_outside.txt");
+}
 
 int main(void) {
     const char *asset_path = "build/test_asset_tmp.txt";
@@ -411,7 +935,9 @@ int main(void) {
 
 #ifndef RESHIELD_DISABLE
     test_manifest_edge_cases();
+    test_strict_manifest();
 #endif
+    test_load_verified_asset();
 
     if (g_failures > 0) {
         fprintf(stderr, "%d test(s) failed.\n", g_failures);

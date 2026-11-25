@@ -8,13 +8,6 @@
 #include <stdio.h>
 #include <string.h>
 
-typedef struct {
-    uint32_t state[8];
-    uint64_t bitlen;
-    uint8_t  data[64];
-    size_t   datalen;
-} sha256_ctx_t;
-
 static const uint32_t K[64] = {
     0x428a2f98u, 0x71374491u, 0xb5c0fbcfu, 0xe9b5dba5u,
     0x3956c25bu, 0x59f111f1u, 0x923f82a4u, 0xab1c5ed5u,
@@ -160,6 +153,18 @@ static void sha256_final(sha256_ctx_t *ctx, uint8_t hash[32]) {
         hash[j * 4 + 2] = (uint8_t)((ctx->state[j] >> 8)  & 0xffu);
         hash[j * 4 + 3] = (uint8_t)(ctx->state[j] & 0xffu);
     }
+}
+
+void reshield_sha256_ctx_init(sha256_ctx_t *ctx) {
+    sha256_init(ctx);
+}
+
+void reshield_sha256_ctx_update(sha256_ctx_t *ctx, const uint8_t *data, size_t len) {
+    sha256_update(ctx, data, len);
+}
+
+void reshield_sha256_ctx_final(sha256_ctx_t *ctx, uint8_t out_hash[32]) {
+    sha256_final(ctx, out_hash);
 }
 
 void reshield_sha256(const void *data, size_t len, uint8_t out_hash[RESHIELD_SHA256_SIZE]) {

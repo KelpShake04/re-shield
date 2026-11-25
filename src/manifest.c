@@ -17,6 +17,27 @@ extern int reshield_sha256_file_limited(const char *path,
 #define RESHIELD_MANIFEST_MAX_BYTES (4u * 1024u * 1024u)
 #define RESHIELD_MANIFEST_MAX_LINE  1023u
 
+/* Manifest v2 header (see docs/integrity-verification.md, section 10). */
+#define RESHIELD_MANIFEST_MAX_ALLOW 64u
+#define RESHIELD_ALLOW_MAX_GLOB     255u
+#define RESHIELD_STRICT_MAX_DEPTH   32u
+#define RESHIELD_STRICT_MAX_ENTRIES 100000u
+#define RESHIELD_GLOB_BUDGET        (1u << 28) /* total matcher steps per strict scan */
+
+typedef struct {
+    int         strict;
+    int         seen_version;
+    size_t      n_allow;
+    const char *allow[RESHIELD_MANIFEST_MAX_ALLOW]; /* point into the manifest buffer */
+} manifest_policy_t;
+
+typedef struct {
+    char             *cursor;
+    char             *end;
+    int               in_header; /* '#' lines are only valid before the first entry line */
+    manifest_policy_t policy;
+} manifest_iter_t;
+
 static int hex_nibble(char c) {
     if (c >= '0' && c <= '9') return c - '0';
     if (c >= 'a' && c <= 'f') return c - 'a' + 10;
@@ -35,7 +56,10 @@ static int parse_sha256_hex(const char *hex, uint8_t out[RESHIELD_SHA256_SIZE]) 
     }
     return 0;
 }
+#endif /* !RESHIELD_DISABLE */
 
+/* Path rules and the bounded reader below are also used by reshield_load_verified_asset()
+ * in a -DRESHIELD_DISABLE build (which loads without verifying). */
 static char ascii_upper(char c) {
     return (c >= 'a' && c <= 'z') ? (char)(c - 'a' + 'A') : c;
 }
@@ -104,6 +128,50 @@ static int is_safe_relative_path(const char *rel) {
     }
 }
 
+/* Builds "<base>/<rel>" (just rel when base is NULL or ""). Returns 0, or -1 if it does not
+ * fit (fail closed, never truncated). */
+static int build_asset_path(char *out, size_t cap, const char *base, const char *rel) {
+    int n = (base != NULL && base[0] != '\0') ? snprintf(out, cap, "%s/%s", base, rel)
+                                              : snprintf(out, cap, "%s", rel);
+    return (n <= 0 || (size_t)n >= cap) ? -1 : 0;
+}
+
+/* Reads a regular file once, in one open, into a fresh malloc buffer (+1 spare byte, so a file
+ * that grew is noticed). The size comes from the open handle, not from a second stat.
+ * want_size != NULL: the file must be exactly that long. Returns 0 (out and out_len set, the
+ * caller frees), 1 if the file is larger than max_size (nothing read), -1 on any other failure. */
+static int read_asset(const char *path, size_t max_size, const uint64_t *want_size,
+                      uint8_t **out, size_t *out_len) {
+    reshield_file_t file;
+    uint64_t size = 0;
+    if (reshield_file_open_regular(path, &file, &size) != 0) {
+        return -1;
+    }
+    if (want_size != NULL && size != *want_size) {
+        reshield_file_close(file);
+        return -1;
+    }
+    if (size > max_size || size >= (uint64_t)SIZE_MAX) {
+        reshield_file_close(file);
+        return 1;
+    }
+    uint8_t *buf = (uint8_t *)malloc((size_t)size + 1u);
+    if (buf == NULL) {
+        reshield_file_close(file);
+        return -1;
+    }
+    intptr_t n = reshield_file_read_full(file, buf, (size_t)size + 1u);
+    reshield_file_close(file);
+    if (n < 0 || (uint64_t)n != size) { /* read error, shrank or grew while reading */
+        free(buf);
+        return -1;
+    }
+    *out = buf;
+    *out_len = (size_t)size;
+    return 0;
+}
+
+#ifndef RESHIELD_DISABLE
 static void copy_failed_path(char *dst, size_t cap, const char *src) {
     if (dst == NULL || cap == 0 || src == NULL) {
         return;
@@ -219,28 +287,163 @@ static reshield_manifest_status_t load_verified_manifest(
     return RESHIELD_MANIFEST_OK;
 }
 
+/* An #allow glob is a relative POSIX path pattern: no leading '/', no control characters or
+ * '\', no ".." component, 1..255 bytes. '*' and '?' are the only wildcards. */
+static int is_valid_glob(const char *g, size_t len) {
+    if (len == 0 || len > RESHIELD_ALLOW_MAX_GLOB || g[0] == '/') {
+        return 0;
+    }
+    for (size_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)g[i];
+        if (c < 0x20 || c == 0x7f || c == '\\') {
+            return 0;
+        }
+        if ((i == 0 || g[i - 1] == '/') && c == '.' && i + 1 < len && g[i + 1] == '.' &&
+            (i + 2 == len || g[i + 2] == '/')) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* '#' line inside the header block (line[0] == '#', NUL-terminated, length len).
+ * "# ..." and a bare "#" are comments; "#reshield-manifest v2[ strict]" and "#allow <glob>"
+ * are directives; anything else (unknown directive, bad version, bad glob, too many
+ * #allow lines, #allow before the version line) is an error: fail closed. */
+static int parse_header_line(const char *line, size_t len, manifest_policy_t *p) {
+    if (len == 1 || line[1] == ' ') {
+        return 0;
+    }
+    if (strncmp(line, "#reshield-manifest ", 19) == 0) {
+        if (p->seen_version) {
+            return -1;
+        }
+        if (strcmp(line + 19, "v2") == 0) {
+            p->strict = 0;
+        } else if (strcmp(line + 19, "v2 strict") == 0) {
+            p->strict = 1;
+        } else {
+            return -1;
+        }
+        p->seen_version = 1;
+        return 0;
+    }
+    if (strncmp(line, "#allow ", 7) == 0) {
+        if (!p->seen_version || p->n_allow >= RESHIELD_MANIFEST_MAX_ALLOW ||
+            !is_valid_glob(line + 7, len - 7u)) {
+            return -1;
+        }
+        p->allow[p->n_allow++] = line + 7;
+        return 0;
+    }
+    return -1;
+}
+
+static void iter_init(manifest_iter_t *it, char *buf, size_t len) {
+    memset(it, 0, sizeof(*it));
+    it->cursor = buf;
+    it->end = buf + len;
+    it->in_header = 1;
+}
+
 /* Returns 1 and fills the outputs for the next entry, 0 at end of buffer, -1 on a
- * malformed or over-long line. Blank lines and '#' comments are skipped. Modifies buf. */
-static int next_manifest_entry(char **cursor,
-                               char *end,
+ * malformed or over-long line. Blank lines are skipped; '#' lines are header lines (v2
+ * directives or comments) before the first entry and an error after it. Modifies buf. */
+static int next_manifest_entry(manifest_iter_t *it,
                                uint8_t out_hash[RESHIELD_SHA256_SIZE],
                                uint64_t *out_size,
                                const char **out_rel_path) {
-    while (*cursor < end) {
-        char *line = *cursor;
-        char *nl = (char *)memchr(line, '\n', (size_t)(end - line));
-        size_t len = nl != NULL ? (size_t)(nl - line) : (size_t)(end - line);
-        *cursor = nl != NULL ? nl + 1 : end;
+    while (it->cursor < it->end) {
+        char *line = it->cursor;
+        char *nl = (char *)memchr(line, '\n', (size_t)(it->end - line));
+        size_t len = nl != NULL ? (size_t)(nl - line) : (size_t)(it->end - line);
+        it->cursor = nl != NULL ? nl + 1 : it->end;
         if (len > RESHIELD_MANIFEST_MAX_LINE) {
             return -1;
         }
         line[len] = '\0';
-        if (len == 0 || line[0] == '#') {
+        if (len == 0) {
             continue;
         }
+        if (line[0] == '#') {
+            if (!it->in_header || parse_header_line(line, len, &it->policy) != 0) {
+                return -1;
+            }
+            continue;
+        }
+        it->in_header = 0;
         return parse_manifest_line(line, out_hash, out_size, out_rel_path) == 0 ? 1 : -1;
     }
     return 0;
+}
+
+/* Iterative '*' / '?' matcher (no recursion). '*' matches any byte string including '/',
+ * '?' any single byte, everything else byte for byte (case-sensitive). Returns 1 on a
+ * match, 0 on none, -1 when the shared step budget ran out (callers treat it as no match). */
+static int glob_match(const char *g, const char *s, uint32_t *budget) {
+    const char *star = NULL;
+    const char *mark = NULL;
+    while (*s != '\0') {
+        if (*budget == 0) {
+            return -1;
+        }
+        (*budget)--;
+        if (*g == '*') {
+            star = g++;
+            mark = s;
+        } else if (*g == '?' || *g == *s) {
+            g++;
+            s++;
+        } else if (star != NULL) {
+            g = star + 1;
+            s = ++mark;
+        } else {
+            return 0;
+        }
+    }
+    while (*g == '*') {
+        g++;
+    }
+    return *g == '\0';
+}
+
+static int cmp_name_ptr(const void *a, const void *b) {
+    return strcmp(*(const char *const *)a, *(const char *const *)b);
+}
+
+typedef struct {
+    const char *const       *names; /* sorted manifest entry paths */
+    size_t                   n;
+    const manifest_policy_t *policy;
+    uint32_t                 budget;
+    char                    *failed;
+    size_t                   failed_cap;
+} strict_scan_t;
+
+/* Visitor for reshield_dir_walk: returns 1 (stop) for an entry that is neither listed in the
+ * manifest nor matched by an #allow glob. */
+static int strict_visit(const char *rel, void *vctx) {
+    strict_scan_t *sc = (strict_scan_t *)vctx;
+    size_t lo = 0, hi = sc->n;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        int c = strcmp(sc->names[mid], rel);
+        if (c == 0) {
+            return 0;
+        }
+        if (c < 0) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    for (size_t i = 0; i < sc->policy->n_allow; i++) {
+        if (glob_match(sc->policy->allow[i], rel, &sc->budget) == 1) {
+            return 0;
+        }
+    }
+    copy_failed_path(sc->failed, sc->failed_cap, rel);
+    return 1;
 }
 
 static int verify_one_asset_entry(const char *asset_base_dir,
@@ -248,13 +451,7 @@ static int verify_one_asset_entry(const char *asset_base_dir,
                                   uint64_t expected_size,
                                   const uint8_t expected_hash[RESHIELD_SHA256_SIZE]) {
     char full_path[1024];
-    int n = 0;
-    if (asset_base_dir != NULL && asset_base_dir[0] != '\0') {
-        n = snprintf(full_path, sizeof(full_path), "%s/%s", asset_base_dir, rel_path);
-    } else {
-        n = snprintf(full_path, sizeof(full_path), "%s", rel_path);
-    }
-    if (n <= 0 || (size_t)n >= sizeof(full_path)) {
+    if (build_asset_path(full_path, sizeof(full_path), asset_base_dir, rel_path) != 0) {
         return 0;
     }
 
@@ -298,13 +495,16 @@ reshield_manifest_status_t reshield_verify_manifest_files(
         return st;
     }
 
-    char *cursor = buf;
+    manifest_iter_t it;
+    iter_init(&it, buf, len);
+    const char **names = NULL; /* entry paths, only collected when the manifest is strict */
+    size_t n_names = 0;
     int entries = 0;
     for (;;) {
         uint8_t exp_hash[RESHIELD_SHA256_SIZE];
         uint64_t exp_size = 0;
         const char *rel_path = NULL;
-        int r = next_manifest_entry(&cursor, buf + len, exp_hash, &exp_size, &rel_path);
+        int r = next_manifest_entry(&it, exp_hash, &exp_size, &rel_path);
         if (r < 0) {
             st = RESHIELD_MANIFEST_IO_ERROR;
             break;
@@ -320,8 +520,33 @@ reshield_manifest_status_t reshield_verify_manifest_files(
             st = RESHIELD_MANIFEST_ASSET_MISMATCH;
             break;
         }
+        if (it.policy.strict) {
+            if (names == NULL) {
+                /* An entry line needs >= 68 bytes, so len / 68 + 1 slots always suffice. */
+                names = (const char **)malloc((len / 68u + 1u) * sizeof(*names));
+                if (names == NULL) {
+                    st = RESHIELD_MANIFEST_IO_ERROR;
+                    break;
+                }
+            }
+            names[n_names++] = rel_path;
+        }
     }
 
+    /* Strict scan runs only after every listed asset verified, so ROOT_MISMATCH, IO_ERROR and
+     * ASSET_MISMATCH take precedence over ASSET_EXTRA. */
+    if (st == RESHIELD_MANIFEST_OK && it.policy.strict) {
+        qsort((void *)names, n_names, sizeof(*names), cmp_name_ptr);
+        strict_scan_t sc = { (const char *const *)names, n_names, &it.policy, RESHIELD_GLOB_BUDGET,
+                             failed_path_buf, failed_path_cap };
+        copy_failed_path(failed_path_buf, failed_path_cap, "");
+        if (reshield_dir_walk(asset_base_dir, RESHIELD_STRICT_MAX_DEPTH,
+                              RESHIELD_STRICT_MAX_ENTRIES, strict_visit, &sc) != 0) {
+            st = RESHIELD_MANIFEST_ASSET_EXTRA; /* extra file found, or the scan could not finish */
+        }
+    }
+
+    free((void *)names);
     free(buf);
     return st;
 #endif
@@ -351,13 +576,14 @@ reshield_manifest_status_t reshield_verify_single_asset(
         return st;
     }
 
-    char *cursor = buf;
+    manifest_iter_t it;
+    iter_init(&it, buf, len);
     st = RESHIELD_MANIFEST_ASSET_MISMATCH;
     for (;;) {
         uint8_t exp_hash[RESHIELD_SHA256_SIZE];
         uint64_t exp_size = 0;
         const char *rel_path = NULL;
-        int r = next_manifest_entry(&cursor, buf + len, exp_hash, &exp_size, &rel_path);
+        int r = next_manifest_entry(&it, exp_hash, &exp_size, &rel_path);
         if (r < 0) {
             st = RESHIELD_MANIFEST_IO_ERROR;
             break;
@@ -376,4 +602,100 @@ reshield_manifest_status_t reshield_verify_single_asset(
     free(buf);
     return st;
 #endif
+}
+
+reshield_manifest_status_t reshield_load_verified_asset(
+    const char *manifest_path,
+    const char *asset_base_dir,
+    const char *asset_rel_path,
+    const uint8_t *expected_root_sha256,
+    size_t max_size,
+    void **out_buf,
+    size_t *out_len) {
+    if (out_buf == NULL || out_len == NULL) {
+        return RESHIELD_MANIFEST_IO_ERROR;
+    }
+    *out_buf = NULL;
+    *out_len = 0;
+    if (!is_safe_relative_path(asset_rel_path)) {
+        return RESHIELD_MANIFEST_IO_ERROR;
+    }
+#ifdef RESHIELD_DISABLE
+    (void)manifest_path;
+    (void)expected_root_sha256;
+    char path[1024];
+    uint8_t *data = NULL;
+    size_t len = 0;
+    if (build_asset_path(path, sizeof(path), asset_base_dir, asset_rel_path) != 0 ||
+        read_asset(path, max_size, NULL, &data, &len) != 0) {
+        return RESHIELD_MANIFEST_IO_ERROR;
+    }
+    *out_buf = data;
+    *out_len = len;
+    return RESHIELD_MANIFEST_OK;
+#else
+    if (manifest_path == NULL) {
+        return RESHIELD_MANIFEST_IO_ERROR;
+    }
+
+    char *buf = NULL;
+    size_t len = 0;
+    reshield_manifest_status_t st = load_verified_manifest(manifest_path, expected_root_sha256,
+                                                           &buf, &len);
+    if (st != RESHIELD_MANIFEST_OK) {
+        return st;
+    }
+
+    manifest_iter_t it;
+    iter_init(&it, buf, len);
+    st = RESHIELD_MANIFEST_ASSET_MISMATCH; /* not listed */
+    for (;;) {
+        uint8_t exp_hash[RESHIELD_SHA256_SIZE];
+        uint64_t exp_size = 0;
+        const char *rel_path = NULL;
+        int r = next_manifest_entry(&it, exp_hash, &exp_size, &rel_path);
+        if (r < 0) {
+            st = RESHIELD_MANIFEST_IO_ERROR;
+            break;
+        }
+        if (r == 0) {
+            break;
+        }
+        if (strcmp(rel_path, asset_rel_path) != 0) {
+            continue;
+        }
+        /* Same rules as verify_one_asset_entry(), but the bytes that are hashed are the bytes
+         * handed back: one open, one read, no re-open between check and use. */
+        char path[1024];
+        uint8_t *data = NULL;
+        size_t dlen = 0;
+        int rc = build_asset_path(path, sizeof(path), asset_base_dir, rel_path) != 0
+                     ? -1
+                     : read_asset(path, max_size, &exp_size, &data, &dlen);
+        if (rc == 1) {
+            st = RESHIELD_MANIFEST_IO_ERROR; /* larger than the caller allows: not a tamper verdict */
+        } else if (rc != 0) {
+            st = RESHIELD_MANIFEST_ASSET_MISMATCH;
+        } else {
+            uint8_t actual[RESHIELD_SHA256_SIZE];
+            reshield_sha256(data, dlen, actual);
+            if (reshield_digest_equal(actual, exp_hash)) {
+                *out_buf = data;
+                *out_len = dlen;
+                st = RESHIELD_MANIFEST_OK;
+            } else {
+                free(data);
+                st = RESHIELD_MANIFEST_ASSET_MISMATCH;
+            }
+        }
+        break;
+    }
+
+    free(buf);
+    return st;
+#endif
+}
+
+void reshield_free_asset(void *buf) {
+    free(buf);
 }

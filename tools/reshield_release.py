@@ -8,6 +8,7 @@ Run it on the final linked executable or shared library, in place:
     python3 tools/reshield_release.py dist/game --assets dist --exclude "*.pdb"
     python3 tools/reshield_release.py dist/game --assets dist/assets --sign "Developer ID Application: Me (TEAMID)"
     python3 tools/reshield_release.py dist/game.exe --assets dist/assets --sign-cmd "signtool sign /fd sha256 /a {}"
+    python3 tools/reshield_release.py dist/game --assets dist/assets --strict --allow "saves/*"
 
 Sealing rewrites the binary, so signing must come after it (and strip before it). This tool only
 calls the existing tools (gen_manifest.py, seal_binary.py, verify_release.py) plus strip/codesign,
@@ -54,7 +55,13 @@ def main() -> int:
     p.add_argument("--assets", help="Asset directory to bind (a manifest is generated from it)")
     p.add_argument("--exclude", action="append", default=[], metavar="GLOB",
                    help="Leave files matching GLOB (relative POSIX path under --assets) out of the "
-                        "manifest; repeatable. The binary itself is excluded automatically.")
+                        "manifest; repeatable. The binary itself is excluded automatically. "
+                        "With --strict an excluded file is allowed automatically.")
+    p.add_argument("--strict", action="store_true",
+                   help="Strict manifest: the runtime reports ASSET_EXTRA for any file under --assets "
+                        "that is not listed or --allow'ed (see docs/integrity-verification.md)")
+    p.add_argument("--allow", action="append", default=[], metavar="GLOB",
+                   help="With --strict: path glob exempt from the scan, relative to --assets; repeatable")
     p.add_argument("--manifest-out",
                    help="Manifest output path (default: <binary dir>/<binary name without extension>.manifest)")
     p.add_argument("--build-id", type=int,
@@ -70,6 +77,8 @@ def main() -> int:
                    help="Accept a binary linked against a development build of re-shield "
                         "(demos and CI only; never for a shipped build)")
     args = p.parse_args()
+    if args.allow and not args.strict:
+        p.error("--allow needs --strict")
 
     build_id = args.build_id
     if build_id is None:
@@ -122,6 +131,10 @@ def main() -> int:
         gen = [sys.executable, os.path.join(TOOLS, "gen_manifest.py"), args.assets, "-o", manifest]
         for pattern in exclude:
             gen += ["--exclude", pattern]
+        if args.strict:
+            gen.append("--strict")  # gen_manifest allows the excluded binary and the manifest itself
+        for g in args.allow:
+            gen += ["--allow", g]
         run(gen)
 
     seal = [sys.executable, os.path.join(TOOLS, "seal_binary.py"), binary,
